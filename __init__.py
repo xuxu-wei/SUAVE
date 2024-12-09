@@ -1,3 +1,3 @@
 import sys
 
-from . import HybridVAEMultiTaskModel, HybridVAEMultiTaskSklearn
+from .HybridVAE import HybridVAEMultiTaskModel, HybridVAEMultiTaskSklearn
