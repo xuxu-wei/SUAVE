@@ -1,7 +1,3 @@
-Here’s the updated **repository introduction** based on your refined description:
-
----
-
 # Hybrid Variational Autoencoder (VAE) with Multi-Task Learning (MTL)
 
 This repository provides an implementation of a **Hybrid Variational Autoencoder (VAE)** integrated with **Multi-Task Learning (MTL)** for dimensionality reduction and predictive modeling. The model uniquely combines **unsupervised latent representation learning** with **supervised learning**, allowing the latent space to be guided by label information for downstream prediction tasks. 
@@ -46,9 +42,7 @@ This dual-objective framework ensures that the latent space is both informative 
 
 Clone this repository and install the required dependencies:
 ```bash
-git clone https://github.com/<your-username>/<repo-name>.git
-cd <repo-name>
-pip install -r requirements.txt
+git clone https://github.com/xuxu-wei/HybridVAE.git
 ```
 
 ---
@@ -57,7 +51,7 @@ pip install -r requirements.txt
 
 ### Define and Train the Model
 ```python
-from model import HybridVAEMultiTaskSklearn
+from HybridVAE import HybridVAEMultiTaskSklearn
 
 # Initialize the model
 model = HybridVAEMultiTaskSklearn(input_dim=X_train.shape[1],          # Input feature dimension
