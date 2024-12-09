@@ -25,7 +25,7 @@ This dual-objective framework ensures that the latent space is both informative 
 - **Batch Normalization and Dropout**: Improves training stability and prevents overfitting.  
 
 ### 4. Scikit-Learn Integration
-- The `HybridVAEMultiTaskSklearn` wrapper is fully compatible with scikit-learn pipelines, enabling easy integration with tools like `GridSearchCV` for hyperparameter tuning.
+- The `HybridVAEMultiTaskSklearn` wrapper is  compatible with scikit-learn pipelines, enabling easy integration with tools like `GridSearchCV` for hyperparameter tuning.
 
 ### 5. Training Utilities
 - **Joint Loss Optimization**: Combines VAE losses (reconstruction + KL divergence) with task-specific binary cross-entropy loss.  
@@ -60,14 +60,13 @@ pip install -r requirements.txt
 from model import HybridVAEMultiTaskSklearn
 
 # Initialize the model
-model = HybridVAEMultiTaskSklearn(
-    input_dim=30,          # Input feature dimension
-    task_count=2,          # Number of binary classification tasks
-    latent_dim=10          # Latent space dimension
-)
+model = HybridVAEMultiTaskSklearn(input_dim=X_train.shape[1],          # Input feature dimension
+                                  task_count=Y_train.shape[1],         # Number of binary classification tasks
+                                  latent_dim=10,                       # Latent space dimension
+                                  )
 
 # Train the model
-model.fit(X_train, Y_train, epochs=1000)
+model.fit(X_train, Y_train, epochs=1000, animate_monitor=True, verbose=1)
 
 # Evaluate performance
 predictions = model.predict(X_test)
@@ -84,26 +83,16 @@ latent_features = model.transform(X_test)
 reconstructed_features = model.inverse_transform(latent_features)
 ```
 
----
 
-## Repository Structure
-
-- **`model.py`**: Contains the implementation of `HybridVAEMultiTaskModel` and `HybridVAEMultiTaskSklearn`.  
-- **`requirements.txt`**: Lists required Python packages.  
-- **`examples/`**: Includes example scripts demonstrating model usage.  
-
----
 
 ## Contributions
 
 Contributions are welcome! Feel free to open an issue or submit a pull request to suggest improvements, report bugs, or add features.
 
----
+
 
 ## License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+This project is licensed under the **BSD 3-Clause License** . See the `LICENSE` file for details.
 
---- 
 
-This introduction emphasizes the hybrid learning paradigm, the utility of latent space supervision, and the versatility of the framework. It’s well-suited for showcasing the repository's functionality and potential use cases.
