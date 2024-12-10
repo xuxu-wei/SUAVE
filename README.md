@@ -78,13 +78,6 @@ reconstructed_features = model.inverse_transform(latent_features)
 ```
 
 
-
-## Contributions
-
-Contributions are welcome! Feel free to open an issue or submit a pull request to suggest improvements, report bugs, or add features.
-
-
-
 ## License
 
 This project is licensed under the **BSD 3-Clause License** . See the `LICENSE` file for details.
