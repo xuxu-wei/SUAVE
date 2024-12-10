@@ -1,4 +1,5 @@
-import os, sys
+import os, sys, json
+import inspect
 from tqdm import tqdm
 import numpy as np
 import torch
@@ -513,7 +514,8 @@ class HybridVAEMultiTaskModel(nn.Module):
         self.lr_scheduler_factor = lr_scheduler_factor
         self.lr_scheduler_patience = lr_scheduler_patience
         self.use_batch_norm = use_batch_norm
-
+        self.to(DEVICE)
+        
     def reset_parameters(self, seed=19960816):
         for layer in self.modules():
             if isinstance(layer, (nn.Linear, nn.Conv2d)):
@@ -884,7 +886,7 @@ class HybridVAEMultiTaskModel(nn.Module):
 
         # Save final weights
         if save_weights_path:
-            self.save_model(save_weights_path, "final")
+            self.save_complete_model(save_weights_path)
             print(f'最终模型参数已保存: {os.path.join(save_weights_path, f"epoch_final.pth")}') if verbose > 0 else None
 
         return self
@@ -959,7 +961,28 @@ class HybridVAEMultiTaskModel(nn.Module):
             
         plt.close()
 
+    def save_config(self, config_path):
+        """
+        Save the initialization parameters to a JSON file.
 
+        Parameters
+        ----------
+        config_path : str
+            Path to save the configuration file.
+        """
+        # Get init parameters and their default values
+        init_params = inspect.signature(self.__init__).parameters
+
+        # Only save parameters explicitly provided during initialization
+        config = {
+            k: getattr(self, k)
+            for k in init_params if k != "self" and hasattr(self, k)
+        }
+
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=4)
+        print(f"Model configuration saved to {config_path}")
+    
     def save_model(self, save_path, epoch):
         """
         Save model weights.
@@ -975,6 +998,77 @@ class HybridVAEMultiTaskModel(nn.Module):
             os.makedirs(save_path, exist_ok=True)
             torch.save(self.state_dict(), os.path.join(save_path, f"epoch_{epoch}.pth"))
 
+    def save_complete_model(self, save_dir):
+        """
+        Save the complete model, including weights and configuration.
+
+        Parameters
+        ----------
+        save_dir : str
+            Directory to save the model configuration and weights.
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        self.save_config(os.path.join(save_dir, "Hybrid_VAE_config.json"))
+        self.save_model(save_dir, "final")
+
+    @classmethod
+    def load_config(cls, config):
+        """
+        Create an instance of the model from a configuration dictionary.
+
+        Parameters
+        ----------
+        config : dict
+            Dictionary containing the model initialization parameters.
+
+        Returns
+        -------
+        HybridVAEMultiTaskModel
+            A new instance of the model initialized with the provided configuration.
+        """
+        # Get the parameter signature of __init__
+        init_params = inspect.signature(cls.__init__).parameters
+
+        # Filter config keys to match the constructor's parameters
+        filtered_config = {k: v for k, v in config.items() if k in init_params}
+
+        # Ensure all required parameters are provided
+        required_params = [
+            name for name, param in init_params.items()
+            if param.default == inspect.Parameter.empty and name != "self"
+        ]
+        missing_params = [p for p in required_params if p not in filtered_config]
+        if missing_params:
+            raise ValueError(f"Missing required parameters: {missing_params}")
+
+        return cls(**filtered_config)
+
+    @classmethod
+    def load_complete_model(cls, load_dir, device=DEVICE):
+        """
+        Load a complete model, including weights and configuration.
+
+        Parameters
+        ----------
+        load_dir : str
+            Directory containing the model configuration and weights.
+        device : torch.device, optional
+            Device to load the model onto.
+
+        Returns
+        -------
+        HybridVAEMultiTaskModel
+            The reconstructed model instance with weights loaded.
+        """
+        # Load configuration
+        config_path = os.path.join(load_dir, "Hybrid_VAE_config.json")
+        with open(config_path, 'r', encoding='utf-8') as file:
+            config = json.load(file)
+        model = cls.load_config(config)
+        model.load_state_dict(torch.load(os.path.join(load_dir, "epoch_final.pth"), map_location=device, weights_only=True))
+        
+        return model
+    
 
 class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, ClassifierMixin, TransformerMixin):
     """
