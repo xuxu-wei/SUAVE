@@ -15,9 +15,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# TODO Ecoder 结构似乎有问题，多了一个线性层？
-# TODO 考虑multitask predictor 取消 body, 只留各个任务头
 # TODO schduler 进一步优化, 已经达到patience的任务冻结权重
+# TODO Ecoder 结构似乎有问题，多了一个线性层？
 
 class Encoder(nn.Module):
     """
@@ -297,81 +296,68 @@ class ResidualBlock(nn.Module):
     
 class MultiTaskPredictor(nn.Module):
     """
-    Multi-task prediction network for classification (supports binary and multi-class tasks).
-    
-    Supports both parallel and sequential task modeling. For sequential tasks, each task's probability
-    distribution (`task_prob`) is passed as additional input to the next task.
+    Multi-task prediction network supporting parallel and sequential task modeling.
+
+    This class implements a flexible structure for handling multiple predictive tasks.
+    Each task has its own specific head, and the tasks can be modeled in two strategies:
+    - Parallel: All tasks share the same input representation and are predicted independently.
+    - Sequential: Each task depends on the previous task's probability distribution.
 
     Parameters
     ----------
-    latent_dim : int
-        Dimension of the latent space input.
-    depth : int
-        Number of shared hidden layers.
-    hidden_dim : int
-        Number of neurons in each shared hidden layer.
-    dropout_rate : float
-        Dropout rate for regularization.
     task_classes : list of int
-        Number of classes for each task. For binary tasks, use 2.
-    task_depth : int
-        Number of hidden layers in each task-specific head.
-    task_strategy : str
-        Task modeling strategy:
-        - "parallel": All tasks share the same latent representation as input.
-        - "sequential": Each task depends on the previous task's probability distribution.
-    use_batch_norm : bool
-        Whether to apply batch normalization.
+        A list containing the number of classes for each task. For binary tasks, use 2.
+    latent_dim : int
+        Dimension of the shared latent representation input.
+    hidden_dim : int
+        Number of neurons in the hidden layers of each task-specific head.
+    predictor_depth : int, optional
+        Number of hidden layers in each task-specific head (default is 3).
+    task_strategy : str, optional
+        Strategy for modeling tasks:
+        - 'parallel': Tasks are modeled independently.
+        - 'sequential': Each task depends on the previous task's output (default is 'parallel').
+    dropout_rate : float, optional
+        Dropout rate for regularization in the hidden layers (default is 0.3).
+    use_batch_norm : bool, optional
+        Whether to apply batch normalization to the hidden layers (default is True).
 
     Attributes
     ----------
-    body : nn.Sequential
-        Shared feature extraction layers.
     task_heads : nn.ModuleList
-        Task-specific heads for classification.
+        A list of task-specific heads, one for each task.
 
     Methods
     -------
     forward(z)
-        Forward pass through shared layers and task-specific heads.
+        Forward pass through the network, producing predictions for all tasks.
+
+    Notes
+    -----
+    - In 'sequential' mode, each task's probability distribution is concatenated to the input for the next task.
+    - Task-specific heads are dynamically built based on the provided parameters.
     """
-    def __init__(self, latent_dim, depth, hidden_dim, task_classes, task_depth=3, dropout_rate=0.3, 
-                 task_strategy='parallel', use_batch_norm=True):
+    def __init__(self, task_classes, latent_dim, hidden_dim, predictor_depth=3, task_strategy='parallel', 
+                 dropout_rate=0.3, use_batch_norm=True):
         super(MultiTaskPredictor, self).__init__()
+        
         self.task_classes = task_classes  # Number of classes per task
         self.task_strategy = task_strategy  # Task modeling strategy: parallel or sequential
         
-        # Shared feature extraction layers
-        hidden = []
-        for _ in range(depth):
-            hidden.extend([
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim) if use_batch_norm else nn.Identity(),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout_rate),
-            ])
-        self.body = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim) if use_batch_norm else nn.Identity(),
-            nn.LeakyReLU(),
-            *hidden
-        )
-
         # Task-specific heads
         self.task_heads = nn.ModuleList()
-        input_dim = hidden_dim  # Initial input dimension to task heads
+        input_dim = latent_dim  # Initial input dimension to task heads
         for task_index, num_classes in enumerate(task_classes):
 
             if task_strategy == 'sequential' and task_index > 0:
                 # In sequential mode, add previous task's probability dimension
                 last_output_dim = task_classes[task_index - 1]
                 input_dim += last_output_dim
-                # print(f'add squential head: in:{input_dim} out:{num_classes}')
 
-            self.task_heads.append(self._build_task_head(input_dim, num_classes, task_depth, dropout_rate, use_batch_norm))
+            self.task_heads.append(self._build_task_head(num_classes, input_dim, hidden_dim, predictor_depth, dropout_rate, use_batch_norm))
 
     @staticmethod
-    def _build_task_head(input_dim, num_classes, depth, dropout_rate, use_batch_norm):
+    def _build_task_head(num_classes, input_dim, hidden_dim, depth, dropout_rate, use_batch_norm):
         """
         Build a task-specific head with classification output.
 
@@ -395,8 +381,8 @@ class MultiTaskPredictor(nn.Module):
         """
         layers = []
         for _ in range(depth):
-            layers.append(ResidualBlock(input_dim, input_dim, dropout_rate=dropout_rate, use_batch_norm=use_batch_norm))
-        layers.append(nn.Linear(input_dim, num_classes))  # Output layer
+            layers.append(ResidualBlock(input_dim, hidden_dim, dropout_rate=dropout_rate, use_batch_norm=use_batch_norm))
+        layers.append(nn.Linear(hidden_dim, num_classes))  # Output layer
         return nn.Sequential(*layers)
 
     def forward(self, z):
@@ -413,15 +399,14 @@ class MultiTaskPredictor(nn.Module):
         list of torch.Tensor
             List of task-specific predictions, each with shape (batch_size, n_classes).
         """
-        h = self.body(z)
 
         if self.task_strategy == 'parallel':
-            outputs = [head(h) for head in self.task_heads]
+            outputs = [head(z) for head in self.task_heads]
 
         elif self.task_strategy == 'sequential':
             # 顺序级联建模
             outputs = []
-            current_input = h  # 初始输入为VAE的潜在表示
+            current_input = z  # 初始输入为VAE的潜在表示
             for task_head in self.task_heads:
                 # 对当前任务进行预测
                 task_output = task_head(current_input)
@@ -532,7 +517,6 @@ class HybridVAEMultiTaskModel(nn.Module):
                  latent_dim=10, 
                  predictor_hidden_dim=64, 
                  predictor_depth=1,
-                 task_depth=2,
                  predictor_dropout_rate=0.3, 
                  # training related params for param tuning
                  vae_lr=1e-3, 
@@ -550,16 +534,14 @@ class HybridVAEMultiTaskModel(nn.Module):
                  use_batch_norm=True, 
                  ):
         super(HybridVAEMultiTaskModel, self).__init__()
-        self.vae = VAE(input_dim, 
-                       depth=vae_depth, hidden_dim=vae_hidden_dim, strategy=layer_strategy, # VAE strcture
+        self.vae = VAE(input_dim, depth=vae_depth, hidden_dim=vae_hidden_dim, strategy=layer_strategy, # VAE strcture
                        dropout_rate=vae_dropout_rate, latent_dim=latent_dim, use_batch_norm=use_batch_norm # normalization
                        )
-        self.predictor = MultiTaskPredictor(latent_dim, 
-                                            depth=predictor_depth, hidden_dim=predictor_hidden_dim, # body strcture
-                                            task_classes=task_classes, task_depth=task_depth,  # task strcture
-                                            dropout_rate=predictor_dropout_rate, task_strategy=task_strategy, use_batch_norm=use_batch_norm # normalization
+        self.predictor = MultiTaskPredictor(task_classes=task_classes, # output_dim of each task
+                                            latent_dim=latent_dim, hidden_dim=predictor_hidden_dim, predictor_depth=predictor_depth, task_strategy=task_strategy, # task strcture
+                                            dropout_rate=predictor_dropout_rate, use_batch_norm=use_batch_norm # normalization
                                             )
-        
+
         self.input_dim = input_dim
         self.task_classes = task_classes
         self.task_strategy = task_strategy
@@ -570,7 +552,6 @@ class HybridVAEMultiTaskModel(nn.Module):
         self.latent_dim = latent_dim
         self.predictor_hidden_dim = predictor_hidden_dim
         self.predictor_depth = predictor_depth
-        self.task_depth = task_depth
         self.predictor_dropout_rate = predictor_dropout_rate
         self.vae_lr = vae_lr
         self.vae_weight_decay = vae_weight_decay
@@ -1040,7 +1021,7 @@ class HybridVAEMultiTaskModel(nn.Module):
         total_plots = 2 + num_tasks  # One plot for VAE losses and one for each task's AUC
 
         # Define the grid layout
-        cols = 3  # Maximum number of plots per row
+        cols = cols = min(3, total_plots) # Maximum number of plots per row
         rows = (total_plots + cols - 1) // cols  # Compute number of rows
 
         fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 5 * rows))  # Dynamically set figure size
