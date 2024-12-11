@@ -273,6 +273,24 @@ class VAE(nn.Module):
         recon = self.decoder(z)
         return recon, mu, logvar, z
 
+class ResidualBlock(nn.Module):
+    def __init__(self, input_dim, output_dim, dropout_rate=0.3, use_batch_norm=True):
+        super(ResidualBlock, self).__init__()
+        self.fc = nn.Linear(input_dim, output_dim)
+        self.use_projection = input_dim != output_dim
+        self.projection = nn.Linear(input_dim, output_dim) if self.use_projection else None
+        self.bn = nn.BatchNorm1d(output_dim) if use_batch_norm else nn.Identity()
+        self.dropout = nn.Dropout(dropout_rate)
+        self.activation = nn.LeakyReLU()
+
+    def forward(self, x):
+        residual = self.projection(x) if self.use_projection else x
+        h = self.fc(x)
+        h = self.bn(h)
+        h = self.activation(h)
+        h = self.dropout(h)
+        return h + residual
+    
 class MultiTaskPredictor(nn.Module):
     """
     Multi-task prediction network for classification (supports binary and multi-class tasks).
@@ -299,7 +317,7 @@ class MultiTaskPredictor(nn.Module):
     forward(z)
         Forward pass through shared layers and task-specific heads.
     """
-    def __init__(self, latent_dim, depth, hidden_dim, task_classes, task_depth=1, dropout_rate=0.3, use_batch_norm=True):
+    def __init__(self, latent_dim, depth, hidden_dim, task_classes, task_depth=3, dropout_rate=0.3, use_batch_norm=True):
         super(MultiTaskPredictor, self).__init__()
         self.task_classes = task_classes  # Number of classes per task
 
@@ -350,11 +368,7 @@ class MultiTaskPredictor(nn.Module):
         """
         layers = []
         for _ in range(depth):
-            layers.append(nn.Linear(input_dim, input_dim))
-            if use_batch_norm:
-                layers.append(nn.BatchNorm1d(input_dim))
-            layers.append(nn.LeakyReLU())
-            layers.append(nn.Dropout(dropout_rate))
+            layers.append(ResidualBlock(input_dim, input_dim, dropout_rate=dropout_rate, use_batch_norm=use_batch_norm))
         layers.append(nn.Linear(input_dim, num_classes))  # Output layer
         return nn.Sequential(*layers)
 
