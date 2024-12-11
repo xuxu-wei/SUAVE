@@ -739,9 +739,9 @@ class HybridVAEMultiTaskModel(nn.Module):
 
         # Initialize best losses and patience counters
         best_vae_loss = float('inf')
-        best_task_loss = float('inf')
+        best_task_losses = [float('inf')] * len(self.task_classes)
         vae_patience_counter = 0
-        task_patience_counter = 0
+        task_patience_counters = [0] * len(self.task_classes)  # Initialize task-specific patience counters
 
         # Training and validation loss storage
         train_vae_losses, train_task_losses, train_aucs = [], [], []
@@ -875,14 +875,16 @@ class HybridVAEMultiTaskModel(nn.Module):
                 else:
                     vae_patience_counter += 1
 
-                if val_task_loss < best_task_loss:
-                    best_task_loss = val_task_loss
-                    task_patience_counter = 0
+            # Early stopping: check each task individually
+            for t in range(len(self.task_classes)):
+                if val_task_losses[t] < best_task_losses[t]:
+                    best_task_losses[t] = val_task_losses[t]
+                    task_patience_counters[t] = 0
                 else:
-                    task_patience_counter += 1
+                    task_patience_counters[t] += 1
 
                 # Stop if both counters exceed patience
-                if vae_patience_counter >= patience and task_patience_counter >= patience:
+                if vae_patience_counter >= patience and all(counter >= patience for counter in task_patience_counters):
                     print("Early stopping triggered due to no improvement in both VAE and task losses.") if verbose > 0 else None
                     if save_weights_path:
                         self.save_model(save_weights_path, "final")
