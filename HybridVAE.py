@@ -623,11 +623,11 @@ class HybridVAEMultiTaskModel(nn.Module):
 
         # Task-specific losses
         task_loss_sum = 0.0
-        task_losses = []
+        per_task_losses = []
         for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
             task_loss_fn = nn.CrossEntropyLoss(reduction='mean')
-            task_losses.append(task_loss_fn(task_output, target.long()))  # CrossEntropyLoss expects integer targets
-        task_loss_sum = sum(task_losses)
+            per_task_losses.append(task_loss_fn(task_output, target.long()))  # CrossEntropyLoss expects integer targets
+        task_loss_sum = sum(per_task_losses)
 
         # Calculate AUC for each task (detach to avoid affecting gradient)
         auc_scores = []
@@ -661,11 +661,11 @@ class HybridVAEMultiTaskModel(nn.Module):
             task_loss_sum_norm = task_loss_sum / (task_loss_sum.item() + 1e-8)
 
             total_loss = beta * (recon_loss_norm + kl_loss_norm) + gamma_task * task_loss_sum_norm
-            return total_loss, recon_loss_norm, kl_loss_norm, task_loss_sum_norm, task_losses, auc_scores
+            return total_loss, recon_loss_norm, kl_loss_norm, task_loss_sum_norm, per_task_losses, auc_scores
         else:
             # Use raw losses with predefined weights
             total_loss = beta * (recon_loss + kl_loss) + gamma_task * task_loss_sum
-            return total_loss, recon_loss, kl_loss, task_loss_sum, task_losses, auc_scores
+            return total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores
 
     
     def fit(self, X, Y, 
@@ -735,11 +735,11 @@ class HybridVAEMultiTaskModel(nn.Module):
                 self.lr_scheduler_patience = patience * 1/3
             vae_scheduler = ReduceLROnPlateau(vae_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
             multitask_scheduler_list = [ReduceLROnPlateau(multitask_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
-                                        for _ in len(self.task_classes)]
+                                        for _ in range(len(self.task_classes))]
 
         # Initialize best losses and patience counters
         best_vae_loss = float('inf')
-        best_task_losses = [float('inf')] * len(self.task_classes)
+        best_per_task_losses = [float('inf')] * len(self.task_classes)
         vae_patience_counter = 0
         task_patience_counters = [0] * len(self.task_classes)  # Initialize task-specific patience counters
 
@@ -755,7 +755,8 @@ class HybridVAEMultiTaskModel(nn.Module):
         for epoch in iterator:
             self.train()
             train_vae_loss = 0.0
-            train_task_loss = 0.0
+            train_task_loss_sum = 0.0
+            train_per_task_losses = np.zeros(len(self.task_classes)) # 每个 task 的 loss 
             train_auc_scores = np.zeros(len(self.task_classes))
             train_batch_count = 0
             for i in range(0, len(X_train), self.batch_size):
@@ -783,7 +784,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                 recon, mu, logvar, z, task_outputs = self(X_batch)
 
                 # Compute loss
-                total_loss, recon_loss, kl_loss, task_loss, task_losses, auc_scores = self.compute_loss(
+                total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores = self.compute_loss(
                     recon, X_batch, mu, logvar, task_outputs, Y_batch, 
                     beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
                 )
@@ -795,22 +796,24 @@ class HybridVAEMultiTaskModel(nn.Module):
 
                 # Accumulate losses
                 train_vae_loss += (recon_loss.item() + kl_loss.item())
-                train_task_loss += task_loss.item()
+                train_task_loss_sum += task_loss_sum.item()
+                train_per_task_losses += np.array([loss.cpu().detach().numpy() for loss in per_task_losses])
                 train_auc_scores += np.array(auc_scores)
                 train_batch_count += 1
 
             # Normalize training losses by the number of batches
             train_vae_loss /= len(X_train)
-            train_task_loss /= len(X_train)
+            train_task_loss_sum /= len(X_train)
             train_auc_scores /= train_batch_count
             train_vae_losses.append(train_vae_loss)
-            train_task_losses.append(train_task_loss)
+            train_task_losses.append(train_task_loss_sum)
             train_aucs.append(train_auc_scores)
 
             # Validation phase
             self.eval()
             val_vae_loss = 0.0
-            val_task_loss = 0.0
+            val_task_loss_sum = 0.0 # 总 task loss
+            val_per_task_losses = np.zeros(len(self.task_classes)) # 每个 task 的 loss 
             val_auc_scores = np.zeros(len(self.task_classes))
             val_batch_count = 0
             with torch.no_grad():
@@ -825,30 +828,30 @@ class HybridVAEMultiTaskModel(nn.Module):
                     recon, mu, logvar, z, task_outputs = self(X_batch)
 
                     # Compute validation losses
-                    total_loss, recon_loss, kl_loss, task_loss, task_losses, auc_scores = self.compute_loss(
+                    total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores = self.compute_loss(
                         recon, X_batch, mu, logvar, task_outputs, Y_batch, 
                         beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
                     )
 
                     # Accumulate losses
                     val_vae_loss += (recon_loss.item() + kl_loss.item())
-                    val_task_loss += task_loss.item()
+                    val_task_loss_sum += task_loss_sum.item()
+                    val_per_task_losses += np.array([loss.cpu().detach().numpy() for loss in per_task_losses])
                     val_auc_scores += np.array(auc_scores)
                     val_batch_count += 1
 
             if self.use_lr_scheduler:
                 vae_scheduler.step(val_vae_loss)  # 调用时需传入验证损失
-                for task_scheduler in multitask_scheduler_list:
-                    task_scheduler.step(val_task_loss)
+                for task_scheduler, task_loss in zip(multitask_scheduler_list, val_per_task_losses):
+                    task_scheduler.step(task_loss)
 
             # Normalize validation losses by the number of batches
             val_vae_loss /= len(X_val)
-            val_task_loss /= len(X_val)
+            val_task_loss_sum /= len(X_val)
             val_auc_scores /= val_batch_count
             val_vae_losses.append(val_vae_loss)
-            val_task_losses.append(val_task_loss)
+            val_task_losses.append(val_task_loss_sum)
             val_aucs.append(val_auc_scores)
-            val_total_loss = val_vae_loss + val_task_loss
 
             # Update progress bar
             if verbose:
@@ -877,18 +880,18 @@ class HybridVAEMultiTaskModel(nn.Module):
 
             # Early stopping: check each task individually
             for t in range(len(self.task_classes)):
-                if val_task_losses[t] < best_task_losses[t]:
-                    best_task_losses[t] = val_task_losses[t]
+                if val_per_task_losses[t] < best_per_task_losses[t]:
+                    best_per_task_losses[t] = val_per_task_losses[t]
                     task_patience_counters[t] = 0
                 else:
                     task_patience_counters[t] += 1
 
-                # Stop if both counters exceed patience
-                if vae_patience_counter >= patience and all(counter >= patience for counter in task_patience_counters):
-                    print("Early stopping triggered due to no improvement in both VAE and task losses.") if verbose > 0 else None
-                    if save_weights_path:
-                        self.save_model(save_weights_path, "final")
-                    break
+            # Stop if both counters exceed patience
+            if vae_patience_counter >= patience and all(counter >= patience for counter in task_patience_counters):
+                print("Early stopping triggered due to no improvement in both VAE and task losses.") if verbose > 0 else None
+                if save_weights_path:
+                    self.save_model(save_weights_path, "final")
+                break
 
             # Save loss plot every 100 epochs
             if ((epoch + 1) % 100 == 0) and ((is_interactive_environment() and animate_monitor) or plot_path):
@@ -1424,7 +1427,7 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
         # Forward pass
         with torch.no_grad():
             recon, mu, logvar, z, task_outputs = self(X)
-            total_loss, recon_loss, kl_loss, task_loss, task_losses, auc_scores = self.compute_loss(
+            total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores = self.compute_loss(
                 recon, X, mu, logvar, task_outputs, Y, 
                 beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas, normalize_loss=False
             )
