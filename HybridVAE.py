@@ -15,6 +15,10 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# TODO 考虑multitask predictor 取消 body, 只留各个任务头
+#? 为什么并行和级联结果一样，但任务顺序却会影响并行训练效果？
+#? 检查级联是否生效 self.predictor 拆出各个部分 看数据流动 每个头是否正确将输出加入特征 输入输出维度是否符合预期
+# TODO schduler 进一步优化, 已经达到patience的任务冻结权重
 
 class Encoder(nn.Module):
     """
@@ -764,7 +768,9 @@ class HybridVAEMultiTaskModel(nn.Module):
         self : VAEMultiTaskModel
             The fitted VAEMultiTaskModel instance.
         """
+        
         self.reset_parameters()
+        self.fit_epochs = epochs
         if hasattr(Y, 'columns'):
             self.task_names = list(Y.columns)
         elif isinstance(Y, pd.Series):
@@ -962,8 +968,8 @@ class HybridVAEMultiTaskModel(nn.Module):
                     self.save_model(save_weights_path, "final")
                 break
 
-            # Save loss plot every 100 epochs
-            if ((epoch + 1) % 100 == 0) and ((is_interactive_environment() and animate_monitor) or plot_path):
+            # Save loss plot every 5% epochs
+            if ((epoch + 1) % int((self.fit_epochs * 0.05)) == 0) and ((is_interactive_environment() and animate_monitor) or plot_path):
                 loss_plot_path = None
                 if plot_path:
                     loss_plot_path = os.path.join(plot_path, f"loss_epoch.jpg")
@@ -972,8 +978,8 @@ class HybridVAEMultiTaskModel(nn.Module):
                                train_task_losses,  val_task_losses,
                                save_path=loss_plot_path
                                )
-            # Save weights every 500 epochs
-            if (epoch + 1) % 500 == 0 and save_weights_path:
+            # Save weights every 20% epochs
+            if (epoch + 1) % int((self.fit_epochs * 0.2)) == 0 and save_weights_path:
                 self.save_model(save_weights_path, epoch + 1)
 
         # Save final weights
