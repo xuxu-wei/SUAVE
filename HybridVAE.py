@@ -14,7 +14,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# TODO 为每个任务头单独设置 lr_scheduler
 
 class Encoder(nn.Module):
     """
@@ -487,7 +486,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                  validation_split=0.3, 
                  use_lr_scheduler=True,
                  lr_scheduler_factor=0.1,
-                 lr_scheduler_patience=50,
+                 lr_scheduler_patience=None,
                  use_batch_norm=True, 
                  ):
         super(HybridVAEMultiTaskModel, self).__init__()
@@ -623,12 +622,12 @@ class HybridVAEMultiTaskModel(nn.Module):
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
         # Task-specific losses
-        task_loss = 0.0
+        task_loss_sum = 0.0
         task_losses = []
         for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
             task_loss_fn = nn.CrossEntropyLoss(reduction='mean')
             task_losses.append(task_loss_fn(task_output, target.long()))  # CrossEntropyLoss expects integer targets
-        task_loss = sum(task_losses)
+        task_loss_sum = sum(task_losses)
 
         # Calculate AUC for each task (detach to avoid affecting gradient)
         auc_scores = []
@@ -659,14 +658,14 @@ class HybridVAEMultiTaskModel(nn.Module):
             # Normalize each loss by its scale
             recon_loss_norm = recon_loss / (recon_loss.item() + 1e-8)
             kl_loss_norm = kl_loss / (kl_loss.item() + 1e-8)
-            task_loss_norm = task_loss / (task_loss.item() + 1e-8)
+            task_loss_sum_norm = task_loss_sum / (task_loss_sum.item() + 1e-8)
 
-            total_loss = beta * (recon_loss_norm + kl_loss_norm) + gamma_task * task_loss_norm
-            return total_loss, recon_loss_norm, kl_loss_norm, task_loss_norm, auc_scores
+            total_loss = beta * (recon_loss_norm + kl_loss_norm) + gamma_task * task_loss_sum_norm
+            return total_loss, recon_loss_norm, kl_loss_norm, task_loss_sum_norm, task_losses, auc_scores
         else:
             # Use raw losses with predefined weights
-            total_loss = beta * (recon_loss + kl_loss) + gamma_task * task_loss
-            return total_loss, recon_loss, kl_loss, task_loss, auc_scores
+            total_loss = beta * (recon_loss + kl_loss) + gamma_task * task_loss_sum
+            return total_loss, recon_loss, kl_loss, task_loss_sum, task_losses, auc_scores
 
     
     def fit(self, X, Y, 
@@ -732,8 +731,11 @@ class HybridVAEMultiTaskModel(nn.Module):
 
         # 初始化调度器（仅当启用时）
         if self.use_lr_scheduler:
-            vae_scheduler = ReduceLROnPlateau(vae_optimizer, mode='min', factor=0.1, patience=int(1/3 * patience))
-            multitask_scheduler = ReduceLROnPlateau(multitask_optimizer, mode='min', factor=0.1, patience=int(1/3 * patience))
+            if self.lr_scheduler_patience is None:
+                self.lr_scheduler_patience = patience * 1/3
+            vae_scheduler = ReduceLROnPlateau(vae_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
+            multitask_scheduler_list = [ReduceLROnPlateau(multitask_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
+                                        for _ in len(self.task_classes)]
 
         # Initialize best losses and patience counters
         best_vae_loss = float('inf')
@@ -781,7 +783,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                 recon, mu, logvar, z, task_outputs = self(X_batch)
 
                 # Compute loss
-                total_loss, recon_loss, kl_loss, task_loss, auc_scores = self.compute_loss(
+                total_loss, recon_loss, kl_loss, task_loss, task_losses, auc_scores = self.compute_loss(
                     recon, X_batch, mu, logvar, task_outputs, Y_batch, 
                     beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
                 )
@@ -823,7 +825,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                     recon, mu, logvar, z, task_outputs = self(X_batch)
 
                     # Compute validation losses
-                    total_loss, recon_loss, kl_loss, task_loss, auc_scores = self.compute_loss(
+                    total_loss, recon_loss, kl_loss, task_loss, task_losses, auc_scores = self.compute_loss(
                         recon, X_batch, mu, logvar, task_outputs, Y_batch, 
                         beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
                     )
@@ -836,7 +838,8 @@ class HybridVAEMultiTaskModel(nn.Module):
 
             if self.use_lr_scheduler:
                 vae_scheduler.step(val_vae_loss)  # 调用时需传入验证损失
-                multitask_scheduler.step(val_task_loss)
+                for task_scheduler in multitask_scheduler_list:
+                    task_scheduler.step(val_task_loss)
 
             # Normalize validation losses by the number of batches
             val_vae_loss /= len(X_val)
@@ -1419,7 +1422,7 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
         # Forward pass
         with torch.no_grad():
             recon, mu, logvar, z, task_outputs = self(X)
-            total_loss, recon_loss, kl_loss, task_loss, auc_scores = self.compute_loss(
+            total_loss, recon_loss, kl_loss, task_loss, task_losses, auc_scores = self.compute_loss(
                 recon, X, mu, logvar, task_outputs, Y, 
                 beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas, normalize_loss=False
             )
