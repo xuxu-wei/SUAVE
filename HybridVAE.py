@@ -3,6 +3,7 @@ import io
 import base64
 import inspect
 from tqdm import tqdm
+import pandas as pd
 import numpy as np
 import torch
 from torch import nn
@@ -294,6 +295,9 @@ class ResidualBlock(nn.Module):
 class MultiTaskPredictor(nn.Module):
     """
     Multi-task prediction network for classification (supports binary and multi-class tasks).
+    
+    Supports both parallel and sequential task modeling. For sequential tasks, each task's probability
+    distribution (`task_prob`) is passed as additional input to the next task.
 
     Parameters
     ----------
@@ -309,18 +313,31 @@ class MultiTaskPredictor(nn.Module):
         Number of classes for each task. For binary tasks, use 2.
     task_depth : int
         Number of hidden layers in each task-specific head.
+    task_strategy : str
+        Task modeling strategy:
+        - "parallel": All tasks share the same latent representation as input.
+        - "sequential": Each task depends on the previous task's probability distribution.
     use_batch_norm : bool
         Whether to apply batch normalization.
+
+    Attributes
+    ----------
+    body : nn.Sequential
+        Shared feature extraction layers.
+    task_heads : nn.ModuleList
+        Task-specific heads for classification.
 
     Methods
     -------
     forward(z)
         Forward pass through shared layers and task-specific heads.
     """
-    def __init__(self, latent_dim, depth, hidden_dim, task_classes, task_depth=3, dropout_rate=0.3, use_batch_norm=True):
+    def __init__(self, latent_dim, depth, hidden_dim, task_classes, task_depth=3, dropout_rate=0.3, 
+                 task_strategy='parallel', use_batch_norm=True):
         super(MultiTaskPredictor, self).__init__()
         self.task_classes = task_classes  # Number of classes per task
-
+        self.task_strategy = task_strategy  # Task modeling strategy: parallel or sequential
+        
         # Shared feature extraction layers
         hidden = []
         for _ in range(depth):
@@ -338,10 +355,16 @@ class MultiTaskPredictor(nn.Module):
         )
 
         # Task-specific heads
-        self.task_heads = nn.ModuleList([
-            self._build_task_head(hidden_dim, task_classes[t], task_depth, dropout_rate, use_batch_norm)
-            for t in range(len(task_classes))
-        ])
+        self.task_heads = nn.ModuleList()
+        input_dim = hidden_dim  # Initial input dimension to task heads
+        for num_classes in task_classes:
+
+            if task_strategy == 'sequential' and self.task_heads:
+                # In sequential mode, add previous task's probability dimension
+                last_output_dim = task_classes[len(self.task_heads) - 1]
+                input_dim += last_output_dim
+
+            self.task_heads.append(self._build_task_head(input_dim, num_classes, task_depth, dropout_rate, use_batch_norm))
 
     @staticmethod
     def _build_task_head(input_dim, num_classes, depth, dropout_rate, use_batch_norm):
@@ -479,6 +502,7 @@ class HybridVAEMultiTaskModel(nn.Module):
     def __init__(self, 
                  input_dim, 
                  task_classes,
+                 task_strategy='parallel', 
                  layer_strategy='linear',
                  vae_hidden_dim=64, 
                  vae_depth=1,
@@ -516,6 +540,7 @@ class HybridVAEMultiTaskModel(nn.Module):
         
         self.input_dim = input_dim
         self.task_classes = task_classes
+        self.task_strategy = task_strategy
         self.layer_strategy = layer_strategy
         self.vae_hidden_dim = vae_hidden_dim
         self.vae_depth = vae_depth
@@ -539,7 +564,9 @@ class HybridVAEMultiTaskModel(nn.Module):
         self.lr_scheduler_patience = lr_scheduler_patience
         self.use_batch_norm = use_batch_norm
         self.to(DEVICE)
-        
+
+        assert self.task_strategy in ['parallel', 'sequential'], f"Unknown task_strategy: {self.task_strategy}. Must be 'parallel' or 'sequential'."
+
     def reset_parameters(self, seed=19960816):
         for layer in self.modules():
             if isinstance(layer, (nn.Linear, nn.Conv2d)):
@@ -574,7 +601,7 @@ class HybridVAEMultiTaskModel(nn.Module):
         recon, mu, logvar, z = self.vae(x)
         task_outputs = self.predictor(z)
         return recon, mu, logvar, z, task_outputs
-
+    
     def check_tensor(self, X: torch.Tensor):
         """
         Ensures the input is a tensor and moves it to the correct device.
@@ -598,35 +625,49 @@ class HybridVAEMultiTaskModel(nn.Module):
         else:
             return torch.from_numpy(np.asarray(X, dtype=np.float32)).to(DEVICE)
 
-    def compute_loss(self, recon, x, mu, logvar, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None, normalize_loss=False):
+    def compute_loss(self, x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None, normalize_loss=False):
         """
         Compute total loss for VAE and multi-task predictor.
 
         Parameters
         ----------
-        recon : torch.Tensor
-            Reconstructed input tensor, shape (batch_size, input_dim).
         x : torch.Tensor
             Original input tensor, shape (batch_size, input_dim).
+        recon : torch.Tensor
+            Reconstructed input tensor, shape (batch_size, input_dim).
         mu : torch.Tensor
             Latent mean tensor, shape (batch_size, latent_dim).
         logvar : torch.Tensor
             Latent log variance tensor, shape (batch_size, latent_dim).
+        z : torch.Tensor
+            Latent representation tensor, shape (batch_size, latent_dim).
         task_outputs : list of torch.Tensor
             List of task-specific predictions, each shape (batch_size, n_classes).
         y : torch.Tensor
             Ground truth target tensor, shape (batch_size, num_tasks).
         beta : float
-            Weight of the KL divergence term.
+            Weight of the KL divergence term in the VAE loss.
         gamma_task : float
-            Weight of the task loss term.
-        alpha : list or torch.Tensor
-            Per-task weights, shape (num_tasks,). Default is uniform weights.
+            Weight of the task loss term in the total loss.
+        alpha : list or torch.Tensor, optional
+            Per-task weights, shape (num_tasks,). Default is uniform weights (1 for all tasks).
+        normalize_loss : bool, optional
+            Whether to normalize each loss term before combining them.
 
         Returns
         -------
         total_loss : torch.Tensor
             Combined loss value.
+        recon_loss : torch.Tensor
+            Reconstruction loss value.
+        kl_loss : torch.Tensor
+            KL divergence loss value.
+        task_loss_sum : torch.Tensor
+            Sum of all task-specific losses.
+        per_task_losses : list of torch.Tensor
+            List of task-specific loss values.
+        auc_scores : list of float
+            List of AUC scores for each task.
         """
         # Reconstruction loss
         reconstruction_loss_fn = nn.MSELoss(reduction='sum')
@@ -636,11 +677,22 @@ class HybridVAEMultiTaskModel(nn.Module):
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
         # Task-specific losses
-        task_loss_sum = 0.0
         per_task_losses = []
+        task_loss_sum = 0.0
+
+        # Handle alpha for task weighting
+        if alpha is None:
+            alpha = torch.ones(len(task_outputs), device=DEVICE)  # Default to uniform weights
+        else:
+            alpha = torch.tensor(alpha, device=DEVICE, dtype=torch.float32)
+
         for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
             task_loss_fn = nn.CrossEntropyLoss(reduction='mean')
-            per_task_losses.append(task_loss_fn(task_output, target.long()))  # CrossEntropyLoss expects integer targets
+            task_loss = task_loss_fn(task_output, target.long())
+            weighted_task_loss = alpha[t] * task_loss
+            per_task_losses.append(weighted_task_loss)
+
+        # Sum up weighted task losses
         task_loss_sum = sum(per_task_losses)
 
         # Calculate AUC for each task (detach to avoid affecting gradient)
@@ -650,14 +702,11 @@ class HybridVAEMultiTaskModel(nn.Module):
 
             # Compute probabilities for AUC
             if num_classes > 2:
-                # Multi-class task: apply softmax for probabilities
                 task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()
             else:
-                # Binary task: apply sigmoid for probabilities of positive class
-                task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()[:, 1]  # Use prob of class 1
+                task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()[:, 1]
 
             target_cpu = target.detach().cpu().numpy()
-            # Calculate AUC
             try:
                 if num_classes > 2:
                     auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, multi_class='ovo', average='macro')
@@ -665,7 +714,6 @@ class HybridVAEMultiTaskModel(nn.Module):
                     auc = roc_auc_score(target_cpu, task_output_prob)
             except ValueError:
                 auc = 0.5  # Default AUC for invalid cases (e.g., all labels are the same)
-
             auc_scores.append(auc)
 
         if normalize_loss:
@@ -680,7 +728,6 @@ class HybridVAEMultiTaskModel(nn.Module):
             # Use raw losses with predefined weights
             total_loss = beta * (recon_loss + kl_loss) + gamma_task * task_loss_sum
             return total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores
-
     
     def fit(self, X, Y, 
             epochs=2000, 
@@ -718,6 +765,14 @@ class HybridVAEMultiTaskModel(nn.Module):
             The fitted VAEMultiTaskModel instance.
         """
         self.reset_parameters()
+        if hasattr(Y, 'columns'):
+            self.task_names = list(Y.columns)
+        elif isinstance(Y, pd.Series):
+            if not Y.name  is None:
+                self.task_names = [Y.name]
+        else:
+            self.task_names = [f'task {i+1}' for i in range(len(self.task_classes))]
+
         # Data checks and device transfer
         X = self.check_tensor(X).to(DEVICE)
         Y = self.check_tensor(Y).to(DEVICE)
@@ -799,7 +854,7 @@ class HybridVAEMultiTaskModel(nn.Module):
 
                 # Compute loss
                 total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores = self.compute_loss(
-                    recon, X_batch, mu, logvar, task_outputs, Y_batch, 
+                    X_batch, recon, mu, logvar, z, task_outputs, Y_batch, 
                     beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
                 )
 
@@ -843,7 +898,7 @@ class HybridVAEMultiTaskModel(nn.Module):
 
                     # Compute validation losses
                     total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores = self.compute_loss(
-                        recon, X_batch, mu, logvar, task_outputs, Y_batch, 
+                        X_batch, recon, mu, logvar, z, task_outputs, Y_batch, 
                         beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
                     )
 
@@ -978,14 +1033,14 @@ class HybridVAEMultiTaskModel(nn.Module):
         ax.grid()
 
         # Task-specific AUC Plots
-        for t in range(num_tasks):
+        for t, task_name in enumerate(self.task_names):
             ax = axes[t + 1]
             ax.plot(train_aucs[:,t], label=f'Train AUC for Task {t+1})', linestyle='-')
             ax.plot(val_aucs[:,t], label=f'Val AUC  for Task {t+1})', linestyle='-')
             ax.set_xlabel('Epochs')
             ax.set_ylabel('AUC')
             ax.legend()
-            ax.set_title(f'AUC Scores (Task {t+1})')
+            ax.set_title(f'AUC Score for {task_name}')
             ax.grid()
 
         # Task Loss Plot
@@ -1161,59 +1216,7 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
     - The `transform` method maps input data into the latent space, which can be used for dimensionality reduction.
     - The `predict` and `predict_proba` methods support multi-task binary classification.
     """
-    def __init__(self, 
-                 input_dim=30, 
-                 task_classes=[2,2],
-                 layer_strategy='linear',
-                 vae_hidden_dim=64, 
-                 vae_depth=3,
-                 vae_dropout_rate=0.3, 
-                 latent_dim=10, 
-                 predictor_hidden_dim=64, 
-                 predictor_depth=3,
-                 task_depth=2,
-                 predictor_dropout_rate=0.3, 
-                 # training related params for param tuning
-                 vae_lr=1e-3, 
-                 vae_weight_decay=1e-3, 
-                 multitask_lr=1e-3, 
-                 multitask_weight_decay=1e-3,
-                 alphas=None,
-                 beta=1.0, 
-                 gamma_task=1.0,
-                 batch_size=200, 
-                 validation_split=0.3, 
-                 use_lr_scheduler=True,
-                 lr_scheduler_factor=0.1,
-                 lr_scheduler_patience=50,
-                 use_batch_norm=True, 
-                 ):
-        super().__init__(input_dim=input_dim, 
-                         task_classes=task_classes,
-                         layer_strategy=layer_strategy,
-                         vae_hidden_dim=vae_hidden_dim, 
-                         vae_depth=vae_depth, 
-                         vae_dropout_rate=vae_dropout_rate, 
-                         latent_dim=latent_dim, 
-                         predictor_hidden_dim=predictor_hidden_dim, 
-                         predictor_depth=predictor_depth, 
-                         task_depth=task_depth,
-                         predictor_dropout_rate=predictor_dropout_rate, 
-                         vae_lr=vae_lr, 
-                         vae_weight_decay=vae_weight_decay, 
-                         multitask_lr=multitask_lr,
-                         multitask_weight_decay=multitask_weight_decay,
-                         alphas=alphas,
-                         beta=beta,
-                         gamma_task=gamma_task,
-                         batch_size=batch_size,
-                         validation_split=validation_split,
-                         use_lr_scheduler=use_lr_scheduler,
-                         lr_scheduler_factor=lr_scheduler_factor,
-                         lr_scheduler_patience=lr_scheduler_patience,
-                         use_batch_norm=use_batch_norm,
-                         )
-    
+
     def fit(self, X, y, *args, **kwargs):
         """
         see `HybridVAEMultiTaskModel.fit` 
@@ -1442,10 +1445,10 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
         with torch.no_grad():
             recon, mu, logvar, z, task_outputs = self(X)
             total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores = self.compute_loss(
-                recon, X, mu, logvar, task_outputs, Y, 
+                X, recon, mu, logvar, z, task_outputs, Y, 
                 beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas, normalize_loss=False
             )
-        
+
         # Convert losses to NumPy arrays
         return (total_loss.item() / len(X),  # Convert scalar tensor to Python float
                 recon_loss.item() / len(X),
