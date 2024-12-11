@@ -15,9 +15,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# TODO Ecoder 结构似乎有问题，多了一个线性层？
 # TODO 考虑multitask predictor 取消 body, 只留各个任务头
-#? 为什么并行和级联结果一样，但任务顺序却会影响并行训练效果？
-#? 检查级联是否生效 self.predictor 拆出各个部分 看数据流动 每个头是否正确将输出加入特征 输入输出维度是否符合预期
 # TODO schduler 进一步优化, 已经达到patience的任务冻结权重
 
 class Encoder(nn.Module):
@@ -361,12 +360,13 @@ class MultiTaskPredictor(nn.Module):
         # Task-specific heads
         self.task_heads = nn.ModuleList()
         input_dim = hidden_dim  # Initial input dimension to task heads
-        for num_classes in task_classes:
+        for task_index, num_classes in enumerate(task_classes):
 
-            if task_strategy == 'sequential' and self.task_heads:
+            if task_strategy == 'sequential' and task_index > 0:
                 # In sequential mode, add previous task's probability dimension
-                last_output_dim = task_classes[len(self.task_heads) - 1]
+                last_output_dim = task_classes[task_index - 1]
                 input_dim += last_output_dim
+                # print(f'add squential head: in:{input_dim} out:{num_classes}')
 
             self.task_heads.append(self._build_task_head(input_dim, num_classes, task_depth, dropout_rate, use_batch_norm))
 
@@ -414,8 +414,26 @@ class MultiTaskPredictor(nn.Module):
             List of task-specific predictions, each with shape (batch_size, n_classes).
         """
         h = self.body(z)
-        outputs = [head(h) for head in self.task_heads]
+
+        if self.task_strategy == 'parallel':
+            outputs = [head(h) for head in self.task_heads]
+
+        elif self.task_strategy == 'sequential':
+            # 顺序级联建模
+            outputs = []
+            current_input = h  # 初始输入为VAE的潜在表示
+            for task_head in self.task_heads:
+                # 对当前任务进行预测
+                task_output = task_head(current_input)
+                outputs.append(task_output)
+                # 将整个任务概率分布作为附加输入
+                task_prob = F.softmax(task_output, dim=1)  # 计算任务的类别概率分布
+                current_input = torch.cat([current_input, task_prob], dim=1)  # 传入完整的任务概率分布
+        else:
+            raise ValueError(f"Unknown task_strategy: {self.task_strategy}. Must be 'parallel' or 'sequential'.")
+
         return outputs
+
 
 class HybridVAEMultiTaskModel(nn.Module):
     """
@@ -539,7 +557,7 @@ class HybridVAEMultiTaskModel(nn.Module):
         self.predictor = MultiTaskPredictor(latent_dim, 
                                             depth=predictor_depth, hidden_dim=predictor_hidden_dim, # body strcture
                                             task_classes=task_classes, task_depth=task_depth,  # task strcture
-                                            dropout_rate=predictor_dropout_rate, use_batch_norm=use_batch_norm # normalization
+                                            dropout_rate=predictor_dropout_rate, task_strategy=task_strategy, use_batch_norm=use_batch_norm # normalization
                                             )
         
         self.input_dim = input_dim
