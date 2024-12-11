@@ -1,4 +1,6 @@
 import os, sys, json
+import io
+import base64
 import inspect
 from tqdm import tqdm
 import numpy as np
@@ -11,6 +13,8 @@ from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# TODO 为每个任务头单独设置 lr_scheduler
 
 class Encoder(nn.Module):
     """
@@ -272,69 +276,69 @@ class VAE(nn.Module):
 
 class MultiTaskPredictor(nn.Module):
     """
-    Multi-task prediction network.
+    Multi-task prediction network for classification (supports binary and multi-class tasks).
 
     Parameters
     ----------
-    latent_dim : int, optional
-        Dimension of the latent space input (default is 10).
-    depth : int, optional
-        Number of shared hidden layers (default is 3).
-    hidden_dim : int, optional
-        Number of neurons in each shared hidden layer (default is 64).
-    dropout_rate : float, optional
-        Dropout rate for regularization (default is 0.3).
-    task_count : int, optional
-        Number of parallel prediction tasks (default is 2).
+    latent_dim : int
+        Dimension of the latent space input.
+    depth : int
+        Number of shared hidden layers.
+    hidden_dim : int
+        Number of neurons in each shared hidden layer.
+    dropout_rate : float
+        Dropout rate for regularization.
+    task_classes : list of int
+        Number of classes for each task. For binary tasks, use 2.
+    task_depth : int
+        Number of hidden layers in each task-specific head.
+    use_batch_norm : bool
+        Whether to apply batch normalization.
 
     Methods
     -------
     forward(z)
         Forward pass through shared layers and task-specific heads.
     """
-    def __init__(self, latent_dim=10, depth=3, hidden_dim=64, task_hidden_dim=64, task_depth=1, dropout_rate=0.3, task_count=2, use_batch_norm=True):
+    def __init__(self, latent_dim, depth, hidden_dim, task_classes, task_depth=1, dropout_rate=0.3, use_batch_norm=True):
         super(MultiTaskPredictor, self).__init__()
+        self.task_classes = task_classes  # Number of classes per task
 
-        # Shared layers
+        # Shared feature extraction layers
         hidden = []
-        for d in range(depth):
-            hidden.extend(
-                [
-                    nn.Dropout(dropout_rate),
-                    nn.Linear(hidden_dim, hidden_dim),
-                    nn.BatchNorm1d(hidden_dim) if use_batch_norm else nn.Identity(),
-                    nn.LeakyReLU(),
-                ]
-            )
-
-        # Shared body
+        for _ in range(depth):
+            hidden.extend([
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim) if use_batch_norm else nn.Identity(),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout_rate),
+            ])
         self.body = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim) if use_batch_norm else nn.Identity(),
             nn.LeakyReLU(),
-            *hidden,
+            *hidden
         )
 
-
-        # Task-specific sub-networks
+        # Task-specific heads
         self.task_heads = nn.ModuleList([
-            self._build_task_subnetwork(hidden_dim, task_hidden_dim, task_depth, dropout_rate, use_batch_norm)
-            for _ in range(task_count)
+            self._build_task_head(hidden_dim, task_classes[t], task_depth, dropout_rate, use_batch_norm)
+            for t in range(len(task_classes))
         ])
 
     @staticmethod
-    def _build_task_subnetwork(input_dim, hidden_dim, depth, dropout_rate, use_batch_norm):
+    def _build_task_head(input_dim, num_classes, depth, dropout_rate, use_batch_norm):
         """
-        Build a task-specific sub-network.
+        Build a task-specific head with classification output.
 
         Parameters
         ----------
         input_dim : int
-            Dimension of the input to the sub-network.
-        hidden_dim : int
-            Number of neurons in each hidden layer.
+            Input dimension of the task-specific head.
+        num_classes : int
+            Number of classes for this task.
         depth : int
-            Number of hidden layers in the sub-network.
+            Number of hidden layers in the task-specific head.
         dropout_rate : float
             Dropout rate for regularization.
         use_batch_norm : bool
@@ -343,26 +347,35 @@ class MultiTaskPredictor(nn.Module):
         Returns
         -------
         nn.Sequential
-            Task-specific sub-network.
+            Task-specific head with Softmax output.
         """
         layers = []
-        for d in range(depth):
-            layers.append(nn.Linear(input_dim, hidden_dim))
+        for _ in range(depth):
+            layers.append(nn.Linear(input_dim, input_dim))
             if use_batch_norm:
-                layers.append(nn.BatchNorm1d(hidden_dim))
+                layers.append(nn.BatchNorm1d(input_dim))
             layers.append(nn.LeakyReLU())
             layers.append(nn.Dropout(dropout_rate))
-            input_dim = hidden_dim
-        # Final task-specific prediction layer
-        layers.append(nn.Linear(hidden_dim, 1))
-        layers.append(nn.Sigmoid())
+        layers.append(nn.Linear(input_dim, num_classes))  # Output layer
         return nn.Sequential(*layers)
-    
+
     def forward(self, z):
-        h = self.body(z)  # Shared feature extraction
+        """
+        Forward pass through shared layers and task-specific heads.
+
+        Parameters
+        ----------
+        z : torch.Tensor
+            Latent representation, shape (batch_size, latent_dim).
+
+        Returns
+        -------
+        list of torch.Tensor
+            List of task-specific predictions, each with shape (batch_size, n_classes).
+        """
+        h = self.body(z)
         outputs = [head(h) for head in self.task_heads]
         return outputs
-
 
 class HybridVAEMultiTaskModel(nn.Module):
     """
@@ -373,10 +386,10 @@ class HybridVAEMultiTaskModel(nn.Module):
 
     Parameters
     ----------
-    input_dim : int, optional
-        Dimension of the input data (default is 30).
-    task_count : int, optional
-        Number of parallel prediction tasks (default is 2).
+    input_dim : int
+        Dimension of the input data.
+    task_count : int
+        Number of parallel prediction tasks.
     layer_strategy : str, optional
         Strategy for scaling hidden layer dimensions in both the VAE and Multi-Task Predictor:
         - "constant" or "c": All hidden layers have the same width.
@@ -451,8 +464,8 @@ class HybridVAEMultiTaskModel(nn.Module):
     - Task-specific outputs in the Multi-Task Predictor use sigmoid activation for binary classification.
     """
     def __init__(self, 
-                 input_dim=30, 
-                 task_count=2,
+                 input_dim, 
+                 task_classes,
                  layer_strategy='linear',
                  vae_hidden_dim=64, 
                  vae_depth=1,
@@ -460,7 +473,6 @@ class HybridVAEMultiTaskModel(nn.Module):
                  latent_dim=10, 
                  predictor_hidden_dim=64, 
                  predictor_depth=1,
-                 task_hidden_dim=64,
                  task_depth=2,
                  predictor_dropout_rate=0.3, 
                  # training related params for param tuning
@@ -485,12 +497,12 @@ class HybridVAEMultiTaskModel(nn.Module):
                        )
         self.predictor = MultiTaskPredictor(latent_dim, 
                                             depth=predictor_depth, hidden_dim=predictor_hidden_dim, # body strcture
-                                            task_hidden_dim=task_hidden_dim, task_depth=task_depth, task_count=task_count, # task strcture
+                                            task_classes=task_classes, task_depth=task_depth,  # task strcture
                                             dropout_rate=predictor_dropout_rate, use_batch_norm=use_batch_norm # normalization
                                             )
         
         self.input_dim = input_dim
-        self.task_count = task_count
+        self.task_classes = task_classes
         self.layer_strategy = layer_strategy
         self.vae_hidden_dim = vae_hidden_dim
         self.vae_depth = vae_depth
@@ -498,7 +510,6 @@ class HybridVAEMultiTaskModel(nn.Module):
         self.latent_dim = latent_dim
         self.predictor_hidden_dim = predictor_hidden_dim
         self.predictor_depth = predictor_depth
-        self.task_hidden_dim = task_hidden_dim
         self.task_depth = task_depth
         self.predictor_dropout_rate = predictor_dropout_rate
         self.vae_lr = vae_lr
@@ -589,30 +600,20 @@ class HybridVAEMultiTaskModel(nn.Module):
         logvar : torch.Tensor
             Latent log variance tensor, shape (batch_size, latent_dim).
         task_outputs : list of torch.Tensor
-            List of task-specific predictions, each shape (batch_size, 1).
+            List of task-specific predictions, each shape (batch_size, n_classes).
         y : torch.Tensor
             Ground truth target tensor, shape (batch_size, num_tasks).
-        beta : float, optional
-            Weight of the KL divergence term (default is 1.0).
-        gamma_task : float, optional
-            Weight of the task loss term (default is 1.0).
-        alpha : list or torch.Tensor, optional
+        beta : float
+            Weight of the KL divergence term.
+        gamma_task : float
+            Weight of the task loss term.
+        alpha : list or torch.Tensor
             Per-task weights, shape (num_tasks,). Default is uniform weights.
-        normalize_loss : bool, optional
-            If True, normalize the scale of recon_loss, kl_loss, and task_loss.
 
         Returns
         -------
-        torch.Tensor
-            Total loss value.
-        torch.Tensor
-            Normalized reconstruction loss (if normalize_loss is True).
-        torch.Tensor
-            Normalized KL divergence loss (if normalize_loss is True).
-        torch.Tensor
-            Normalized task-specific loss (if normalize_loss is True).
-        torch.Tensor
-            AUC scores for each task
+        total_loss : torch.Tensor
+            Combined loss value.
         """
         # Reconstruction loss
         reconstruction_loss_fn = nn.MSELoss(reduction='sum')
@@ -622,27 +623,37 @@ class HybridVAEMultiTaskModel(nn.Module):
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
         # Task-specific losses
-        task_loss_fn = nn.BCELoss(reduction='mean')  # Assuming binary tasks
-        if alpha is None:
-            alpha = torch.ones(len(task_outputs), device=DEVICE)  # Default to uniform weights
-
-        # Clamp task_outputs to [1e-6, 1 - 1e-6] to avoid log(0)
-        task_outputs_clamped = [torch.clamp(output, min=1e-9, max=1-1e-9) for output in task_outputs]
-
-        task_losses = [
-            alpha[t] * task_loss_fn(task_outputs_clamped[t], y[:, t].unsqueeze(1))
-            for t in range(len(task_outputs_clamped))
-        ]
+        task_loss = 0.0
+        task_losses = []
+        for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
+            task_loss_fn = nn.CrossEntropyLoss(reduction='mean')
+            task_losses.append(task_loss_fn(task_output, target.long()))  # CrossEntropyLoss expects integer targets
         task_loss = sum(task_losses)
 
         # Calculate AUC for each task (detach to avoid affecting gradient)
         auc_scores = []
-        for t in range(len(task_outputs)):
+        for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
+            num_classes = self.predictor.task_classes[t]
+
+            # Compute probabilities for AUC
+            if num_classes > 2:
+                # Multi-class task: apply softmax for probabilities
+                task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()
+            else:
+                # Binary task: apply sigmoid for probabilities of positive class
+                task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()[:, 1]  # Use prob of class 1
+
+            target_cpu = target.detach().cpu().numpy()
+            # Calculate AUC
             try:
-                auc = roc_auc_score(y[:, t].detach().cpu().numpy(), task_outputs_clamped[t].detach().cpu().numpy())
-                auc_scores.append(auc)
+                if num_classes > 2:
+                    auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, multi_class='ovo', average='macro')
+                else:
+                    auc = roc_auc_score(target_cpu, task_output_prob)
             except ValueError:
-                auc_scores.append(0.5)  # Default AUC for invalid cases (e.g., all labels are the same)
+                auc = 0.5  # Default AUC for invalid cases (e.g., all labels are the same)
+
+            auc_scores.append(auc)
 
         if normalize_loss:
             # Normalize each loss by its scale
@@ -651,7 +662,7 @@ class HybridVAEMultiTaskModel(nn.Module):
             task_loss_norm = task_loss / (task_loss.item() + 1e-8)
 
             total_loss = beta * (recon_loss_norm + kl_loss_norm) + gamma_task * task_loss_norm
-            return total_loss, recon_loss_norm, kl_loss_norm, task_loss_norm
+            return total_loss, recon_loss_norm, kl_loss_norm, task_loss_norm, auc_scores
         else:
             # Use raw losses with predefined weights
             total_loss = beta * (recon_loss + kl_loss) + gamma_task * task_loss
@@ -737,13 +748,13 @@ class HybridVAEMultiTaskModel(nn.Module):
         # Training loop with tqdm
         iterator = range(epochs)
         if verbose:  # 控制进度条显示
-            iterator = tqdm(iterator, desc="Training Progress", unit="epoch")
+            iterator = tqdm(iterator, desc="Training", unit="epoch")
 
         for epoch in iterator:
             self.train()
             train_vae_loss = 0.0
             train_task_loss = 0.0
-            train_auc_scores = np.zeros(self.task_count)
+            train_auc_scores = np.zeros(len(self.task_classes))
             train_batch_count = 0
             for i in range(0, len(X_train), self.batch_size):
                 X_batch = X_train[i:i + self.batch_size]
@@ -792,13 +803,13 @@ class HybridVAEMultiTaskModel(nn.Module):
             train_auc_scores /= train_batch_count
             train_vae_losses.append(train_vae_loss)
             train_task_losses.append(train_task_loss)
-            train_aucs.append(train_auc_scores.mean())
+            train_aucs.append(train_auc_scores)
 
             # Validation phase
             self.eval()
             val_vae_loss = 0.0
             val_task_loss = 0.0
-            val_auc_scores = np.zeros(self.task_count)
+            val_auc_scores = np.zeros(len(self.task_classes))
             val_batch_count = 0
             with torch.no_grad():
                 for i in range(0, len(X_val), self.batch_size):
@@ -833,20 +844,24 @@ class HybridVAEMultiTaskModel(nn.Module):
             val_auc_scores /= val_batch_count
             val_vae_losses.append(val_vae_loss)
             val_task_losses.append(val_task_loss)
-            val_aucs.append(val_auc_scores.mean())
+            val_aucs.append(val_auc_scores)
             val_total_loss = val_vae_loss + val_task_loss
 
             # Update progress bar
             if verbose:
+                train_auc_formated = [round(auc, 3) for auc in train_auc_scores]
+                val_auc_formated = [round(auc, 3) for auc in val_auc_scores]
                 iterator.set_postfix({
-                    "Train VAE Loss": f"{train_vae_loss:.4f}",
-                    "Val VAE Loss": f"{val_vae_loss:.4f}",
+                    "VAE(t)": f"{train_vae_loss:.3f}",
+                    "VAE(v)": f"{val_vae_loss:.3f}",
 
-                    # "Train Task Loss": f"{train_task_loss:.4f}",
-                    # "Val Task Loss": f"{val_task_loss:.4f}",
+                    # "Train Task Loss": f"{train_task_loss:.3f}",
+                    # "Val Task Loss": f"{val_task_loss:.3f}",
 
-                    "Train AUC": f"{train_auc_scores.mean():.4f}",
-                    "Val AUC": f"{val_auc_scores.mean():.4f}"
+                    # "Train AUC": f"{train_auc_scores.mean():.3f}",
+                    # "Val AUC": f"{val_auc_scores.mean():.3f}"
+                    "AUC(t)": f"{train_auc_formated}",
+                    "AUC(v)": f"{val_auc_formated}"
                 })
             
             # Early stopping logic
@@ -875,9 +890,9 @@ class HybridVAEMultiTaskModel(nn.Module):
                 loss_plot_path = None
                 if plot_path:
                     loss_plot_path = os.path.join(plot_path, f"loss_epoch.jpg")
-                self.plot_loss(train_vae_losses, train_task_losses, 
-                               val_vae_losses, val_task_losses,
+                self.plot_loss(train_vae_losses, val_vae_losses,
                                train_aucs, val_aucs, 
+                               train_task_losses,  val_task_losses,
                                save_path=loss_plot_path
                                )
             # Save weights every 500 epochs
@@ -891,58 +906,79 @@ class HybridVAEMultiTaskModel(nn.Module):
 
         return self
 
-    def plot_loss(self, train_vae_losses, train_task_losses, val_vae_losses, val_task_losses, train_aucs, val_aucs, save_path=None):
+
+    def plot_loss(self, train_vae_losses, val_vae_losses, train_aucs, val_aucs, train_task_losses, val_task_losses, save_path=None, display_id="loss_plot"):
         """
-        Plot training and validation loss curves for VAE, task-specific losses, and AUC.
+        Plot training and validation loss curves for VAE and task-specific AUCs.
 
         Parameters
         ----------
         train_vae_losses : list
             List of VAE losses (reconstruction + KL) for the training set at each epoch.
-        train_task_losses : list
-            List of task-specific losses (BCE) for the training set at each epoch.
         val_vae_losses : list
             List of VAE losses (reconstruction + KL) for the validation set at each epoch.
-        val_task_losses : list
-            List of task-specific losses (BCE) for the validation set at each epoch.
         train_aucs : list of np.ndarray
-            AUC scores for each task during training (task averaged).
+            List where each element is an np.ndarray of shape [epoch, n_tasks], containing AUC scores for each epoch.
         val_aucs : list of np.ndarray
-            AUC scores for each task during validation (task averaged).
+            List where each element is an np.ndarray of shape [epoch, n_tasks], containing AUC scores for each epoch.
+        train_task_losses : list
+            List of total task losses (summed over all tasks) for training at each epoch.
+        val_task_losses : list
+            List of total task losses (summed over all tasks) for validation at each epoch.
         save_path : str or None
             Path to save the plot image. If None, dynamically display in a notebook.
+        display_id : str, optional
+            Unique identifier for the display container to ensure updates occur in the same container.
         """
-        plt.figure(figsize=(21, 5))  # Adjust figure size for horizontal layout
+        
+        # Convert train_aucs and val_aucs to task-wise epoch-level averages
+        train_aucs = np.array(train_aucs)  # Shape: [n_tasks, n_epochs]
+        val_aucs = np.array(val_aucs)      # Shape: [n_tasks, n_epochs]
+
+        num_tasks = train_aucs.shape[1]  # Determine the number of tasks
+        total_plots = 2 + num_tasks  # One plot for VAE losses and one for each task's AUC
+
+        # Define the grid layout
+        cols = 3  # Maximum number of plots per row
+        rows = (total_plots + cols - 1) // cols  # Compute number of rows
+
+        fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 5 * rows))  # Dynamically set figure size
+        axes = axes.flatten()  # Flatten axes for easy indexing
 
         # VAE Loss Plot
-        plt.subplot(1, 3, 1)
-        plt.plot(train_vae_losses, label='Train VAE Loss', linestyle='-')
-        plt.plot(val_vae_losses, label='Val VAE Loss', linestyle='-')
-        plt.xlabel('Epochs')
-        plt.ylabel('Reconstruction + KL')
-        plt.legend()
-        plt.title('VAE Loss (Reconstruction + KL)')
-        plt.grid()
+        ax = axes[0]
+        ax.plot(train_vae_losses, label='Train VAE Loss', linestyle='-')
+        ax.plot(val_vae_losses, label='Val VAE Loss', linestyle='-')
+        ax.set_xlabel('Epochs')
+        ax.set_ylabel('Reconstruction + KL')
+        ax.legend()
+        ax.set_title('VAE Loss (Reconstruction + KL)')
+        ax.grid()
 
-        # AUC Plot
-        plt.subplot(1, 3, 2)
-        plt.plot(train_aucs, label='Train AUC (Mean)', linestyle='-')
-        plt.plot(val_aucs, label='Val AUC (Mean)', linestyle='-')
-        plt.xlabel('Epochs')
-        plt.ylabel('AUC')
-        plt.legend()
-        plt.title('AUC Scores (Mean Across Tasks)')
-        plt.grid()
+        # Task-specific AUC Plots
+        for t in range(num_tasks):
+            ax = axes[t + 1]
+            ax.plot(train_aucs[:,t], label=f'Train AUC for Task {t+1})', linestyle='-')
+            ax.plot(val_aucs[:,t], label=f'Val AUC  for Task {t+1})', linestyle='-')
+            ax.set_xlabel('Epochs')
+            ax.set_ylabel('AUC')
+            ax.legend()
+            ax.set_title(f'AUC Scores (Task {t+1})')
+            ax.grid()
 
         # Task Loss Plot
-        plt.subplot(1, 3, 3)
-        plt.plot(train_task_losses, label='Train Task Loss', linestyle='-')
-        plt.plot(val_task_losses, label='Val Task Loss', linestyle='-')
-        plt.xlabel('Epochs')
-        plt.ylabel('BCE')
-        plt.legend()
-        plt.title('Task Loss (Binary Cross-Entropy)')
-        plt.grid()
+        ax = axes[num_tasks + 1]
+        ax.plot(train_task_losses, label='Train Task Loss', linestyle='-')
+        ax.plot(val_task_losses, label='Val Task Loss', linestyle='-')
+        ax.set_xlabel('Epochs')
+        ax.set_ylabel('Cross Entropy')
+        ax.legend()
+        ax.set_title('Task Loss (Total Cross-Entropy)')
+        ax.grid()
+
+        # Hide unused subplots
+        for i in range(total_plots, len(axes)):
+            axes[i].axis('off')
 
         plt.tight_layout()
 
@@ -951,14 +987,10 @@ class HybridVAEMultiTaskModel(nn.Module):
 
         # Check if running in notebook
         if hasattr(sys, 'ps1') or ('IPython' in sys.modules and hasattr(sys, 'argv') and sys.argv[0].endswith('notebook')):
-            try:
-                from IPython.display import display, clear_output
-                clear_output(wait=True)
-                display(plt.gcf())
-                plt.pause(0.1)
-            except ImportError:
-                pass
-            
+            from IPython.display import display, update_display, clear_output
+            clear_output(wait=True)
+            update_display(plt.gcf(), display_id=display_id)
+            plt.pause(0.1)
         plt.close()
 
     def save_config(self, config_path):
@@ -1109,7 +1141,7 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
     """
     def __init__(self, 
                  input_dim=30, 
-                 task_count=2,
+                 task_classes=[2,2],
                  layer_strategy='linear',
                  vae_hidden_dim=64, 
                  vae_depth=3,
@@ -1117,7 +1149,6 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
                  latent_dim=10, 
                  predictor_hidden_dim=64, 
                  predictor_depth=3,
-                 task_hidden_dim=64,
                  task_depth=2,
                  predictor_dropout_rate=0.3, 
                  # training related params for param tuning
@@ -1136,7 +1167,7 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
                  use_batch_norm=True, 
                  ):
         super().__init__(input_dim=input_dim, 
-                         task_count=task_count,
+                         task_classes=task_classes,
                          layer_strategy=layer_strategy,
                          vae_hidden_dim=vae_hidden_dim, 
                          vae_depth=vae_depth, 
@@ -1144,7 +1175,6 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
                          latent_dim=latent_dim, 
                          predictor_hidden_dim=predictor_hidden_dim, 
                          predictor_depth=predictor_depth, 
-                         task_hidden_dim=task_hidden_dim,
                          task_depth=task_depth,
                          predictor_dropout_rate=predictor_dropout_rate, 
                          vae_lr=vae_lr, 
@@ -1259,7 +1289,7 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
 
     def predict_proba(self, X, deterministic=True):
         """
-        Predicts probabilities for each task with optional batch processing.
+        Predicts probabilities for each task with optional batch processing, using numpy arrays for efficiency.
 
         Parameters
         ----------
@@ -1271,48 +1301,71 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
 
         Returns
         -------
-        probas : np.ndarray
-            Probabilities for each task, shape (n_tasks, n_samples).
+        probas : list of np.ndarray
+            Probabilities for each task. Each element is an array of shape (n_samples, n_classes).
         """
         X = self.check_tensor(X).to(DEVICE)
         self.eval()  # Ensure model is in evaluation mode
-        results = []
+
+        # Initialize numpy arrays for storing results
+        n_samples = X.size(0)
+        probas_per_task = [
+            np.zeros((n_samples, num_classes)) for num_classes in self.predictor.task_classes
+        ]
 
         with torch.no_grad():
             # Process data in batches
-            for i in range(0, X.size(0), self.batch_size):
+            for i in range(0, n_samples, self.batch_size):
                 X_batch = X[i:i + self.batch_size]
+                batch_size = X_batch.size(0)  # Handle last batch with fewer samples
                 mu, logvar = self.vae.encoder(X_batch)
                 if deterministic:
                     z = mu  # Use latent mean for deterministic predictions
                 else:
                     z = self.vae.reparameterize(mu, logvar)  # Sample from latent space
                 task_outputs = self.predictor(z)
-                batch_probas = torch.cat([out.unsqueeze(0) for out in task_outputs], dim=0)
-                results.append(batch_probas)
 
-        # Combine all batch results
-        return torch.cat(results, dim=1).cpu().numpy()
+            # Convert logits to probabilities for each task and store in numpy arrays
+            for t, task_output in enumerate(task_outputs):
+                probas = F.softmax(task_output, dim=1)
+
+                # Copy batch probabilities into preallocated numpy array
+                probas_per_task[t][i:i + batch_size] = probas.cpu().numpy()
+
+        return probas_per_task 
+    
     
     def predict(self, X, threshold=0.5):
         """
-        Predicts binary classifications for each task.
+        Predicts classifications for each task, compatible with multi-class and binary classification.
 
         Parameters
         ----------
         X : np.ndarray or torch.Tensor
             Input samples with shape (n_samples, n_features).
         threshold : float, optional
-            Decision threshold for binary classification (default is 0.5).
+            Decision threshold for binary classification (default is 0.5). Ignored for multi-class tasks.
 
         Returns
         -------
-        predictions : np.ndarray
-            Binary predictions for each task, shape (n_tasks, n_samples).
+        predictions : list of np.ndarray
+            Predictions for each task. Each element is an array of shape (n_samples,).
+            For binary tasks, this contains {0, 1}; for multi-class tasks, it contains {0, 1, ..., n_classes-1}.
         """
-        self.eval()
         probas = self.predict_proba(X)
-        return (probas >= threshold).astype(int)
+        predictions = []
+
+        for t, task_probas in enumerate(probas):
+            num_classes = self.predictor.task_classes[t]
+            if num_classes > 2:
+                # Multi-class: return class with highest probability
+                predictions.append(np.argmax(task_probas, axis=1))
+            else:
+                # Binary: use threshold to predict class
+                predictions.append((task_probas[:, 1] >= threshold).astype(int))
+
+        return predictions  # List of arrays, one per task
+
 
     def score(self, X, Y, *args, **kwargs):
         """
@@ -1331,14 +1384,34 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
             AUC scores for each task, shape (n_tasks,).
         """
         self.eval()
-        probas = self.predict_proba(X)
-        Y = self.check_tensor(Y).to(DEVICE).cpu().numpy()
-        scores = []
-        for t in range(self.task_count):
-            auc = roc_auc_score(Y[:, t], probas[t, :], *args, **kwargs)
-            scores.append(auc)
-        return np.array(scores)
-    
+        task_outputs = self.predict_proba(X)
+        task_outputs = self.check_tensor(task_outputs).to(DEVICE)
+        Y = self.check_tensor(Y).to(DEVICE)
+
+        # Calculate AUC for each task (detach to avoid affecting gradient)
+        auc_scores = []
+        for t, (task_output, target) in enumerate(zip(task_outputs, Y.T)):
+            num_classes = self.predictor.task_classes[t]
+
+            # Compute probabilities for AUC
+            if num_classes > 2:
+                # Multi-class task: apply softmax for probabilities
+                task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()
+            else:
+                # Binary task: apply sigmoid for probabilities of positive class
+                task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()[:, 1]  # Use prob of class 1
+
+            target_cpu = target.detach().cpu().numpy()
+            # Calculate AUC
+            try:
+                auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, multi_class='ovo', average='macro', *args, **kwargs)
+            except ValueError:
+                auc = 0.5  # Default AUC for invalid cases (e.g., all labels are the same)
+
+            auc_scores.append(auc)
+
+        return np.array(auc_scores)
+
     def eval_loss(self, X, Y):
         X = self.check_tensor(X).to(DEVICE)
         Y = self.check_tensor(Y).to(DEVICE)
