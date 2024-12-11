@@ -15,7 +15,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# TODO schduler 进一步优化, 已经达到patience的任务冻结权重
+
+# TODO 每个任务使用单独的优化器，schduler 进一步优化, 已经达到patience的任务冻结权重
 # TODO Ecoder 结构似乎有问题，多了一个线性层？
 
 class Encoder(nn.Module):
@@ -801,21 +802,25 @@ class HybridVAEMultiTaskModel(nn.Module):
 
         # Separate optimizers for VAE and MultiTask predictor
         vae_optimizer = torch.optim.Adam(self.vae.parameters(), lr=self.vae_lr, weight_decay=self.vae_weight_decay, eps=1e-8)
-        multitask_optimizer = torch.optim.Adam(self.predictor.parameters(), lr=self.multitask_lr, weight_decay=self.multitask_weight_decay, eps=1e-8)
-
+        multitask_optimizer_list = [torch.optim.Adam(self.predictor.task_heads[task_ix].parameters(), 
+                                                     lr=self.multitask_lr, weight_decay=self.multitask_weight_decay, eps=1e-8)
+                                    for task_ix in range(len(self.task_classes))]
+        
         # 初始化调度器（仅当启用时）
         if self.use_lr_scheduler:
             if self.lr_scheduler_patience is None:
                 self.lr_scheduler_patience = patience * 1/3
             vae_scheduler = ReduceLROnPlateau(vae_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
-            multitask_scheduler_list = [ReduceLROnPlateau(multitask_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
-                                        for _ in range(len(self.task_classes))]
+            multitask_scheduler_list = [ReduceLROnPlateau(multitask_optimizer_list[task_ix], mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
+                                        for task_ix in range(len(self.task_classes))]
 
         # Initialize best losses and patience counters
         best_vae_loss = float('inf')
         best_per_task_losses = [float('inf')] * len(self.task_classes)
         vae_patience_counter = 0
         task_patience_counters = [0] * len(self.task_classes)  # Initialize task-specific patience counters
+        training_status = {task_ix: True for task_ix in range(len(self.task_classes))}
+        training_status['vae'] = True
 
         # Training and validation loss storage
         train_vae_losses, train_task_losses, train_aucs = [], [], []
@@ -852,7 +857,8 @@ class HybridVAEMultiTaskModel(nn.Module):
                 
                 # Reset gradients
                 vae_optimizer.zero_grad()
-                multitask_optimizer.zero_grad()
+                for task_optimizer in multitask_optimizer_list:
+                    task_optimizer.zero_grad()
 
                 # Forward pass
                 recon, mu, logvar, z, task_outputs = self(X_batch)
@@ -866,7 +872,8 @@ class HybridVAEMultiTaskModel(nn.Module):
                 # Backward pass and optimization
                 total_loss.backward()
                 vae_optimizer.step()
-                multitask_optimizer.step()
+                for task_optimizer in multitask_optimizer_list:
+                    task_optimizer.step()
 
                 # Accumulate losses
                 train_vae_loss += (recon_loss.item() + kl_loss.item())
@@ -959,6 +966,24 @@ class HybridVAEMultiTaskModel(nn.Module):
                     task_patience_counters[t] = 0
                 else:
                     task_patience_counters[t] += 1
+
+            # freeze weights if counter exceed patience
+            if vae_patience_counter >= patience:
+                for param in self.vae.parameters():
+                    if training_status['vae']:
+                        print(f'VAE early stopping triggered.')
+                        training_status['vae'] = False
+                        param.requires_grad = False
+
+            for task_ix, counter in enumerate(task_patience_counters):
+                if counter >= patience:
+                    task_model = self.predictor.task_heads[task_ix]
+
+                    for param in task_model.parameters():
+                        if training_status[task_ix]:
+                            training_status[task_ix] = False
+                            print(f'task {task_ix}: {self.task_names[task_ix]} early stopping triggered.')
+                            param.requires_grad = False                            
 
             # Stop if both counters exceed patience
             if vae_patience_counter >= patience and all(counter >= patience for counter in task_patience_counters):
