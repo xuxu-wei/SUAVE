@@ -14,8 +14,6 @@ import matplotlib.pyplot as plt
 from .utils import *
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# TODO plot loss cross entropy 使用对数轴
-# TODO sequential建模早停保证按顺序发生
 
 class Encoder(nn.Module):
     """
@@ -977,32 +975,24 @@ class HybridVAEMultiTaskModel(nn.Module):
             if vae_patience_counter >= patience:
                 self.stop_training_module(self.vae, 'vae', verbose, epoch)
 
-            # For prediction tasks, early stopping only when VAE has stopped.
-            if not self.training_status['vae']:
+                # For prediction tasks, start counting for early stopping after VAE has stopped.
+                for t in range(len(self.task_classes)):
+                    if val_per_task_losses[t] < best_per_task_losses[t]:
+                        best_per_task_losses[t] = val_per_task_losses[t]
+                        task_patience_counters[t] = 0
+                    else:
+                        task_patience_counters[t] += 1
+
                 if self.task_strategy == 'sequential':
                     # Sequential task early stopping
                     for t in range(len(self.task_classes)):
                         # 仅在前置任务已停止时允许检查当前任务
                         if all(not self.training_status.get(prev_t, False) for prev_t in self.task_names):
-                            if val_per_task_losses[t] < best_per_task_losses[t]:
-                                best_per_task_losses[t] = val_per_task_losses[t]
-                                task_patience_counters[t] = 0
-                            else:
-                                task_patience_counters[t] += 1
-
                             # 如果超出耐心计数，则停止该任务训练
                             if task_patience_counters[t] >= patience:
                                 self.stop_training_module(self.predictor.task_heads[t], self.task_names[t], verbose, epoch)
 
                 elif self.task_strategy == 'parallel':
-                    # Early stopping: check each task individually
-                    for t in range(len(self.task_classes)):
-                        if val_per_task_losses[t] < best_per_task_losses[t]:
-                            best_per_task_losses[t] = val_per_task_losses[t]
-                            task_patience_counters[t] = 0
-                        else:
-                            task_patience_counters[t] += 1
-
                     for t in range(len(self.task_classes)):
                         if task_patience_counters[t] >= patience:
                             self.stop_training_module(self.predictor.task_heads[t], self.task_names[t], verbose, epoch)
@@ -1015,7 +1005,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                 break
 
             # Save loss plot every 5% epochs
-            if ((epoch + 1) % int((self.fit_epochs * 0.05)) == 0) and ((is_interactive_environment() and animate_monitor) or plot_path):
+            if ((epoch + 1) % int((self.fit_epochs * 0.01)) == 0) and ((is_interactive_environment() and animate_monitor) or plot_path):
                 loss_plot_path = None
                 if plot_path:
                     loss_plot_path = os.path.join(plot_path, f"loss_epoch.jpg")
@@ -1025,7 +1015,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                                save_path=loss_plot_path
                                )
             # Save weights every 20% epochs
-            if (epoch + 1) % int((self.fit_epochs * 0.2)) == 0 and save_weights_path:
+            if ((epoch + 1) % int((self.fit_epochs * 0.2)) == 0) and save_weights_path:
                 self.save_model(save_weights_path, epoch + 1)
 
         # Save final weights
@@ -1052,29 +1042,35 @@ class HybridVAEMultiTaskModel(nn.Module):
         epoch: int
             Current epoch number for logging.
         """
+        #! old version. can cause Error.
         # for param in module.parameters():
         #     param.requires_grad = False
 
+        # if self.training_status[name]:
+        #     self.training_status[name] = False
+        #     if verbose:
+        #         print(f'Epoch {epoch + 1}: {name} early stopping triggered.')
+
         # Handle VAE
         if module == self.vae:
-            current_lr = self.vae_optimizer.param_groups[0]['lr']
-            self.vae_optimizer = torch.optim.Adam([], lr=current_lr)  # Disable the optimizer
-            self.training_status['vae'] = False
-            if verbose:
+            for param_group in self.vae_optimizer.param_groups:
+                param_group['lr'] = 0
+
+            # Update training status
+            if verbose and self.training_status['vae']: # show info at the first time
                 print(f"Epoch {epoch + 1}: VAE early stopping triggered.")
+            self.training_status['vae'] = False
 
         # Handle task head
         elif name in self.task_optimizer_dict:
-            # Get current learning rate
-            current_lr = self.task_optimizer_dict[name].param_groups[0]['lr']
+            # Set task head optimizer learning rate to 0
+            for param_group in self.task_optimizer_dict[name].param_groups:
+                param_group['lr'] = 0
 
-            # Create a new optimizer with the current learning rate but no parameters
-            self.task_optimizer_dict[name] = torch.optim.Adam([], lr=current_lr)
-            
-            self.training_status[name] = False
-            if verbose:
+            # Update training status
+            if verbose and self.training_status[name]: # show info at the first time
                 print(f"Epoch {epoch + 1}: Task {name} early stopping triggered.")
-
+            self.training_status[name] = False
                 
     def plot_loss(self, train_vae_losses, val_vae_losses, train_aucs, val_aucs, train_task_losses, val_task_losses, save_path=None, display_id="loss_plot"):
         """
@@ -1115,24 +1111,26 @@ class HybridVAEMultiTaskModel(nn.Module):
         axes = axes.flatten()  # Flatten axes for easy indexing
 
         # VAE Loss Plot
+        stop_flag = {False:'(early stopped)', True:''}[self.training_status['vae']]
         ax = axes[0]
         ax.plot(train_vae_losses, label='Train VAE Loss', linestyle='-')
         ax.plot(val_vae_losses, label='Val VAE Loss', linestyle='-')
         ax.set_xlabel('Epochs')
-        ax.set_ylabel('Reconstruction + KL')
+        ax.set_ylabel(f'Reconstruction + KL {stop_flag}')
         ax.legend()
         ax.set_title('VAE Loss (Reconstruction + KL)')
         ax.grid()
 
         # Task-specific AUC Plots
         for t, task_name in enumerate(self.task_names):
+            stop_flag = {False:'(early stopped)', True:''}[self.training_status[task_name]]
             ax = axes[t + 1]
             ax.plot(train_aucs[:,t], label=f'Train AUC for Task {t+1})', linestyle='-')
             ax.plot(val_aucs[:,t], label=f'Val AUC  for Task {t+1})', linestyle='-')
             ax.set_xlabel('Epochs')
             ax.set_ylabel('AUC')
             ax.legend()
-            ax.set_title(f'AUC Score for {task_name}')
+            ax.set_title(f'AUC Score for {task_name} {stop_flag}')
             ax.grid()
 
         # Task Loss Plot
@@ -1444,18 +1442,6 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
                     probas_per_task[t][i:i + self.batch_size] = probas
 
         return probas_per_task 
-                
-        # fit 中的计算逻辑
-
-        # # Forward pass
-        # recon, mu, logvar, z, task_outputs = self(X_batch)
-
-        # # Compute loss
-        # total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores = self.compute_loss(
-        #     X_batch, recon, mu, logvar, z, task_outputs, Y_batch, 
-        #     beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
-        # )
-
 
     def predict(self, X, threshold=0.5):
         """
