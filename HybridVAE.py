@@ -1,6 +1,4 @@
 import os, sys, json
-import io
-import base64
 import inspect
 from tqdm import tqdm
 import pandas as pd
@@ -13,6 +11,8 @@ from sklearn.metrics import mean_squared_error, roc_auc_score
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
+from .utils import *
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Encoder(nn.Module):
@@ -245,7 +245,7 @@ class VAE(nn.Module):
         self.decoder = Decoder(dim_list, dropout_rate, use_batch_norm)
     
     @staticmethod
-    def reparameterize(mu, logvar):
+    def reparameterize(mu, logvar, deterministic=False):
         """
         Reparameterization trick to sample latent representation.
 
@@ -255,21 +255,28 @@ class VAE(nn.Module):
             Latent mean tensor.
         logvar : torch.Tensor
             Latent log variance tensor.
+        deterministic : bool, optional
+            If True, uses the latent mean (mu) for predictions, avoiding randomness.
+            If False, samples from the latent space using reparameterization trick.
 
         Returns
         -------
         torch.Tensor
             Sampled latent tensor with shape (batch_size, latent_dim).
         """
-        # Reparameterization trick: z = mu + std * eps
-        # where std = exp(0.5 * logvar) and eps ~ N(0, I)
-        std = torch.exp(0.5 * logvar)  # Compute standard deviation from log variance
-        eps = torch.randn_like(std)   # Sample standard Gaussian noise
-        return mu + eps * std         # Reparameterize to compute latent vector z
+        if deterministic:
+            # for deterministic prediction and validation
+            return mu
+        else:
+            # Reparameterization trick: z = mu + std * eps
+            # where std = exp(0.5 * logvar) and eps ~ N(0, I)
+            std = torch.exp(0.5 * logvar)  # Compute standard deviation from log variance
+            eps = torch.randn_like(std)   # Sample standard Gaussian noise
+            return mu + eps * std         # Reparameterize to compute latent vector z
 
-    def forward(self, x):
+    def forward(self, x, deterministic=False):
         mu, logvar = self.encoder(x)
-        z = self.reparameterize(mu, logvar)
+        z = self.reparameterize(mu, logvar, deterministic=deterministic)
         recon = self.decoder(z)
         return recon, mu, logvar, z
 
@@ -575,7 +582,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                 if layer.bias is not None:
                     nn.init.zeros_(layer.bias)
 
-    def forward(self, x):
+    def forward(self, x, deterministic=False):
         """
         Forward pass through the complete model.
 
@@ -583,6 +590,9 @@ class HybridVAEMultiTaskModel(nn.Module):
         ----------
         x : torch.Tensor
             Input tensor with shape (batch_size, input_dim).
+        deterministic : bool, optional
+            If True, uses the latent mean (mu) for predictions, avoiding randomness.
+            If False, samples from the latent space using reparameterization trick.
 
         Returns
         -------
@@ -598,7 +608,7 @@ class HybridVAEMultiTaskModel(nn.Module):
             List of task-specific prediction tensors, each with shape (batch_size, 1).
         """
         x = self.check_tensor(x).to(DEVICE)
-        recon, mu, logvar, z = self.vae(x)
+        recon, mu, logvar, z = self.vae(x, deterministic=deterministic)
         task_outputs = self.predictor(z)
         return recon, mu, logvar, z, task_outputs
     
@@ -797,8 +807,9 @@ class HybridVAEMultiTaskModel(nn.Module):
         Y_train, Y_val = Y[train_idx], Y[val_idx]
 
         # Separate optimizers for VAE and MultiTask predictor
-        vae_optimizer = torch.optim.Adam(self.vae.parameters(), lr=self.vae_lr, weight_decay=self.vae_weight_decay, eps=1e-8)
-        multitask_optimizer_list = [torch.optim.Adam(self.predictor.task_heads[task_ix].parameters(), 
+        self.vae_optimizer = torch.optim.Adam(self.vae.parameters(), lr=self.vae_lr, weight_decay=self.vae_weight_decay, eps=1e-8)
+        
+        self.multitask_optimizer_list = [torch.optim.Adam(self.predictor.task_heads[task_ix].parameters(), 
                                                      lr=self.multitask_lr, weight_decay=self.multitask_weight_decay, eps=1e-8)
                                     for task_ix in range(len(self.task_classes))]
         
@@ -806,8 +817,8 @@ class HybridVAEMultiTaskModel(nn.Module):
         if self.use_lr_scheduler:
             if self.lr_scheduler_patience is None:
                 self.lr_scheduler_patience = patience * 1/3
-            vae_scheduler = ReduceLROnPlateau(vae_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
-            multitask_scheduler_list = [ReduceLROnPlateau(multitask_optimizer_list[task_ix], mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
+            vae_scheduler = ReduceLROnPlateau(self.vae_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
+            multitask_scheduler_list = [ReduceLROnPlateau(self.multitask_optimizer_list[task_ix], mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
                                         for task_ix in range(len(self.task_classes))]
 
         # Initialize best losses and patience counters
@@ -852,8 +863,8 @@ class HybridVAEMultiTaskModel(nn.Module):
                     continue  # 仍然太小，跳过
                 
                 # Reset gradients
-                vae_optimizer.zero_grad()
-                for task_optimizer in multitask_optimizer_list:
+                self.vae_optimizer.zero_grad()
+                for task_optimizer in self.multitask_optimizer_list:
                     task_optimizer.zero_grad()
 
                 # Forward pass
@@ -867,8 +878,8 @@ class HybridVAEMultiTaskModel(nn.Module):
 
                 # Backward pass and optimization
                 total_loss.backward()
-                vae_optimizer.step()
-                for task_optimizer in multitask_optimizer_list:
+                self.vae_optimizer.step()
+                for task_optimizer in self.multitask_optimizer_list:
                     task_optimizer.step()
 
                 # Accumulate losses
@@ -979,7 +990,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                         if training_status[task_ix]:
                             training_status[task_ix] = False
                             print(f'Epoch {epoch+1}: {self.task_names[task_ix]} early stopping triggered.') if verbose > 0 else None
-                            param.requires_grad = False                            
+                            param.requires_grad = False
 
             # Stop if both counters exceed patience
             if vae_patience_counter >= patience and all(counter >= patience for counter in task_patience_counters):
@@ -1368,24 +1379,29 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
             # Process data in batches
             for i in range(0, n_samples, self.batch_size):
                 X_batch = X[i:i + self.batch_size]
-                batch_size = X_batch.size(0)  # Handle last batch with fewer samples
-                mu, logvar = self.vae.encoder(X_batch)
-                if deterministic:
-                    z = mu  # Use latent mean for deterministic predictions
-                else:
-                    z = self.vae.reparameterize(mu, logvar)  # Sample from latent space
-                task_outputs = self.predictor(z)
+                recon, mu, logvar, z, task_outputs = self(X_batch, deterministic=deterministic)
 
-            # Convert logits to probabilities for each task and store in numpy arrays
-            for t, task_output in enumerate(task_outputs):
-                probas = F.softmax(task_output, dim=1)
+                # Convert logits to probabilities for each task and store in numpy arrays
+                for t, task_output in enumerate(task_outputs):
+                    probas = F.softmax(task_output, dim=1).detach().cpu().numpy()
 
-                # Copy batch probabilities into preallocated numpy array
-                probas_per_task[t][i:i + batch_size] = probas.cpu().numpy()
+                    # Copy batch probabilities into preallocated numpy array
+                    probas_per_task[t][i:i + self.batch_size] = probas
 
         return probas_per_task 
-    
-    
+                
+        # fit 中的计算逻辑
+
+        # # Forward pass
+        # recon, mu, logvar, z, task_outputs = self(X_batch)
+
+        # # Compute loss
+        # total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores = self.compute_loss(
+        #     X_batch, recon, mu, logvar, z, task_outputs, Y_batch, 
+        #     beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
+        # )
+
+
     def predict(self, X, threshold=0.5):
         """
         Predicts classifications for each task, compatible with multi-class and binary classification.
@@ -1435,30 +1451,25 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
             AUC scores for each task, shape (n_tasks,).
         """
         self.eval()
-        task_outputs = self.predict_proba(X)
-        task_outputs = self.check_tensor(task_outputs).to(DEVICE)
-        Y = self.check_tensor(Y).to(DEVICE)
+        probas_per_task = self.predict_proba(X) # expcted on cpu numpy
+        Y = to_numpy(Y) # ensure cpu numpy array
 
         # Calculate AUC for each task (detach to avoid affecting gradient)
         auc_scores = []
-        for t, (task_output, target) in enumerate(zip(task_outputs, Y.T)):
+        for t, (task_proba, target) in enumerate(zip(probas_per_task, Y.T)):
             num_classes = self.predictor.task_classes[t]
-
             # Compute probabilities for AUC
             if num_classes > 2:
                 # Multi-class task: apply softmax for probabilities
-                task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()
+                task_output_prob = task_proba
             else:
                 # Binary task: apply sigmoid for probabilities of positive class
-                task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()[:, 1]  # Use prob of class 1
-
-            target_cpu = target.detach().cpu().numpy()
+                task_output_prob = task_proba[:, 1]  # Use prob of class 1
             # Calculate AUC
             try:
-                auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, multi_class='ovo', average='macro', *args, **kwargs)
+                auc = roc_auc_score(y_true=target, y_score=task_output_prob, multi_class='ovo', average='macro', *args, **kwargs)
             except ValueError:
                 auc = 0.5  # Default AUC for invalid cases (e.g., all labels are the same)
-
             auc_scores.append(auc)
 
         return np.array(auc_scores)
@@ -1491,77 +1502,3 @@ class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, Classifi
             Output feature names for the latent space.
         """
         return [f"latent_{i}" for i in range(self.vae.encoder.latent_mu.out_features)]
-
-def is_interactive_environment():
-    """
-    Detect if the code is running in an interactive environment (e.g., Jupyter Notebook or IPython).
-
-    Returns
-    -------
-    bool
-        True if running in an interactive environment, False otherwise.
-    """
-    try:
-        # Check if running in IPython or Jupyter Notebook
-        if hasattr(sys, 'ps1'):  # Standard interactive interpreter (Python REPL)
-            return True
-        if 'IPython' in sys.modules:  # IPython or Jupyter environment
-            import IPython
-            return IPython.get_ipython() is not None
-    except ImportError:
-        pass  # IPython not installed
-
-    return False  # Not an interactive environment
-
-def generate_hidden_dims(hidden_dim, latent_dim, depth, strategy="constant", order="decreasing"):
-    """
-    Generator for computing dimensions of hidden layers.
-
-    Parameters
-    ----------
-    hidden_dim : int
-        Dimension of the first hidden layer (encoder input or decoder output).
-    latent_dim : int
-        Dimension of the latent space (encoder output or decoder input).
-    depth : int
-        Number of hidden layers.
-    strategy : str, optional
-        Scaling strategy for hidden layer dimensions:
-        - "constant" or "c": All layers have the same width.
-        - "linear" or "l": Linearly decrease/increase the width.
-        - "geometric" or "g": Geometrically decrease/increase the width.
-        Default is "constant".
-    order : str, optional
-        Order of dimensions:
-        - "decreasing": Generate dimensions for encoder (hidden_dim -> latent_dim).
-        - "increasing": Generate dimensions for decoder (latent_dim -> hidden_dim).
-        Default is "decreasing".
-
-    Yields
-    ------
-    tuple of int
-        A tuple representing (input_dim_{i}, output_dim_{i}) for each layer.
-    """
-    if depth < 0:
-        raise ValueError("Depth must be non-negative.")
-    
-    # Generate dimensions based on strategy
-    if strategy in ["constant", 'c']:
-        dims = np.full(depth + 2, hidden_dim, dtype=int)
-    elif strategy in ["linear", 'l']:
-        dims = np.linspace(hidden_dim, latent_dim, depth + 2, dtype=int)
-    elif strategy in ["geometric", 'g']:
-        dims = hidden_dim * (latent_dim / hidden_dim) ** np.linspace(0, 1, depth + 2)
-        dims = dims.astype(int)
-    else:
-        raise ValueError(f"Unknown strategy: {strategy}")
-
-    # Adjust order for encoder or decoder
-    if order == "increasing":
-        dims = dims[::-1]
-    elif order != "decreasing":
-        raise ValueError(f"Unknown order: {order}. Must be 'decreasing' or 'increasing'.")
-
-    # Generate layer tuples
-    for i in range(len(dims)-2):
-        yield dims[i], dims[i + 1]
