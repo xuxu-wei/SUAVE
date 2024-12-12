@@ -384,7 +384,8 @@ class MultiTaskPredictor(nn.Module):
             Task-specific head with Softmax output.
         """
         layers = []
-        for _ in range(depth):
+        for d in range(depth):
+            input_dim = hidden_dim if d > 0 else input_dim
             layers.append(ResidualBlock(input_dim, hidden_dim, dropout_rate=dropout_rate, use_batch_norm=use_batch_norm))
         layers.append(nn.Linear(hidden_dim, num_classes))  # Output layer
         return nn.Sequential(*layers)
