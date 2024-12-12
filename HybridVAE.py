@@ -978,21 +978,20 @@ class HybridVAEMultiTaskModel(nn.Module):
             # freeze weights if counter exceed patience
             if vae_patience_counter >= patience:
                 for param in self.vae.parameters():
-                    if training_status['vae']:
+                    param.requires_grad = False
+                    if training_status['vae'] == True:
                         print(f'Epoch {epoch+1}: VAE early stopping triggered.') if verbose > 0 else None
                         training_status['vae'] = False
-                        param.requires_grad = False
 
-            for task_ix, counter in enumerate(task_patience_counters):
-                # For prediction tasks, early stopping only when VAE has stopped.
-                if (counter >= patience) and (training_status['vae'] == False):
-                    task_model = self.predictor.task_heads[task_ix]
-
-                    for param in task_model.parameters():
-                        if training_status[task_ix]:
-                            training_status[task_ix] = False
-                            print(f'Epoch {epoch+1}: {self.task_names[task_ix]} early stopping triggered.') if verbose > 0 else None
+                for task_ix, counter in enumerate(task_patience_counters):
+                    # For prediction tasks, early stopping only when VAE has stopped.
+                    if counter >= patience:
+                        current_task_head = self.predictor.task_heads[task_ix]
+                        for param in current_task_head.parameters():
                             param.requires_grad = False
+                            if training_status[task_ix] == True:
+                                training_status[task_ix] = False
+                                print(f'Epoch {epoch+1}: {self.task_names[task_ix]} early stopping triggered.') if verbose > 0 else None
 
             # Stop if both counters exceed patience
             if vae_patience_counter >= patience and all(counter >= patience for counter in task_patience_counters):
