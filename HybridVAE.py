@@ -984,7 +984,8 @@ class HybridVAEMultiTaskModel(nn.Module):
                         param.requires_grad = False
 
             for task_ix, counter in enumerate(task_patience_counters):
-                if counter >= patience:
+                # For prediction tasks, early stopping only when VAE has stopped.
+                if (counter >= patience) and (training_status['vae'] == False):
                     task_model = self.predictor.task_heads[task_ix]
 
                     for param in task_model.parameters():
