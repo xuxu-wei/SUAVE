@@ -15,10 +15,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-# TODO 每个任务使用单独的优化器，schduler 进一步优化, 已经达到patience的任务冻结权重
-# TODO Ecoder 结构似乎有问题，多了一个线性层？
-
 class Encoder(nn.Module):
     """
     Encoder network for Variational Autoencoder (VAE).
@@ -971,7 +967,7 @@ class HybridVAEMultiTaskModel(nn.Module):
             if vae_patience_counter >= patience:
                 for param in self.vae.parameters():
                     if training_status['vae']:
-                        print(f'VAE early stopping triggered.')
+                        print(f'Epoch {epoch+1}: VAE early stopping triggered.') if verbose > 0 else None
                         training_status['vae'] = False
                         param.requires_grad = False
 
@@ -982,7 +978,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                     for param in task_model.parameters():
                         if training_status[task_ix]:
                             training_status[task_ix] = False
-                            print(f'task {task_ix}: {self.task_names[task_ix]} early stopping triggered.')
+                            print(f'Epoch {epoch+1}: {self.task_names[task_ix]} early stopping triggered.') if verbose > 0 else None
                             param.requires_grad = False                            
 
             # Stop if both counters exceed patience
