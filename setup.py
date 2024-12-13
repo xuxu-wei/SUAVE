@@ -59,7 +59,7 @@ class InstallWithPytorch(install):
             raise RuntimeError(f"Unsupported system: {system}")
         
 setup(
-    name="suave",
+    name="suave-ml",
     version="0.1.0a8",
 
     long_description=open("README.md").read(),
@@ -96,7 +96,7 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 
-    keywords="VAE supervised-dim-reduction multi-task-learning pytorch sklearn deep machine learning",
+    keywords="VAE supervised-dim-reduction multi-task-learning pytorch sklearn deep learning",
     
     cmdclass={
         "install": InstallWithPytorch,
