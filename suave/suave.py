@@ -1116,9 +1116,9 @@ class SUAVE(nn.Module):
         ax.plot(train_vae_losses, label='Train VAE Loss', linestyle='-')
         ax.plot(val_vae_losses, label='Val VAE Loss', linestyle='-')
         ax.set_xlabel('Epochs')
-        ax.set_ylabel(f'Reconstruction + KL {stop_flag}')
+        ax.set_ylabel('Reconstruction + KL')
         ax.legend()
-        ax.set_title('VAE Loss (Reconstruction + KL)')
+        ax.set_title(f'VAE Loss (Reconstruction + KL) {stop_flag}')
         ax.grid()
 
         # Task-specific AUC Plots

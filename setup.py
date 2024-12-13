@@ -60,7 +60,7 @@ class InstallWithPytorch(install):
         
 setup(
     name="suave",
-    version="0.1.0a6",
+    version="0.1.0a7",
 
     long_description=open("README.md").read(),
     long_description_content_type='text/markdown',
