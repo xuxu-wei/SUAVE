@@ -1062,9 +1062,9 @@ class SUAVE(nn.Module):
             self.training_status['vae'] = False
 
         # Handle task head
-        elif name in self.task_optimizer_dict:
+        elif name in self.multitask_optimizer_dict:
             # Set task head optimizer learning rate to 0
-            for param_group in self.task_optimizer_dict[name].param_groups:
+            for param_group in self.multitask_optimizer_dict[name].param_groups:
                 param_group['lr'] = 0
 
             # Update training status
