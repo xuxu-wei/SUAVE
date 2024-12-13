@@ -77,6 +77,7 @@ setup(
         "numpy>=1.9.3",
         "pandas>=1.3.5",
         "tqdm>=4.2.0",
+        "matplotlib>=3.0.0",
     ],
 
     classifiers=[
