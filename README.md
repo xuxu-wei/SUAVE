@@ -1,40 +1,37 @@
-# Hybrid Variational Autoencoder (VAE) with Multi-Task Learning (MTL)
+# SUAVE: Supervised and Unified Analysis of Variational Embeddings
 
-This repository provides an implementation of a **Hybrid Variational Autoencoder (VAE)** integrated with **Multi-Task Learning (MTL)** for dimensionality reduction and predictive modeling. The model combines **unsupervised latent representation learning** with **supervised learning**, allowing the latent space to be guided by label information for downstream prediction tasks. 
+**SUAVE** is a Python package built upon a **Hybrid Variational Autoencoder (VAE)** integrated with Multi-Task Learning. It unifies unsupervised latent representation learning with supervised prediction tasks. By guiding the latent space with label information, SUAVE not only achieves dimensionality reduction but also yields discriminative and interpretable embeddings that directly benefit downstream classification or regression tasks.
 
 ---
 
 ## Key Features
 
-### 1. Hybrid Learning Paradigm
-- **Unsupervised Learning**: The VAE learns a latent space representation by reconstructing input features and regularizing the latent space via KL divergence.  
-- **Supervised Learning**: Label information directs the latent representation to align with predictive tasks (e.g., binary classification).  
+### 1. Supervised & Unsupervised Fusion
+- **Unsupervised (VAE)**: Learns a latent space representation by reconstructing input features and regularizing the latent variables using a Kullback-Leibler (KL) divergence term.  
+- **Supervised (MTL)**: Incorporates label information to shape the latent space, ensuring that the learned features are informative for one or multiple prediction tasks.
 
-This dual-objective framework ensures that the latent space is both informative and discriminative, making it well-suited for tasks requiring both dimensionality reduction and accurate predictions.
+### 2. Multi-Task Learning Integration
+- **Shared Representations**: A single latent space underpins multiple related classification (or other) tasks, leveraging common data structure for efficient, joint learning.  
+- **Task-Specific Heads**: Independent prediction heads are built atop the shared latent space. This encourages knowledge transfer among tasks and can improve predictive performance on each one.
 
-### 2. Multi-Task Learning
-- **Parallel Tasks**: Supports multiple binary classification tasks simultaneously (e.g., predicting in-hospital and 28-day mortality).  
-- **Task-Specific Networks**: Task-specific heads are built on shared latent representations, leveraging shared features while fine-tuning for individual outcomes.  
+### 3. Flexible and Customizable Architecture
+- **Configurable Networks**: Easily adjust encoder and decoder depths, widths, and layer scaling strategies (e.g., constant, linear, geometric).  
+- **Regularization Built-In**: Batch normalization and dropout help stabilize training and mitigate overfitting.
 
-### 3. Flexible Architecture
-- **Customizable Networks**: Dynamic encoder-decoder design supports variable depth, layer scaling (constant, linear, or geometric), and regularization options.  
-- **Batch Normalization and Dropout**: Improves training stability and prevents overfitting.  
+### 4. Scikit-Learn Compatibility
+- **Seamless Integration**: The `SUAVEMultiTaskSklearn` class is compatible with scikit-learn’s pipeline and model selection APIs. Perform hyperparameter tuning with `GridSearchCV` and integrate SUAVE models into complex ML workflows with minimal friction.
 
-### 4. Scikit-Learn Integration
-- The `HybridVAEMultiTaskSklearn` wrapper is  compatible with scikit-learn pipelines, enabling easy integration with tools like `GridSearchCV` for hyperparameter tuning.
-
-### 5. Training Utilities
-- **Joint Loss Optimization**: Combines VAE losses (reconstruction + KL divergence) with task-specific binary cross-entropy loss.  
-- **Early Stopping**: Prevents overfitting by monitoring validation losses.  
-- **Learning Rate Scheduling**: Automatically adjusts learning rates based on validation performance.  
+### 5. Comprehensive Training Utilities
+- **Joint Objective Optimization**: Simultaneously optimizes the VAE reconstruction/KL losses and supervised binary cross-entropy losses.  
+- **Early Stopping & LR Scheduling**: Monitors validation metrics for early stopping and dynamically adjusts learning rates to ensure stable convergence.
 
 ---
 
-## Example Applications
+## Example Use Cases
 
-- **Dimensionality Reduction with Supervision**: Use the VAE to extract low-dimensional features that are informed by label relationships.  
-- **Multi-Task Classification**: Predict multiple related outcomes (e.g., survival rates across different time horizons) with shared feature learning.  
-- **Generative Modeling**: Generate synthetic samples or interpolate between data points in the latent space.  
+- **Supervised Dimensionality Reduction**: Obtain a low-dimensional feature representation that preserves predictive signals for classification tasks.  
+- **Multi-Task Classification**: Tackle multiple related outcomes (e.g., multiple mortality endpoints) within a unified model and benefit from shared latent factors.  
+- **Generative Modeling & Data Insight**: Interpolate, generate synthetic samples, and visualize latent structures that capture underlying data patterns and decision boundaries.
 
 ---
 
@@ -51,21 +48,28 @@ git clone https://github.com/xuxu-wei/HybridVAE.git
 
 ### Define and Train the Model
 ```python
-from HybridVAE import HybridVAEMultiTaskSklearn
+from SUAVE import SUAVEMultiTaskSklearn
 
-# Initialize the model
-model = HybridVAEMultiTaskSklearn(input_dim=X_train.shape[1],          # Input feature dimension
-                                  task_count=Y_train.shape[1],         # Number of binary classification tasks
-                                  latent_dim=10,                       # Latent space dimension
-                                  )
+# Instantiate the model
+model = SUAVEMultiTaskSklearn(
+    input_dim=X_train.shape[1],    # Input feature dimension
+    task_count=Y_train.shape[1],   # Number of binary classification tasks
+    latent_dim=10                  # Latent dimension
+)
 
-# Train the model
+# Fit the model on training data
 model.fit(X_train, Y_train, epochs=1000, animate_monitor=True, verbose=1)
 
-# Evaluate performance
-predictions = model.predict(X_test)
+# Generate predictions on test data
+predictions = model.predict_proba(X_test)
 auc_scores = model.score(X_test, Y_test)
 print("AUC Scores:", auc_scores)
+
+# Extract latent representations
+latent_features = model.transform(X_test)
+
+# Reconstruct inputs from latent space
+reconstructed = model.inverse_transform(latent_features)
 ```
 
 ### Transform Features to Latent Space
