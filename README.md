@@ -44,18 +44,10 @@
 
 **Please Note** This package requires PyTorch. Please install the appropriate version of PyTorch for your system using the [official PyTorch guide](https://pytorch.org/get-started/locally/).
 
-- Install from TestPypi
+- Install from Pypi
 
 ```bash
 pip install suave-ml
-```
-
-- Clone this repository and install the required dependencies:
-
-```bash
-git clone https://github.com/xuxu-wei/SUACVE.git
-cd SUAVE
-pip install -r requirements.txt
 ```
 
 ---
