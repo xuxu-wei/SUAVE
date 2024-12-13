@@ -14,10 +14,11 @@ setup(
     packages=find_packages(include=["suave", "suave.*"]),
     python_requires=">=3.8",
     install_requires=[
-        "torch>=2.0.0",
+        "torch>=1.18.0",
         "scikit-learn>=1.0.2",
         "numpy>=1.19.0",
         "pandas>=1.1.0",
+        "tqdm>=3.0.0",
     ],
 
     classifiers=[
