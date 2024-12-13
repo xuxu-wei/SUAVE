@@ -19,7 +19,7 @@
 - **Regularization Built-In**: Batch normalization and dropout help stabilize training and mitigate overfitting.
 
 ### 4. Scikit-Learn Compatibility
-- **Seamless Integration**: The `SUAVEMultiTaskSklearn` class is compatible with scikit-learn’s pipeline and model selection APIs. Perform hyperparameter tuning with `GridSearchCV` and integrate SUAVE models into complex ML workflows with minimal friction.
+- **Seamless Integration**: The `SuaveSklearn` class is compatible with scikit-learn’s pipeline and model selection APIs. Perform hyperparameter tuning with `GridSearchCV` and integrate SUAVE models into complex ML workflows with minimal friction.
 
 ### 5. Comprehensive Training Utilities
 - **Joint Objective Optimization**: Simultaneously optimizes the VAE reconstruction/KL losses and supervised binary cross-entropy losses.  
@@ -48,10 +48,10 @@ git clone https://github.com/xuxu-wei/HybridVAE.git
 
 ### Define and Train the Model
 ```python
-from SUAVE import SUAVEMultiTaskSklearn
+from SUAVE import SuaveClassifier
 
 # Instantiate the model
-model = SUAVEMultiTaskSklearn(
+model = SuaveClassifier(
     input_dim=X_train.shape[1],    # Input feature dimension
     task_count=Y_train.shape[1],   # Number of binary classification tasks
     latent_dim=10                  # Latent dimension

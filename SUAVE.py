@@ -425,9 +425,9 @@ class MultiTaskPredictor(nn.Module):
         return outputs
 
 
-class HybridVAEMultiTaskModel(nn.Module):
+class SUAVE(nn.Module):
     """
-    Hybrid Variational Autoencoder (VAE) and Multi-Task Predictor Model.
+    Supervised and Unified Analysis of Variational Embeddings (SUAVE)
 
     This model combines a Variational Autoencoder (VAE) for dimensionality reduction
     with a Multi-Task Predictor for performing parallel predictive tasks.
@@ -538,7 +538,7 @@ class HybridVAEMultiTaskModel(nn.Module):
                  lr_scheduler_patience=None,
                  use_batch_norm=True, 
                  ):
-        super(HybridVAEMultiTaskModel, self).__init__()
+        super(SUAVE, self).__init__()
         self.vae = VAE(input_dim, depth=vae_depth, hidden_dim=vae_hidden_dim, strategy=layer_strategy, # VAE strcture
                        dropout_rate=vae_dropout_rate, latent_dim=latent_dim, use_batch_norm=use_batch_norm # normalization
                        )
@@ -1269,11 +1269,11 @@ class HybridVAEMultiTaskModel(nn.Module):
         return model
     
 
-class HybridVAEMultiTaskSklearn(HybridVAEMultiTaskModel, BaseEstimator, ClassifierMixin, TransformerMixin):
+class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
     """
     Scikit-learn compatible wrapper for the Hybrid VAE and Multi-Task Predictor.
 
-    This class extends the `HybridVAEMultiTaskModel` by adding methods compatible with scikit-learn's API,
+    This class extends the `SUAVE` by adding methods compatible with scikit-learn's API,
     such as `fit`, `transform`, `predict`, and `score`.
 
     Methods

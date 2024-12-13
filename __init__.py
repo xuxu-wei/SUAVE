@@ -1,3 +1,3 @@
 import sys
 
-from .HybridVAE import HybridVAEMultiTaskModel, HybridVAEMultiTaskSklearn
+from .SUAVE import SUAVE, SuaveClassifier
