@@ -47,7 +47,7 @@
 - Install from TestPypi
 
 ```bash
-pip install suave
+pip install suave-ml
 ```
 
 - Clone this repository and install the required dependencies:
