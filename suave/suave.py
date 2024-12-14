@@ -15,6 +15,18 @@ from .utils import *
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# TODO 支持回归任务
+
+# TODO 支持回归/分类混合建模?
+
+# TODO 支持部分训练:
+# 在fit中引入参数管理被训练的部分模块以及对应的参数初始化行为和学习率，
+# 从而可以把训练好的VAE冻结，然后在不同任务中仅训练下游任务，使每次fit仅重新初始化需要训练的部分，也可以支持fine-tuning.
+
+# TODO 自定义模型：
+# 引入一个类，使得不同的下游任务predictor模块可以通过parallel的方式连接到latent space上用于预测
+# （但这个模型不支持训练，如需训练应该使用前面的部分训练，完成后再把模型接到这里）
+
 class Encoder(nn.Module):
     """
     Encoder network for Variational Autoencoder (VAE).
