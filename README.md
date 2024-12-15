@@ -118,7 +118,8 @@ print("AUC Scores:", auc_scores)
 AUC Scores: [0.6807871  0.70718777 0.50661058]
 ```
 
-### 3. Transform Features to Latent Space
+---
+### 4. Transform Features to Latent Space
 
 
 ```python
@@ -128,7 +129,7 @@ X_latent = pd.DataFrame(latent_features, index=X_test.index, columns=[f'latent_f
 
 ---
 
-### 4. Reconstruct inputs from latent space
+### 5. Reconstruct inputs from latent space
 
 
 ```python
