@@ -107,7 +107,7 @@ model.fit(X_train, Y_train, epochs=1000, animate_monitor=True, verbose=1)
 
 
 ---
-### 3. Make prediction
+### 3. Make Predictions
 ```python
 # Make predictions on test data
 y_probas = model.predict_proba(X_test)
