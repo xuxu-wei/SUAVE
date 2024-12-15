@@ -94,12 +94,6 @@ model = SuaveClassifier(input_dim=X_train.shape[1],                             
 
 # Fit the model on training data
 model.fit(X_train, Y_train, epochs=1000, animate_monitor=True, verbose=1)
-
-# Make predictions on test data
-y_probas = model.predict_proba(X_test)
-y_hats = model.predict(X_test)
-auc_scores = model.score(X_test, Y_test)
-print("AUC Scores:", auc_scores)
 ```
 
 
@@ -110,9 +104,19 @@ print("AUC Scores:", auc_scores)
     Training: 100%|█████████▉| 998/1000 [03:40<00:00,  4.52epoch/s, VAE(t)=94.677, VAE(v)=85.093, AUC(t)=[np.float64(0.606), np.float64(0.639), np.float64(0.5)], AUC(v)=[np.float64(0.572), np.float64(0.642), np.float64(0.543)]]  
     
     Early stopping triggered due to no improvement in both VAE and task losses.
-    AUC Scores: [0.6807871  0.70718777 0.50661058]
+
 
 ---
+### 3. Make prediction
+```python
+# Make predictions on test data
+y_probas = model.predict_proba(X_test)
+y_hats = model.predict(X_test)
+
+auc_scores = model.score(X_test, Y_test)
+print("AUC Scores:", auc_scores)
+AUC Scores: [0.6807871  0.70718777 0.50661058]
+```
 
 ### 3. Transform Features to Latent Space
 
