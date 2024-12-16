@@ -15,6 +15,10 @@ import matplotlib.pyplot as plt
 from .utils import *
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# TODO 早停机制
+# 检查早停机制是否正常，或者信息显示是否正常
+# 1. 发现图像上所有模型都early stop 但训练仍在继续
+# 2. 打印信息显示VAE触发early stop后未显示其他消息 直接早停
 
 # TODO 支持回归任务
 
