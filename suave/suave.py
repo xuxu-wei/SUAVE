@@ -1,6 +1,7 @@
 import os, sys, json
 import inspect
 from tqdm import tqdm
+from tqdm.notebook import tqdm_notebook
 import pandas as pd
 import numpy as np
 import torch
@@ -850,7 +851,10 @@ class SUAVE(nn.Module):
         # Training loop with tqdm
         iterator = range(epochs)
         if verbose:  # 控制进度条显示
-            iterator = tqdm(iterator, desc="Training", unit="epoch")
+            if animate_monitor:
+                iterator = tqdm(iterator, desc="Training", unit="epoch")
+            elif is_interactive_environment():
+                iterator = tqdm_notebook(iterator, desc="Training", unit="epoch")
 
         for epoch in iterator:
             self.train()
