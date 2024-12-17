@@ -34,29 +34,36 @@ class Encoder(nn.Module, ResetMixin):
     ----------
     input_dim : int
         Dimension of the input data (typically same as the input feature dimension).
-    depth : int, optional
-        Number of hidden layers in the encoder (default is 3).
-    hidden_dim : int, optional
-        Number of neurons in the first hidden layer (default is 64).
-    dropout_rate : float, optional
-        Dropout rate for regularization in the hidden layers (default is 0.3).
-    latent_dim : int, optional
-        Dimension of the latent space (default is 10).
-    use_batch_norm : bool, optional
-        Whether to apply batch normalization to hidden layers (default is True).
-    strategy : str, optional
+
+    depth : int, optional, default=3
+        Number of hidden layers in the encoder.
+
+    hidden_dim : int, optional, default=64
+        Number of neurons in the first hidden layer.
+
+    dropout_rate : float, optional, default=0.3
+        Dropout rate for regularization in the hidden layers.
+
+    latent_dim : int, optional, default=10
+        Dimension of the latent space.
+
+    use_batch_norm : bool, optional, default=True
+        Whether to apply batch normalization to hidden layers.
+
+    strategy : str, optional, default="linear"
         Strategy for scaling hidden layer dimensions:
         - "constant" or "c": All hidden layers have the same width.
         - "linear" or "l": Linearly decrease the width from `hidden_dim` to `latent_dim`.
         - "geometric" or "g": Geometrically decrease the width from `hidden_dim` to `latent_dim`.
-        Default is "linear".
 
     Attributes
     ----------
     body : nn.Sequential
         Sequential container for the encoder's hidden layers.
+
     latent_mu : nn.Linear
         Linear layer mapping the final hidden layer to the latent space mean.
+
     latent_logvar : nn.Linear
         Linear layer mapping the final hidden layer to the latent space log-variance.
 
@@ -69,7 +76,7 @@ class Encoder(nn.Module, ResetMixin):
     -----
     - The hidden layer dimensions are dynamically generated using the `generate_hidden_dims` function.
     - The final layer dimensions are mapped to the latent space using `latent_mu` and `latent_logvar`.
-    - If `depth=0`, the encoder contains only the input layer and no additional hidden layers.
+
     """
     def __init__(self, input_dim, depth=3, hidden_dim=64, dropout_rate=0.3, latent_dim=10, use_batch_norm=True, strategy="linear"):
         super(Encoder, self).__init__()
@@ -106,6 +113,22 @@ class Encoder(nn.Module, ResetMixin):
         ] + [(hidden_out_dim, latent_dim)]
         
     def forward(self, x):
+        '''
+        Perform a forward pass through the encoder.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor with shape (batch_size, input_dim).
+
+        Returns
+        -------
+        mu : torch.Tensor
+            Latent mean tensor with shape (batch_size, latent_dim).
+
+        logvar : torch.Tensor
+            Latent log variance tensor with shape (batch_size, latent_dim).
+        '''
         h = self.body(x)
         mu = self.latent_mu(h)
         logvar = self.latent_logvar(h)
@@ -126,15 +149,18 @@ class Decoder(nn.Module, ResetMixin):
         - `latent_dim` : Dimension of the latent space.
         - `output_dim` : Dimension of the reconstructed input space (same as the input dimension in Encoder).
         The length of `dim_list` determines the number of layers in the decoder.
-    dropout_rate : float, optional
-        Dropout rate for regularization in the hidden layers (default is 0.3).
-    use_batch_norm : bool, optional
-        Whether to apply batch normalization to hidden layers (default is True).
+
+    dropout_rate : float, optional, default=0.3
+        Dropout rate for regularization in the hidden layers.
+
+    use_batch_norm : bool, optional, default=True
+        Whether to apply batch normalization to hidden layers.
 
     Attributes
     ----------
     body : nn.Sequential
         Sequential container for the hidden layers of the decoder.
+
     output_layer : nn.Linear
         Linear layer mapping the final hidden layer to the reconstructed input space.
 
@@ -149,15 +175,6 @@ class Decoder(nn.Module, ResetMixin):
     - The hidden layers are created using the dimensions specified in `dim_list`, except the final tuple, 
       which is used to define `output_layer`.
     - If `use_batch_norm=True`, batch normalization is applied after each hidden layer.
-
-    Examples
-    --------
-    # Example usage
-    dim_list = [(10, 64), (64, 128), (128, 256), (256, 30)]  # latent_dim=10, output_dim=30
-    decoder = Decoder(dim_list=dim_list, dropout_rate=0.3, use_batch_norm=True)
-    z = torch.randn((32, 10))  # Batch size 32, latent space dimension 10
-    reconstructed_x = decoder(z)
-    print(reconstructed_x.shape)  # Output: torch.Size([32, 30])
     """
     def __init__(self, dim_list, dropout_rate=0.3, use_batch_norm=True):
         super(Decoder, self).__init__()
@@ -185,17 +202,17 @@ class Decoder(nn.Module, ResetMixin):
 
     def forward(self, z):
         """
-        Forward pass through the decoder.
+        Perform a forward pass through the decoder.
 
         Parameters
         ----------
         z : torch.Tensor
-            Latent representation, shape (batch_size, latent_dim).
+            Latent representation tensor with shape (batch_size, latent_dim).
 
         Returns
         -------
         torch.Tensor
-            Reconstructed input, shape (batch_size, output_dim).
+            Reconstructed input tensor with shape (batch_size, output_dim).
         """
         h = self.body(z)
         return self.output_layer(h)
@@ -207,40 +224,47 @@ class VAE(nn.Module, ResetMixin):
 
     Parameters
     ----------
-    input_dim : int, optional
-        Dimension of the input data (default is 30).
-    depth : int, optional
-        Number of hidden layers in both the encoder and decoder (default is 3).
-    hidden_dim : int, optional
-        Number of neurons in the first hidden layer of the encoder/decoder (default is 64).
-    dropout_rate : float, optional
-        Dropout rate for regularization in the encoder/decoder hidden layers (default is 0.3).
-    latent_dim : int, optional
-        Dimension of the latent space (default is 10).
-    use_batch_norm : bool, optional
-        Whether to apply batch normalization to the encoder/decoder hidden layers (default is True).
-    strategy : str, optional
+    input_dim : int, optional, default=30
+        Dimension of the input data.
+
+    depth : int, optional, default=3
+        Number of hidden layers in both the encoder and decoder.
+
+    hidden_dim : int, optional, default=64
+        Number of neurons in the first hidden layer of the encoder/decoder.
+
+    dropout_rate : float, optional, default=0.3
+        Dropout rate for regularization in the encoder/decoder hidden layers.
+
+    latent_dim : int, optional, default=10
+        Dimension of the latent space.
+
+    use_batch_norm : bool, optional, default=True
+        Whether to apply batch normalization to the encoder/decoder hidden layers.
+
+    strategy : str, optional, default='linear'
         Strategy for scaling hidden layer dimensions in the encoder/decoder:
         - "constant" or "c": All hidden layers have the same width.
         - "linear" or "l": Linearly increase/decrease the width.
         - "geometric" or "g": Geometrically increase/decrease the width.
-        Default is "linear".
 
     Attributes
     ----------
     encoder : Encoder
         The encoder network for mapping input data to latent space.
+
     decoder : Decoder
         The decoder network for reconstructing input data from latent space.
 
     Methods
     -------
-    forward(x)
+    forward(x, deterministic=False)
         Perform a forward pass through the VAE:
         1. Encode the input to obtain `mu` and `logvar` (latent mean and log-variance).
         2. Reparameterize to sample latent vectors.
         3. Decode the sampled latent vectors to reconstruct the input.
-    reparameterize(mu, logvar)
+
+    reparameterize(mu, logvar, deterministic=False)
         Apply the reparameterization trick to sample latent vectors from `mu` and `logvar`.
 
     Notes
@@ -264,16 +288,19 @@ class VAE(nn.Module, ResetMixin):
         ----------
         mu : torch.Tensor
             Latent mean tensor.
+
         logvar : torch.Tensor
             Latent log variance tensor.
-        deterministic : bool, optional
-            If True, uses the latent mean (mu) for predictions, avoiding randomness.
+
+        deterministic : bool, optional, default=False
+            If True, uses the latent mean (`mu`) for predictions, avoiding randomness.
             If False, samples from the latent space using reparameterization trick.
 
         Returns
         -------
         torch.Tensor
             Sampled latent tensor with shape (batch_size, latent_dim).
+
         """
         if deterministic:
             # for deterministic prediction and validation
@@ -286,12 +313,80 @@ class VAE(nn.Module, ResetMixin):
             return mu + eps * std         # Reparameterize to compute latent vector z
 
     def forward(self, x, deterministic=False):
+        """
+        Perform a forward pass through the VAE.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor with shape (batch_size, input_dim).
+
+        deterministic : bool, optional, default=False
+            If True, uses the latent mean (`mu`) for predictions, avoiding randomness.
+            If False, samples from the latent space using reparameterization trick.
+
+        Returns
+        -------
+        recon : torch.Tensor
+            Reconstructed input tensor with shape (batch_size, input_dim).
+
+        mu : torch.Tensor
+            Latent mean tensor with shape (batch_size, latent_dim).
+
+        logvar : torch.Tensor
+            Latent log variance tensor with shape (batch_size, latent_dim).
+
+        z : torch.Tensor
+            Latent representation tensor with shape (batch_size, latent_dim).
+        """
         mu, logvar = self.encoder(x)
         z = self.reparameterize(mu, logvar, deterministic=deterministic)
         recon = self.decoder(z)
         return recon, mu, logvar, z
 
 class ResidualBlock(nn.Module):
+    """
+    Residual Block with optional projection and batch normalization.
+
+    Parameters
+    ----------
+    input_dim : int
+        Dimension of the input features.
+
+    output_dim : int
+        Dimension of the output features.
+
+    dropout_rate : float, optional, default=0.3
+        Dropout rate for regularization in the hidden layers.
+
+    use_batch_norm : bool, optional, default=True
+        Whether to apply batch normalization to hidden layers.
+
+    Attributes
+    ----------
+    fc : nn.Linear
+        Linear transformation layer.
+
+    use_projection : bool
+        Indicates whether a projection layer is used to match input and output dimensions.
+
+    projection : nn.Linear or nn.Identity
+        Projection layer to match input and output dimensions if necessary.
+
+    bn : nn.BatchNorm1d or nn.Identity
+        Batch normalization layer applied after the linear transformation.
+
+    dropout : nn.Dropout
+        Dropout layer for regularization.
+
+    activation : nn.LeakyReLU
+        Activation function applied after batch normalization and dropout.
+
+    Methods
+    -------
+    forward(x)
+        Perform a forward pass through the residual block.
+    """
     def __init__(self, input_dim, output_dim, dropout_rate=0.3, use_batch_norm=True):
         super(ResidualBlock, self).__init__()
         self.fc = nn.Linear(input_dim, output_dim)
@@ -302,6 +397,19 @@ class ResidualBlock(nn.Module):
         self.activation = nn.LeakyReLU()
 
     def forward(self, x):
+        """
+        Perform a forward pass through the residual block.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor with shape (batch_size, input_dim).
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor with shape (batch_size, output_dim).
+        """
         residual = self.projection(x) if self.use_projection else x
         h = self.fc(x)
         h = self.bn(h)
@@ -322,20 +430,26 @@ class MultiTaskPredictor(nn.Module, ResetMixin):
     ----------
     task_classes : list of int
         A list containing the number of classes for each task. For binary tasks, use 2.
+
     latent_dim : int
         Dimension of the shared latent representation input.
+
     hidden_dim : int
         Number of neurons in the hidden layers of each task-specific head.
-    predictor_depth : int, optional
-        Number of hidden layers in each task-specific head (default is 3).
-    task_strategy : str, optional
+
+    predictor_depth : int, optional, default=3
+        Number of hidden layers in each task-specific head.
+
+    task_strategy : str, optional, default='parallel'
         Strategy for modeling tasks:
         - 'parallel': Tasks are modeled independently.
-        - 'sequential': Each task depends on the previous task's output (default is 'parallel').
-    dropout_rate : float, optional
-        Dropout rate for regularization in the hidden layers (default is 0.3).
-    use_batch_norm : bool, optional
-        Whether to apply batch normalization to the hidden layers (default is True).
+        - 'sequential': Each task depends on the previous task's output.
+
+    dropout_rate : float, optional, default=0.3
+        Dropout rate for regularization in the hidden layers.
+
+    use_batch_norm : bool, optional, default=True
+        Whether to apply batch normalization to the hidden layers.
 
     Attributes
     ----------
@@ -378,14 +492,21 @@ class MultiTaskPredictor(nn.Module, ResetMixin):
 
         Parameters
         ----------
-        input_dim : int
-            Input dimension of the task-specific head.
         num_classes : int
             Number of classes for this task.
+
+        input_dim : int
+            Input dimension of the task-specific head.
+
+        hidden_dim : int
+            Number of neurons in the hidden layers.
+
         depth : int
             Number of hidden layers in the task-specific head.
+
         dropout_rate : float
             Dropout rate for regularization.
+
         use_batch_norm : bool
             Whether to apply batch normalization.
 
@@ -408,14 +529,13 @@ class MultiTaskPredictor(nn.Module, ResetMixin):
         Parameters
         ----------
         z : torch.Tensor
-            Latent representation, shape (batch_size, latent_dim).
+            Latent representation tensor with shape (batch_size, latent_dim).
 
         Returns
         -------
         list of torch.Tensor
-            List of task-specific predictions, each with shape (batch_size, n_classes).
+            List of task-specific prediction tensors, each with shape (batch_size, n_classes).
         """
-
         if self.task_strategy == 'parallel':
             outputs = [head(z) for head in self.task_heads]
 
@@ -438,7 +558,7 @@ class MultiTaskPredictor(nn.Module, ResetMixin):
 
 class SUAVE(nn.Module, ResetMixin):
     """
-    Supervised and Unified Analysis of Variational Embeddings (SUAVE)
+    Supervised and Unified Analysis of Variational Embeddings (SUAVE).
 
     This model combines a Variational Autoencoder (VAE) for dimensionality reduction
     with a Multi-Task Predictor for performing parallel predictive tasks.
@@ -447,74 +567,134 @@ class SUAVE(nn.Module, ResetMixin):
     ----------
     input_dim : int
         Dimension of the input data.
-    task_count : int
-        Number of parallel prediction tasks.
-    layer_strategy : str, optional
+        
+    task_classes : list of int
+        A list containing the number of classes for each task. For binary tasks, use 2.
+        
+    task_strategy : str, optional, default='parallel'
+        Strategy for modeling tasks:
+        - "parallel" or "p": Tasks are modeled independently.
+        - "sequential" or "s": Each task depends on the previous task's output.
+        
+    layer_strategy : str, optional, default='linear'
         Strategy for scaling hidden layer dimensions in both the VAE and Multi-Task Predictor:
         - "constant" or "c": All hidden layers have the same width.
         - "linear" or "l": Linearly increase/decrease the width.
         - "geometric" or "g": Geometrically increase/decrease the width.
-        Default is "linear".
-    vae_hidden_dim : int, optional
-        Number of neurons in the first hidden layer of the VAE encoder/decoder (default is 64).
-    vae_depth : int, optional
-        Number of hidden layers in the VAE encoder/decoder (default is 1).
-    vae_dropout_rate : float, optional
-        Dropout rate for VAE hidden layers (default is 0.3).
-    latent_dim : int, optional
-        Dimension of the latent space in the VAE (default is 10).
-    predictor_hidden_dim : int, optional
-        Number of neurons in the first hidden layer of the Multi-Task Predictor (default is 64).
-    predictor_depth : int, optional
-        Number of shared hidden layers in the Multi-Task Predictor (default is 1).
-    predictor_dropout_rate : float, optional
-        Dropout rate for Multi-Task Predictor hidden layers (default is 0.3).
-    vae_lr : float, optional
-        Learning rate for the VAE optimizer (default is 1e-3).
-    vae_weight_decay : float, optional
-        Weight decay (L2 regularization) for the VAE optimizer (default is 1e-3).
-    multitask_lr : float, optional
-        Learning rate for the MultiTask Predictor optimizer (default is 1e-3).
-    multitask_weight_decay : float, optional
-        Weight decay (L2 regularization) for the MultiTask Predictor optimizer (default is 1e-3).
-    alphas : list or torch.Tensor, optional
-        Per-task weights for the task loss term, shape `(num_tasks,)`. Default is uniform weights (1 for all tasks).
-    beta : float, optional
-        Weight of the KL divergence term in the VAE loss (default is 1.0).
-    gamma_task : float, optional
-        Weight of the task loss term in the total loss (default is 1.0).
-    batch_size : int, optional
-        Batch size for training (default is 200).
-    validation_split : float, optional
-        Fraction of the data to use for validation (default is 0.3).
-    use_lr_scheduler : bool, optional
-        Whether to enable learning rate schedulers for both the VAE and Multi-Task Predictor (default is True).
-    lr_scheduler_factor : float, optional
-        Factor by which the learning rate is reduced when the scheduler is triggered (default is 0.1).
-    lr_scheduler_patience : int, optional
-        Number of epochs to wait for validation loss improvement before triggering the scheduler (default is 50).
-    use_batch_norm : bool, optional
-        Whether to apply batch normalization to hidden layers in both the VAE and Multi-Task Predictor (default is True).
+        
+    vae_hidden_dim : int, optional, default=64
+        Number of neurons in the first hidden layer of the VAE encoder/decoder.
+        
+    vae_depth : int, optional, default=1
+        Number of hidden layers in the VAE encoder/decoder.
+        
+    vae_dropout_rate : float, optional, default=0.3
+        Dropout rate for VAE hidden layers.
+        
+    latent_dim : int, optional, default=10
+        Dimension of the latent space in the VAE.
+        
+    predictor_hidden_dim : int, optional, default=64
+        Number of neurons in the first hidden layer of the Multi-Task Predictor.
+        
+    predictor_depth : int, optional, default=1
+        Number of shared hidden layers in the Multi-Task Predictor.
+        
+    predictor_dropout_rate : float, optional, default=0.3
+        Dropout rate for Multi-Task Predictor hidden layers.
+        
+    vae_lr : float, optional, default=1e-3
+        Learning rate for the VAE optimizer.
+        
+    vae_weight_decay : float, optional, default=1e-3
+        Weight decay (L2 regularization) for the VAE optimizer.
+        
+    multitask_lr : float, optional, default=1e-3
+        Learning rate for the MultiTask Predictor optimizer.
+        
+    multitask_weight_decay : float, optional, default=1e-3
+        Weight decay (L2 regularization) for the MultiTask Predictor optimizer.
+        
+    alphas : list or torch.Tensor, optional, default=None
+        Per-task weights for the task loss term, shape `(num_tasks,)`. 
+        If `None`, uniform weights (1 for all tasks) are used.
+        
+    beta : float, optional, default=1.0
+        Weight of the KL divergence term in the VAE loss.
+        
+    gamma_task : float, optional, default=1.0
+        Weight of the task loss term in the total loss.
+        
+    batch_size : int, optional, default=200
+        Batch size for training.
+        
+    validation_split : float, optional, default=0.3
+        Fraction of the data to use for validation.
+        
+    use_lr_scheduler : bool, optional, default=True
+        Whether to enable learning rate schedulers for both the VAE and Multi-Task Predictor.
+        
+    lr_scheduler_factor : float, optional, default=0.1
+        Factor by which the learning rate is reduced when the scheduler is triggered.
+        
+    lr_scheduler_patience : int, optional, default=None
+        Number of epochs to wait for validation loss improvement before triggering the scheduler.
+        If `None`, defaults to `patience * 1/3`.
+        
+    use_batch_norm : bool, optional, default=True
+        Whether to apply batch normalization to hidden layers in both the VAE and Multi-Task Predictor.
 
     Attributes
     ----------
     vae : VAE
         Variational Autoencoder for dimensionality reduction.
+
     predictor : MultiTaskPredictor
         Multi-task prediction module for performing parallel predictive tasks.
 
+    fit_epochs : int
+        Number of training epochs.
+
+    early_stop_method : str
+        Strategy for applying early stopping to task-specific predictors after VAE early stopping.
+
+    vae_optimizer : torch.optim.Optimizer
+        Optimizer for the VAE.
+
+    multitask_optimizer_dict : dict
+        Dictionary of optimizers for each task-specific predictor.
+
+    training_status : dict
+        Dictionary tracking the training status of modules.
+
     Methods
     -------
-    forward(x)
+    forward(x, deterministic=False)
         Forward pass through the VAE and Multi-Task Predictor.
-    compute_loss(recon, x, mu, logvar, task_outputs, y, ...)
+
+    compute_loss(x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None, normalize_loss=False)
         Compute the total loss, combining VAE loss (reconstruction + KL divergence) and task-specific loss.
-    fit(X, Y, ...)
+
+    fit(X, Y, epochs=2000, predictor_fine_tuning=False, early_stopping=True, early_stop_method=None, patience=100, verbose=True, animate_monitor=False, plot_path=None, save_weights_path=None)
         Train the model on the input data `X` and labels `Y`.
-    plot_loss(...)
+
+    plot_loss(train_vae_losses, val_vae_losses, train_aucs, val_aucs, train_task_losses, val_task_losses, save_path=None, display_id="loss_plot")
         Plot training and validation loss curves for VAE and task-specific losses.
-    save_model(...)
-        Save the model weights.
+
+    save_config(config_path)
+        Save the initialization parameters to a JSON file.
+
+    save_model(save_path, epoch)
+        Save model weights.
+
+    save_complete_model(save_dir)
+        Save the complete model, including weights and configuration.
+
+    load_config(cls, config)
+        Create an instance of the model from a configuration dictionary.
+
+    load_complete_model(cls, load_dir, device=DEVICE)
+        Load a complete model, including weights and configuration.
 
     Notes
     -----
@@ -594,22 +774,27 @@ class SUAVE(nn.Module, ResetMixin):
         ----------
         x : torch.Tensor
             Input tensor with shape (batch_size, input_dim).
-        deterministic : bool, optional
-            If True, uses the latent mean (mu) for predictions, avoiding randomness.
+            
+        deterministic : bool, optional, default=False
+            If True, uses the latent mean (`mu`) for predictions, avoiding randomness.
             If False, samples from the latent space using reparameterization trick.
 
         Returns
         -------
-        torch.Tensor
+        recon : torch.Tensor
             Reconstructed tensor with shape (batch_size, input_dim).
-        torch.Tensor
+            
+        mu : torch.Tensor
             Latent mean tensor with shape (batch_size, latent_dim).
-        torch.Tensor
+            
+        logvar : torch.Tensor
             Latent log variance tensor with shape (batch_size, latent_dim).
-        torch.Tensor
+            
+        z : torch.Tensor
             Latent representation tensor with shape (batch_size, latent_dim).
-        list of torch.Tensor
-            List of task-specific prediction tensors, each with shape (batch_size, 1).
+            
+        task_outputs : list of torch.Tensor
+            List of task-specific prediction tensors, each with shape (batch_size, n_classes).
         """
         x = self._check_tensor(x).to(DEVICE)
         recon, mu, logvar, z = self.vae(x, deterministic=deterministic)
@@ -624,39 +809,54 @@ class SUAVE(nn.Module, ResetMixin):
         ----------
         x : torch.Tensor
             Original input tensor, shape (batch_size, input_dim).
+            
         recon : torch.Tensor
             Reconstructed input tensor, shape (batch_size, input_dim).
+            
         mu : torch.Tensor
             Latent mean tensor, shape (batch_size, latent_dim).
+            
         logvar : torch.Tensor
             Latent log variance tensor, shape (batch_size, latent_dim).
+            
         z : torch.Tensor
             Latent representation tensor, shape (batch_size, latent_dim).
+            
         task_outputs : list of torch.Tensor
             List of task-specific predictions, each shape (batch_size, n_classes).
+            
         y : torch.Tensor
             Ground truth target tensor, shape (batch_size, num_tasks).
-        beta : float
+            
+        beta : float, optional, default=1.0
             Weight of the KL divergence term in the VAE loss.
-        gamma_task : float
+            
+        gamma_task : float, optional, default=1.0
             Weight of the task loss term in the total loss.
-        alpha : list or torch.Tensor, optional
+            
+        alpha : list or torch.Tensor, optional, default=None
             Per-task weights, shape (num_tasks,). Default is uniform weights (1 for all tasks).
-        normalize_loss : bool, optional
+            
+        normalize_loss : bool, optional, default=False
             Whether to normalize each loss term before combining them.
 
         Returns
         -------
         total_loss : torch.Tensor
             Combined loss value.
+            
         recon_loss : torch.Tensor
             Reconstruction loss value.
+            
         kl_loss : torch.Tensor
             KL divergence loss value.
+            
         task_loss_sum : torch.Tensor
             Sum of all task-specific losses.
+            
         per_task_losses : list of torch.Tensor
             List of task-specific loss values.
+            
         auc_scores : list of float
             List of AUC scores for each task.
         """
@@ -737,40 +937,49 @@ class SUAVE(nn.Module, ResetMixin):
         ----------
         X : np.ndarray or torch.Tensor
             Feature matrix of shape (n_samples, n_features).
+            
         Y : np.ndarray or torch.Tensor
             Target matrix of shape (n_samples, n_tasks).
-        epochs : int, optional
-            Number of training epochs (default is 2000).
-        predictor_fine_tuning : bool, optional
+            
+        epochs : int, optional, default=2000
+            Number of training epochs.
+            
+        predictor_fine_tuning : bool, optional, default=False
             If True, the training will focus on fine-tuning the predictor modules after the VAE
             has been trained or early-stopped. This is useful if the latent representation is already
-            learned and stable, and you only want to optimize task-specific heads (default is False).
-        early_stopping : bool, optional
+            learned and stable, and you only want to optimize task-specific heads.
+            
+        early_stopping : bool, optional, default=True
             If True, enables early stopping based on validation loss improvements. Early stopping 
             is applied first to the VAE module. Once the VAE stops improving, it is effectively 'frozen'
             (learning rate set to 0), and training can continue on the predictor modules until their 
-            respective early stopping criteria are met (default is True).
-        early_stop_method : str, optional
+            respective early stopping criteria are met.
+            
+        early_stop_method : str, optional, default=None
             Strategy for applying early stopping to task-specific predictors after VAE early stopping.
             Must be either `'parallel'` or `'sequential'`. If None, defaults to the value of `task_strategy`.
             - `'parallel'`: All tasks are monitored and stopped independently based on their own validation loss.
             - `'sequential'`: Tasks are monitored and stopped in sequence, where each task is only monitored
-            after the preceding tasks have been early stopped (applicable only if `task_strategy` is `'sequential'`).
-        patience : int, optional
-            Number of epochs to wait for improvement before triggering early stopping for each module 
-            (default is 100).
-        verbose : bool, optional
-            If True, displays a tqdm progress bar and training metrics per epoch (default is True).
-        animate_monitor : bool, optional
+                after the preceding tasks have been early stopped (applicable only if `task_strategy` is `'sequential'`).
+                
+        patience : int, optional, default=100
+            Number of epochs to wait for improvement before triggering early stopping for each module.
+            
+        verbose : bool, optional, default=True
+            If True, displays a tqdm progress bar and training metrics per epoch.
+            
+        animate_monitor : bool, optional, default=False
             If True and running in an interactive environment, attempts to dynamically update training 
             plots at specified intervals. If False or not in such an environment, no dynamic plotting 
-            will occur (default is False).
-        plot_path : str or None, optional
+            will occur.
+            
+        plot_path : str or None, optional, default=None
             Directory to save loss plots periodically (e.g., every few epochs). If None, tries dynamic 
-            plotting if `animate_monitor` is True. Otherwise, no plot is saved (default is None).
-        save_weights_path : str or None, optional
+            plotting if `animate_monitor` is True. Otherwise, no plot is saved.
+            
+        save_weights_path : str or None, optional, default=None
             Directory to save model weights periodically and at the end of training. If None, weights 
-            are not saved (default is None).
+            are not saved.
 
         Returns
         -------
@@ -780,19 +989,21 @@ class SUAVE(nn.Module, ResetMixin):
         Notes
         -----
         - **Early Stopping Strategy**: Early stopping is conducted in stages. Initially, the VAE portion is monitored. Once it fails 
-        to improve beyond the patience threshold, the VAE's learning rate is set to zero. Subsequently, based on the 
-        `early_stop_method`, the predictor heads are monitored either in parallel or sequentially.
+          to improve beyond the patience threshold, the VAE's learning rate is set to zero. Subsequently, based on the 
+          `early_stop_method`, the predictor heads are monitored either in parallel or sequentially.
+          
         - **Predictor Fine-Tuning**: When `predictor_fine_tuning=True`, after VAE early stopping, only the predictor modules are 
-        trained (with VAE effectively frozen). This is useful when the latent space has already been well-learned.
+          trained (with VAE effectively frozen). This is useful when the latent space has already been well-learned.
+          
         - **Early Stop Method vs. Task Strategy**: The `early_stop_method` allows independent control over how task-specific 
-        predictors are stopped after VAE early stopping. It can be set to `'parallel'` or `'sequential'` regardless of the 
-        `task_strategy`, providing additional flexibility.
+          predictors are stopped after VAE early stopping. It can be set to `'parallel'` or `'sequential'` regardless of the 
+          `task_strategy`, providing additional flexibility.
 
         Examples
         --------
         1. **Training from scratch (VAE + Predictors)**:
-        >>> suave_model = SuaveClassifier(input_dim=30, task_classes=[2,2])
-        >>> suave_model.fit(X, y, epochs=500, patience=50, early_stopping=True, animate_monitor=False)
+        >>> suave_model = SUAVE(input_dim=30, task_classes=[2, 2])
+        >>> suave_model.fit(X, Y, epochs=500, patience=50, early_stopping=True, animate_monitor=False)
 
         In this scenario, both the VAE and predictors are trained together from the beginning.
 
@@ -801,7 +1012,7 @@ class SUAVE(nn.Module, ResetMixin):
         increase the predictor learning rate and switch to fine-tuning mode:
 
         >>> suave_model.set_params(multitask_lr=1e-2, lr_scheduler_factor=0.1, batch_size=32)
-        >>> suave_model.fit(X, y, patience=100, predictor_fine_tuning=True, early_stop_method='parallel', animate_monitor=True)
+        >>> suave_model.fit(X, Y, patience=100, predictor_fine_tuning=True, early_stop_method='parallel', animate_monitor=True)
 
         Here:
         - `predictor_fine_tuning=True`: Focus on optimizing the predictor modules after the VAE is stable.
@@ -1068,8 +1279,10 @@ class SUAVE(nn.Module, ResetMixin):
         ----------
         task_ix : int
             Index of the task to update.
+
         val_losses : list of float
             Current epoch's validation losses for all tasks.
+
         best_losses : list of float
             Best observed validation losses for all tasks so far.
         """
@@ -1084,17 +1297,18 @@ class SUAVE(nn.Module, ResetMixin):
         """
         Freeze a module by setting its parameters to not require gradients.
 
-        Parameters:
+        Parameters
         ----------
-        module: nn.Module
+        module : nn.Module
             The module to be frozen (e.g., VAE or a task head).
-        name: str
+
+        name : str
             The name of the module (used for logging).
-        training_status: dict
-            Dictionary tracking the training status of modules.
-        verbose: bool
+
+        verbose : bool
             Whether to log the stopping event.
-        epoch: int
+
+        epoch : int
             Current epoch number for logging.
         """
         #! Old version. Can cause hard Error.
@@ -1133,21 +1347,28 @@ class SUAVE(nn.Module, ResetMixin):
 
         Parameters
         ----------
-        train_vae_losses : list
+        train_vae_losses : list of float
             List of VAE losses (reconstruction + KL) for the training set at each epoch.
-        val_vae_losses : list
+
+        val_vae_losses : list of float
             List of VAE losses (reconstruction + KL) for the validation set at each epoch.
+
         train_aucs : list of np.ndarray
-            List where each element is an np.ndarray of shape [epoch, n_tasks], containing AUC scores for each epoch.
+            List where each element is an np.ndarray of shape [n_tasks,], containing AUC scores for each task at each epoch.
+
         val_aucs : list of np.ndarray
-            List where each element is an np.ndarray of shape [epoch, n_tasks], containing AUC scores for each epoch.
-        train_task_losses : list
+            List where each element is an np.ndarray of shape [n_tasks,], containing AUC scores for each task at each epoch.
+
+        train_task_losses : list of float
             List of total task losses (summed over all tasks) for training at each epoch.
-        val_task_losses : list
+
+        val_task_losses : list of float
             List of total task losses (summed over all tasks) for validation at each epoch.
-        save_path : str or None
+
+        save_path : str or None, optional, default=None
             Path to save the plot image. If None, dynamically display in a notebook.
-        display_id : str, optional
+
+        display_id : str, optional, default="loss_plot"
             Unique identifier for the display container to ensure updates occur in the same container.
         """
         
@@ -1245,6 +1466,7 @@ class SUAVE(nn.Module, ResetMixin):
         ----------
         save_path : str
             Directory to save the weights.
+
         epoch : int
             Current epoch number, used for naming the file.
         """
@@ -1277,7 +1499,7 @@ class SUAVE(nn.Module, ResetMixin):
 
         Returns
         -------
-        HybridVAEMultiTaskModel
+        SUAVE
             A new instance of the model initialized with the provided configuration.
         """
         # Get the parameter signature of __init__
@@ -1306,13 +1528,18 @@ class SUAVE(nn.Module, ResetMixin):
         ----------
         load_dir : str
             Directory containing the model configuration and weights.
-        device : torch.device, optional
+
+        device : torch.device, optional, default=DEVICE
             Device to load the model onto.
 
         Returns
         -------
-        HybridVAEMultiTaskModel
+        SUAVE
             The reconstructed model instance with weights loaded.
+
+        Examples
+        --------
+        >>> suave = SUAVE.load_complete_model("complete_model/", device=torch.device('cpu'))
         """
         # Load configuration
         config_path = os.path.join(load_dir, "Hybrid_VAE_config.json")
@@ -1324,7 +1551,14 @@ class SUAVE(nn.Module, ResetMixin):
         return model
 
     def _check_prediction_task_name(self, Y):
-        '''check and set prediction task name(s) with passed target Y '''
+        """
+        Check and set prediction task names with the passed target `Y`.
+
+        Parameters
+        ----------
+        Y : pd.DataFrame, pd.Series, or np.ndarray
+            Ground truth target data.
+        """
         self._vae_task_name = 'vae'
 
         if hasattr(Y, 'columns'):
@@ -1338,7 +1572,7 @@ class SUAVE(nn.Module, ResetMixin):
 
     def _check_tensor(self, X: torch.Tensor):
         """
-        Ensures the input is a tensor and moves it to the correct device.
+        Ensure the input is a tensor and move it to the correct device.
 
         Parameters
         ----------
@@ -1349,10 +1583,6 @@ class SUAVE(nn.Module, ResetMixin):
         -------
         torch.Tensor
             Tensor moved to the specified device.
-
-        Notes
-        -----
-        This method automatically handles input conversion from numpy arrays to tensors.
         """
         if isinstance(X, torch.Tensor):
             return X.to(DEVICE)

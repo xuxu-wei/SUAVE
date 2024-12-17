@@ -1,5 +1,10 @@
 """
-Scikit-learn compatible wrapper for SUAVE 
+Scikit-learn compatible wrapper for SUAVE.
+
+SUAVE combines a Variational Autoencoder (VAE) for dimensionality reduction
+with a Multi-Task Predictor for performing parallel predictive tasks.
+This class extends the `SUAVE` by adding methods compatible with scikit-learn's API,
+such as `fit`, `transform`, `predict`, and `score`.
 """
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.metrics import mean_squared_error, roc_auc_score
@@ -12,100 +17,147 @@ from .suave import SUAVE
 class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
     """
     Scikit-learn compatible wrapper for SUAVE.
-    
-    SUAVE combines a Variational Autoencoder (VAE) for dimensionality reduction
-    with a Multi-Task Predictor for performing parallel predictive tasks.
-    
-    This class extends the `SUAVE` by adding methods compatible with scikit-learn's API,
-    such as `fit`, `transform`, `predict`, and `score`.
+
+    SUAVE integrates a Variational Autoencoder (VAE) for dimensionality reduction
+    with a Multi-Task Predictor to handle multiple parallel predictive tasks.
+    This wrapper facilitates seamless integration with scikit-learn pipelines and workflows.
 
     Parameters
     ----------
     input_dim : int
         Dimension of the input data.
+
     task_count : int
         Number of parallel prediction tasks.
-    layer_strategy : str, optional
-        Strategy for scaling hidden layer dimensions in both the VAE and Multi-Task Predictor:
-        - "constant" or "c": All hidden layers have the same width.
-        - "linear" or "l": Linearly increase/decrease the width.
-        - "geometric" or "g": Geometrically increase/decrease the width.
-        Default is "linear".
-    vae_hidden_dim : int, optional
-        Number of neurons in the first hidden layer of the VAE encoder/decoder (default is 64).
-    vae_depth : int, optional
-        Number of hidden layers in the VAE encoder/decoder (default is 1).
-    vae_dropout_rate : float, optional
-        Dropout rate for VAE hidden layers (default is 0.3).
-    latent_dim : int, optional
-        Dimension of the latent space in the VAE (default is 10).
-    predictor_hidden_dim : int, optional
-        Number of neurons in the first hidden layer of the Multi-Task Predictor (default is 64).
-    predictor_depth : int, optional
-        Number of shared hidden layers in the Multi-Task Predictor (default is 1).
-    predictor_dropout_rate : float, optional
-        Dropout rate for Multi-Task Predictor hidden layers (default is 0.3).
-    vae_lr : float, optional
-        Learning rate for the VAE optimizer (default is 1e-3).
-    vae_weight_decay : float, optional
-        Weight decay (L2 regularization) for the VAE optimizer (default is 1e-3).
-    multitask_lr : float, optional
-        Learning rate for the MultiTask Predictor optimizer (default is 1e-3).
-    multitask_weight_decay : float, optional
-        Weight decay (L2 regularization) for the MultiTask Predictor optimizer (default is 1e-3).
-    alphas : list or torch.Tensor, optional
-        Per-task weights for the task loss term, shape `(num_tasks,)`. Default is uniform weights (1 for all tasks).
-    beta : float, optional
-        Weight of the KL divergence term in the VAE loss (default is 1.0).
-    gamma_task : float, optional
-        Weight of the task loss term in the total loss (default is 1.0).
-    batch_size : int, optional
-        Batch size for training (default is 200).
-    validation_split : float, optional
-        Fraction of the data to use for validation (default is 0.3).
-    use_lr_scheduler : bool, optional
-        Whether to enable learning rate schedulers for both the VAE and Multi-Task Predictor (default is True).
-    lr_scheduler_factor : float, optional
-        Factor by which the learning rate is reduced when the scheduler is triggered (default is 0.1).
-    lr_scheduler_patience : int, optional
-        Number of epochs to wait for validation loss improvement before triggering the scheduler (default is 50).
-    use_batch_norm : bool, optional
-        Whether to apply batch normalization to hidden layers in both the VAE and Multi-Task Predictor (default is True).
 
-    Methods
-    -------
-    fit(X, Y, *args, **kwargs)
-        Fit the model to input features `X` and targets `Y`.
-    transform(X)
-        Transform input samples into latent space representations.
-    inverse_transform(Z)
-        Reconstruct samples from latent space representations.
-    predict_proba(X, deterministic=True)
-        Predict probabilities for each task, either deterministically (using the latent mean) or stochastically.
-    predict(X, threshold=0.5)
-        Predict binary classifications for each task based on a threshold.
-    score(X, Y, ...)
-        Compute evaluation metrics (e.g., AUC) for each task on the given dataset.
-    eval_loss(X, Y)
-        Compute the total loss, including reconstruction, KL divergence, and task-specific losses.
-    get_feature_names_out(input_features=None)
-        Get output feature names for the latent space.
+    layer_strategy : str, optional, default='linear'
+        Strategy for scaling hidden layer dimensions in both the VAE and Multi-Task Predictor.
+        - 'constant' or 'c': All hidden layers have the same width.
+        - 'linear' or 'l': Linearly increase/decrease the width.
+        - 'geometric' or 'g': Geometrically increase/decrease the width.
+
+    vae_hidden_dim : int, optional, default=64
+        Number of neurons in the first hidden layer of the VAE encoder/decoder.
+
+    vae_depth : int, optional, default=1
+        Number of hidden layers in the VAE encoder/decoder.
+
+    vae_dropout_rate : float, optional, default=0.3
+        Dropout rate for VAE hidden layers.
+
+    latent_dim : int, optional, default=10
+        Dimension of the latent space in the VAE.
+
+    predictor_hidden_dim : int, optional, default=64
+        Number of neurons in the first hidden layer of the Multi-Task Predictor.
+
+    predictor_depth : int, optional, default=1
+        Number of shared hidden layers in the Multi-Task Predictor.
+
+    predictor_dropout_rate : float, optional, default=0.3
+        Dropout rate for Multi-Task Predictor hidden layers.
+
+    vae_lr : float, optional, default=1e-3
+        Learning rate for the VAE optimizer.
+
+    vae_weight_decay : float, optional, default=1e-3
+        Weight decay (L2 regularization) for the VAE optimizer.
+
+    multitask_lr : float, optional, default=1e-3
+        Learning rate for the Multi-Task Predictor optimizer.
+
+    multitask_weight_decay : float, optional, default=1e-3
+        Weight decay (L2 regularization) for the Multi-Task Predictor optimizer.
+
+    alphas : list or torch.Tensor, optional, default=None
+        Per-task weights for the task loss term, shape `(num_tasks,)`.
+        If `None`, uniform weights (1 for all tasks) are used.
+
+    beta : float, optional, default=1.0
+        Weight of the KL divergence term in the VAE loss.
+
+    gamma_task : float, optional, default=1.0
+        Weight of the task loss term in the total loss.
+
+    batch_size : int, optional, default=200
+        Batch size for training.
+
+    validation_split : float, optional, default=0.3
+        Fraction of the data to use for validation.
+
+    use_lr_scheduler : bool, optional, default=True
+        Whether to enable learning rate schedulers for both the VAE and Multi-Task Predictor.
+
+    lr_scheduler_factor : float, optional, default=0.1
+        Factor by which the learning rate is reduced when the scheduler is triggered.
+
+    lr_scheduler_patience : int, optional, default=50
+        Number of epochs to wait for validation loss improvement before triggering the scheduler.
+
+    use_batch_norm : bool, optional, default=True
+        Whether to apply batch normalization to hidden layers in both the VAE and Multi-Task Predictor.
 
     Attributes
     ----------
     feature_names_in_ : list of str
         Feature names for the input data. Automatically populated when `X` is a pandas DataFrame during `fit`.
 
+    Methods
+    -------
+    fit(X, y, *args, **kwargs)
+        Fit the model to input features `X` and targets `y`.
+
+    transform(X, return_latent_sample=False)
+        Transform input samples into latent space representations.
+
+    inverse_transform(Z)
+        Reconstruct samples from latent space representations.
+
+    predict_proba(X, deterministic=True)
+        Predict probabilities for each task, either deterministically (using the latent mean) or stochastically.
+
+    predict(X, threshold=0.5)
+        Predict binary classifications for each task based on a threshold.
+
+    score(X, y, *args, **kwargs)
+        Compute evaluation metrics (e.g., AUC) for each task on the given dataset.
+
+    eval_loss(X, y)
+        Compute the total loss, including reconstruction, KL divergence, and task-specific losses.
+
+    get_feature_names_out(input_features=None)
+        Get output feature names for the latent space.
+
     Notes
     -----
     - This wrapper is designed to integrate seamlessly with scikit-learn pipelines and workflows.
     - The `transform` method maps input data into the latent space, which can be used for dimensionality reduction.
-    - The `predict` and `predict_proba` methods support multi-task binary classification.
+    - The `predict` and `predict_proba` methods support multi-task binary and multi-class classification.
     """
+
     
     def fit(self, X, y, *args, **kwargs):
         """
-        see `SUAVE.fit` 
+        Fit the SUAVE model to the input data.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training input samples.
+
+        y : array-like of shape (n_samples, n_tasks)
+            Target values for each task.
+
+        *args : 
+            Additional positional arguments.
+
+        **kwargs : 
+            Additional keyword arguments.
+
+        Returns
+        -------
+        self : SuaveClassifier
+            Fitted estimator.
         """
         # Record feature names if provided (e.g., pandas DataFrame)
         if hasattr(X, "columns"):
@@ -117,21 +169,23 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
     
     def transform(self, X, return_latent_sample=False):
         """
-        Transforms the input samples into the latent space.
+        Transform the input samples into the latent space.
 
         Parameters
         ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        return_latent_sample : bool, optional
-            If True, returns a sampled latent representation `z` instead of the mean `mu`.
-            Default is False.
+        X : array-like of shape (n_samples, n_features)
+            Input samples to transform.
+
+        return_latent_sample : bool, default=False
+            If `True`, returns a sampled latent representation `z` instead of the mean `mu`.
+            This introduces stochasticity into the transformation.
 
         Returns
         -------
-        Z : np.ndarray
-            Latent space representations with shape (n_samples, latent_dim).
-            If `return_latent_sample` is True, returns sampled latent vectors; otherwise, returns the mean.
+        Z : ndarray of shape (n_samples, latent_dim)
+            Latent space representations.
+            - If `return_latent_sample` is `False`, returns the mean `mu`.
+            - If `True`, returns sampled latent vectors `z`.
         """
         # Input validation
         if not isinstance(X, (torch.Tensor, np.ndarray)):
@@ -157,19 +211,20 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
 
     def sample_latent(self, X, n_samples=1):
         """
-        Sample from the latent space using reparameterization trick.
+        Sample from the latent space using the reparameterization trick.
 
         Parameters
         ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        n_samples : int, optional
-            Number of samples to generate for each input (default is 1).
+        X : array-like of shape (n_samples, n_features)
+            Input samples to encode.
+
+        n_samples : int, default=1
+            Number of latent samples to generate for each input sample.
 
         Returns
         -------
-        Z : np.ndarray
-            Sampled latent representations with shape (n_samples, latent_dim).
+        Z : ndarray of shape (n_samples, n_samples, latent_dim)
+            Sampled latent representations.
         """
         X = self._check_tensor(X).to(DEVICE)
         self.eval()
@@ -180,17 +235,17 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
     
     def inverse_transform(self, Z):
         """
-        Reconstructs samples from the latent space.
+        Reconstruct samples from the latent space.
 
         Parameters
         ----------
-        Z : np.ndarray or torch.Tensor
-            Latent space representations with shape (n_samples, latent_dim).
+        Z : array-like of shape (n_samples, latent_dim)
+            Latent space representations.
 
         Returns
         -------
-        X_recon : np.ndarray
-            Reconstructed samples with shape (n_samples, input_dim).
+        X_recon : ndarray of shape (n_samples, n_features)
+            Reconstructed input samples.
         """
         Z = self._check_tensor(Z).to(DEVICE)
         self.eval()
@@ -200,20 +255,22 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
 
     def predict_proba(self, X, deterministic=True):
         """
-        Predicts probabilities for each task with optional batch processing, using numpy arrays for efficiency.
+        Predict probabilities for each task.
 
         Parameters
         ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        deterministic : bool, optional
-            If True, uses the latent mean (mu) for predictions, avoiding randomness.
-            If False, samples from the latent space using reparameterization trick.
+        X : array-like of shape (n_samples, n_features)
+            Input samples to predict.
+
+        deterministic : bool, default=True
+            If `True`, uses the latent mean (`mu`) for predictions, ensuring deterministic outputs.
+            If `False`, samples from the latent space using the reparameterization trick, introducing stochasticity.
 
         Returns
         -------
-        probas : list of np.ndarray
-            Probabilities for each task. Each element is an array of shape (n_samples, n_classes).
+        probas_per_task : list of ndarray
+            List containing probability estimates for each task.
+            Each element is an array of shape (n_samples, n_classes) for the respective task.
         """
         X = self._check_tensor(X).to(DEVICE)
         self.eval()  # Ensure model is in evaluation mode
@@ -241,20 +298,23 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
 
     def predict(self, X, threshold=0.5):
         """
-        Predicts classifications for each task, compatible with multi-class and binary classification.
+        Predict classifications for each task.
 
         Parameters
         ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        threshold : float, optional
-            Decision threshold for binary classification (default is 0.5). Ignored for multi-class tasks.
+        X : array-like of shape (n_samples, n_features)
+            Input samples to predict.
+
+        threshold : float, default=0.5
+            Decision threshold for binary classification tasks.
+            Ignored for multi-class tasks where the class with the highest probability is selected.
 
         Returns
         -------
-        predictions : list of np.ndarray
-            Predictions for each task. Each element is an array of shape (n_samples,).
-            For binary tasks, this contains {0, 1}; for multi-class tasks, it contains {0, 1, ..., n_classes-1}.
+        predictions : list of ndarray
+            List containing predictions for each task.
+            - For binary tasks: array of shape (n_samples,) with binary labels {0, 1}.
+            - For multi-class tasks: array of shape (n_samples,) with class labels.
         """
         probas = self.predict_proba(X)
         predictions = []
@@ -273,19 +333,27 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
 
     def score(self, X, Y, *args, **kwargs):
         """
-        Computes AUC scores for each task.
+        Compute evaluation metrics (e.g., AUC) for each task.
 
         Parameters
         ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        Y : np.ndarray
-            Ground truth labels with shape (n_samples, n_tasks).
+        X : array-like of shape (n_samples, n_features)
+            Input samples.
+
+        y : array-like of shape (n_samples, n_tasks)
+            True labels for each task.
+
+        *args : 
+            Additional positional arguments for metric computation.
+
+        **kwargs : 
+            Additional keyword arguments for metric computation.
 
         Returns
         -------
-        scores : np.ndarray
-            AUC scores for each task, shape (n_tasks,).
+        scores : ndarray of shape (n_tasks,)
+            Evaluation scores for each task.
+            For example, AUC scores if `roc_auc_score` is used.
         """
         self.eval()
         probas_per_task = self.predict_proba(X) # expcted on cpu numpy
@@ -312,6 +380,31 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
         return np.array(auc_scores)
 
     def eval_loss(self, X, Y):
+        """
+        Compute the total loss, including reconstruction, KL divergence, and task-specific losses.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Input samples.
+
+        y : array-like of shape (n_samples, n_tasks)
+            True labels for each task.
+
+        Returns
+        -------
+        total_loss : float
+            Total loss averaged over the samples.
+
+        recon_loss : float
+            Reconstruction loss averaged over the samples.
+
+        kl_loss : float
+            KL divergence loss averaged over the samples.
+
+        task_loss : float
+            Task-specific loss averaged over the samples.
+        """
         X = self._check_tensor(X).to(DEVICE)
         Y = self._check_tensor(Y).to(DEVICE)
         self.eval()
@@ -331,7 +424,12 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
     
     def get_feature_names_out(self, input_features=None):
         """
-        Get output feature names (latent space).
+        Get output feature names for the latent space.
+
+        Parameters
+        ----------
+        input_features : list of str or None, default=None
+            Input feature names. If `None`, default names are generated.
 
         Returns
         -------

@@ -34,16 +34,20 @@ def generate_hidden_dims(hidden_dim, latent_dim, depth, strategy="constant", ord
     ----------
     hidden_dim : int
         Dimension of the first hidden layer (encoder input or decoder output).
+        
     latent_dim : int
         Dimension of the latent space (encoder output or decoder input).
+        
     depth : int
         Number of hidden layers.
+        
     strategy : str, optional
         Scaling strategy for hidden layer dimensions:
         - "constant" or "c": All layers have the same width.
         - "linear" or "l": Linearly decrease/increase the width.
         - "geometric" or "g": Geometrically decrease/increase the width.
         Default is "constant".
+        
     order : str, optional
         Order of dimensions:
         - "decreasing": Generate dimensions for encoder (hidden_dim -> latent_dim).
