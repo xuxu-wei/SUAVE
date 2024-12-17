@@ -24,6 +24,8 @@ from .utils import *
 
 # TODO 增加可视化分析工具
 
+# TODO 调用 score 计算AUC以后 会用一个属性记录最佳阈值，更新predict行为
+
 class Encoder(nn.Module, ResetMixin):
     """
     Encoder network for Variational Autoencoder (VAE).
@@ -1172,7 +1174,7 @@ class SUAVE(nn.Module, ResetMixin):
 
         # Check if running in notebook
         if hasattr(sys, 'ps1') or ('IPython' in sys.modules and hasattr(sys, 'argv') and sys.argv[0].endswith('notebook')):
-            from IPython.display import display, update_display, clear_output
+            from IPython.display import update_display, clear_output
             clear_output(wait=True)
             update_display(plt.gcf(), display_id=display_id)
             plt.pause(0.1)
@@ -1196,7 +1198,7 @@ class SUAVE(nn.Module, ResetMixin):
             for k in init_params if k != "self" and hasattr(self, k)
         }
 
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding='utf-8') as f:
             json.dump(config, f, indent=4)
         print(f"Model configuration saved to {config_path}")
     
