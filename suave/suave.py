@@ -730,7 +730,7 @@ class SUAVE(nn.Module, ResetMixin):
             plot_path=None,
             save_weights_path=None):
         """
-        Fits the VAEMultiTaskModel to the data.
+        Train the SUAVE model on provided data.
 
         Parameters
         ----------
@@ -739,22 +739,64 @@ class SUAVE(nn.Module, ResetMixin):
         Y : np.ndarray or torch.Tensor
             Target matrix of shape (n_samples, n_tasks).
         epochs : int, optional
-            Number of training epochs (default is 2500).
+            Number of training epochs (default is 2000).
+        predictor_fine_tuning : bool, optional
+            If True, the training will focus on fine-tuning the predictor modules after the VAE
+            has been trained or early-stopped. This is useful if the latent representation is already
+            learned and stable, and you only want to optimize task-specific heads (default is False).
         early_stopping : bool, optional
-            Whether to enable early stopping based on validation loss (default is False).
+            If True, enables early stopping based on validation loss improvements. Early stopping 
+            is applied first to the VAE module. Once the VAE stops improving, it is effectively 'frozen'
+            (learning rate set to 0), and training can continue on the predictor modules until their 
+            respective early stopping criteria are met (default is True).
         patience : int, optional
-            Number of epochs to wait for improvement in validation loss before stopping (default is 100).
+            Number of epochs to wait for improvement before triggering early stopping for each module 
+            (default is 100).
         verbose : bool, optional
-            If True, displays tqdm progress bar. If False, suppresses tqdm output (default is True).
+            If True, displays a tqdm progress bar and training metrics per epoch (default is True).
+        animate_monitor : bool, optional
+            If True and running in an interactive environment, attempts to dynamically update training 
+            plots at specified intervals. If False or not in such an environment, no dynamic plotting 
+            will occur (default is False).
         plot_path : str or None, optional
-            Directory to save loss plots every 100 epochs. If None, attempt dynamic plotting in a notebook environment.
+            Directory to save loss plots periodically (e.g., every few epochs). If None, tries dynamic 
+            plotting if `animate_monitor` is True. Otherwise, no plot is saved (default is None).
         save_weights_path : str or None, optional
-            Directory to save model weights every 500 epochs and at the end of training. If None, weights are not saved.
+            Directory to save model weights periodically and at the end of training. If None, weights 
+            are not saved (default is None).
 
         Returns
         -------
-        self : VAEMultiTaskModel
-            The fitted VAEMultiTaskModel instance.
+        self : SUAVE
+            The fitted SUAVE model instance.
+
+        Notes
+        -----
+        - Early stopping is conducted in stages. Initially, the VAE portion is monitored. Once it fails 
+        to improve beyond the patience threshold, the VAE's learning rate is set to zero. Subsequently, 
+        the predictor heads can continue training (especially if `predictor_fine_tuning=True`), allowing 
+        for additional optimization of the predictor networks within a stable latent space.
+
+        Examples
+        --------
+        1. Training from scratch (VAE + Predictors):
+        >>> suave_model = SuaveClassifier(input_dim=30, task_classes=[2,2])
+        >>> suave_model.fit(X, y, epochs=500, patience=50, early_stopping=True, animate_monitor=False)
+
+        In this scenario, both the VAE and predictors are trained together from the beginning.
+
+        2. Fine-tuning the predictors:
+        Suppose you already have a trained model or a stable latent space representation. You can then 
+        increase the predictor learning rate and switch to fine-tuning mode:
+
+        >>> suave_model.set_params(multitask_lr=1e-2, lr_scheduler_factor=0.1, batch_size=32)
+        >>> suave_model.fit(X, y, patience=100, predictor_fine_tuning=True, animate_monitor=True)
+
+        Here:
+        - `predictor_fine_tuning=True`: Focus on optimizing the predictor modules after the VAE is stable.
+        - `multitask_lr=1e-2`: Increase the predictor heads' learning rate for quicker adaptation.
+        - `batch_size=32`: Potentially improves generalization and stability during fine-tuning.
+        - `animate_monitor=True`: Dynamically visualize training progress.
         """
         if predictor_fine_tuning:
             self.vae_lr = 0
