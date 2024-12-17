@@ -1,4 +1,4 @@
-
+#%%
 from setuptools import setup, find_packages
 from setuptools.command.install import install
 import os
@@ -66,7 +66,7 @@ def read_requirements():
     """从 requirements.txt 文件中读取依赖"""
     with open("requirements.txt") as f:
         return f.read().splitlines()
-
+#%%
 setup(
     name="suave-ml",
     version=suave.__version__,
