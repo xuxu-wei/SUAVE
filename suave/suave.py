@@ -724,6 +724,7 @@ class SUAVE(nn.Module, ResetMixin):
             epochs=2000, 
             predictor_fine_tuning = False,
             early_stopping=True, 
+            early_stop_method=None,
             patience=100,
             verbose=True, 
             animate_monitor=False,
@@ -749,6 +750,12 @@ class SUAVE(nn.Module, ResetMixin):
             is applied first to the VAE module. Once the VAE stops improving, it is effectively 'frozen'
             (learning rate set to 0), and training can continue on the predictor modules until their 
             respective early stopping criteria are met (default is True).
+        early_stop_method : str, optional
+            Strategy for applying early stopping to task-specific predictors after VAE early stopping.
+            Must be either `'parallel'` or `'sequential'`. If None, defaults to the value of `task_strategy`.
+            - `'parallel'`: All tasks are monitored and stopped independently based on their own validation loss.
+            - `'sequential'`: Tasks are monitored and stopped in sequence, where each task is only monitored
+            after the preceding tasks have been early stopped (applicable only if `task_strategy` is `'sequential'`).
         patience : int, optional
             Number of epochs to wait for improvement before triggering early stopping for each module 
             (default is 100).
@@ -772,28 +779,33 @@ class SUAVE(nn.Module, ResetMixin):
 
         Notes
         -----
-        - Early stopping is conducted in stages. Initially, the VAE portion is monitored. Once it fails 
-        to improve beyond the patience threshold, the VAE's learning rate is set to zero. Subsequently, 
-        the predictor heads can continue training (especially if `predictor_fine_tuning=True`), allowing 
-        for additional optimization of the predictor networks within a stable latent space.
+        - **Early Stopping Strategy**: Early stopping is conducted in stages. Initially, the VAE portion is monitored. Once it fails 
+        to improve beyond the patience threshold, the VAE's learning rate is set to zero. Subsequently, based on the 
+        `early_stop_method`, the predictor heads are monitored either in parallel or sequentially.
+        - **Predictor Fine-Tuning**: When `predictor_fine_tuning=True`, after VAE early stopping, only the predictor modules are 
+        trained (with VAE effectively frozen). This is useful when the latent space has already been well-learned.
+        - **Early Stop Method vs. Task Strategy**: The `early_stop_method` allows independent control over how task-specific 
+        predictors are stopped after VAE early stopping. It can be set to `'parallel'` or `'sequential'` regardless of the 
+        `task_strategy`, providing additional flexibility.
 
         Examples
         --------
-        1. Training from scratch (VAE + Predictors):
+        1. **Training from scratch (VAE + Predictors)**:
         >>> suave_model = SuaveClassifier(input_dim=30, task_classes=[2,2])
         >>> suave_model.fit(X, y, epochs=500, patience=50, early_stopping=True, animate_monitor=False)
 
         In this scenario, both the VAE and predictors are trained together from the beginning.
 
-        2. Fine-tuning the predictors:
+        2. **Fine-tuning the predictors**:
         Suppose you already have a trained model or a stable latent space representation. You can then 
         increase the predictor learning rate and switch to fine-tuning mode:
 
         >>> suave_model.set_params(multitask_lr=1e-2, lr_scheduler_factor=0.1, batch_size=32)
-        >>> suave_model.fit(X, y, patience=100, predictor_fine_tuning=True, animate_monitor=True)
+        >>> suave_model.fit(X, y, patience=100, predictor_fine_tuning=True, early_stop_method='parallel', animate_monitor=True)
 
         Here:
         - `predictor_fine_tuning=True`: Focus on optimizing the predictor modules after the VAE is stable.
+        - `early_stop_method='parallel'`: Monitor each predictor independently for early stopping.
         - `multitask_lr=1e-2`: Increase the predictor heads' learning rate for quicker adaptation.
         - `batch_size=32`: Potentially improves generalization and stability during fine-tuning.
         - `animate_monitor=True`: Dynamically visualize training progress.
@@ -803,8 +815,12 @@ class SUAVE(nn.Module, ResetMixin):
             self.predictor.reset_parameters()
         else:
             self.reset_parameters()
-
+            
+        self.early_stop_method = self.task_strategy if early_stop_method is None else early_stop_method
+        assert self.early_stop_method in ['parallel', 'sequential'], f"Unrecognized param `early_stop_method`={early_stop_method}. Must be \'parallel\' or \'sequential\'"
+        
         self.fit_epochs = epochs
+        
         self._check_prediction_task_name(Y)
         # Data checks and device transfer
         X = self._check_tensor(X).to(DEVICE)
@@ -996,19 +1012,18 @@ class SUAVE(nn.Module, ResetMixin):
                 self.stop_training_module(self.vae, self._vae_task_name, verbose, epoch)
 
                 # For prediction tasks, start counting for early stopping after VAE has stopped.
-                for t in range(len(self.task_classes)):
-                    if val_per_task_losses[t] < best_per_task_losses[t]:
-                        best_per_task_losses[t] = val_per_task_losses[t]
-                        self.task_patience_counters[self.task_names[t]] = 0
-                    else:
-                        self.task_patience_counters[self.task_names[t]] += 1
-
+                if (self.early_stop_method == 'parallel') or (self.task_strategy == 'parallel'): # parallel tasks should not stop squentially
+                    for t in range(len(self.task_classes)):
+                        self._update_task_patience(t, val_per_task_losses, best_per_task_losses)
+                
                 if self.task_strategy == 'sequential':
                     # Sequential task early stopping
                     for t in range(len(self.task_classes)):
                         # 仅在前置任务已停止时允许检查当前任务
                         if  t==0 or ((t >= 1 ) and (self.training_status[self.task_names[t-1]] == False)):
                             # 如果超出耐心计数，则停止该任务训练
+                            if self.early_stop_method == 'sequential':
+                                self._update_task_patience(t, val_per_task_losses, best_per_task_losses)
                             if self.task_patience_counters[self.task_names[t]] >= patience:
                                 self.stop_training_module(self.predictor.task_heads[t], self.task_names[t], verbose, epoch)
 
@@ -1044,7 +1059,27 @@ class SUAVE(nn.Module, ResetMixin):
             print(f'最终模型参数已保存: {os.path.join(save_weights_path, f"epoch_final.pth")}') if verbose > 0 else None
 
         return self
+    
+    def _update_task_patience(self, task_ix, val_losses, best_losses):
+        """
+        Update the patience counter for a specific task based on validation loss.
 
+        Parameters
+        ----------
+        task_ix : int
+            Index of the task to update.
+        val_losses : list of float
+            Current epoch's validation losses for all tasks.
+        best_losses : list of float
+            Best observed validation losses for all tasks so far.
+        """
+        if val_losses[task_ix] < best_losses[task_ix]:
+            best_losses[task_ix] = val_losses[task_ix]
+            self.task_patience_counters[self.task_names[task_ix]] = 0
+        else:
+            self.task_patience_counters[self.task_names[task_ix]] += 1
+
+                
     def stop_training_module(self, module, name, verbose, epoch):
         """
         Freeze a module by setting its parameters to not require gradients.
