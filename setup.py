@@ -1,4 +1,4 @@
-
+#%%
 from setuptools import setup, find_packages
 from setuptools.command.install import install
 import os
@@ -67,17 +67,22 @@ def read_requirements():
     with open("requirements.txt") as f:
         return f.read().splitlines()
 
+def read_long_description():
+    with open("README.md", encoding="utf-8") as f:
+        return f.read()
+
+#%%
 setup(
     name="suave-ml",
     version=suave.__version__,
 
-    long_description=open("README.md").read(),
+    long_description=read_long_description(),
     long_description_content_type='text/markdown',
     url="https://github.com/xuxu-wei/SUAVE",
     author="Xuxu Wei",
     author_email="wxxtcm@163.com",
     license="BSD-3-Clause",
-    description="Deep learning model for label information-guided dimensionality reduction and multi-task learning.",
+    description="A deep learning model (hybrid VAE) implementation for label information-guided dimensionality reduction and multi-task learning.",
 
     packages=find_packages(include=["suave", "suave.*"]),
     python_requires=">=3.8",
