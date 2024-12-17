@@ -1,8 +1,12 @@
+
 from setuptools import setup, find_packages
 from setuptools.command.install import install
 import os
 import sys
 import platform
+import suave 
+
+print(f"curent SUAVE version: {suave.__version__}")
 
 class InstallWithPytorch(install):
     def run(self):
@@ -58,9 +62,14 @@ class InstallWithPytorch(install):
         else:
             raise RuntimeError(f"Unsupported system: {system}")
         
+def read_requirements():
+    """从 requirements.txt 文件中读取依赖"""
+    with open("requirements.txt") as f:
+        return f.read().splitlines()
+
 setup(
     name="suave-ml",
-    version="0.1.0a8",
+    version=suave.__version__,
 
     long_description=open("README.md").read(),
     long_description_content_type='text/markdown',
@@ -71,14 +80,7 @@ setup(
 
     packages=find_packages(include=["suave", "suave.*"]),
     python_requires=">=3.8",
-    install_requires=[
-        "torch>=2.0.0",
-        "scikit-learn>=1.0.2",
-        "numpy>=1.9.3",
-        "pandas>=1.3.5",
-        "tqdm>=4.2.0",
-        "matplotlib>=3.0.0",
-    ],
+    install_requires=read_requirements(),
 
     classifiers=[
         "Development Status :: 3 - Alpha",
