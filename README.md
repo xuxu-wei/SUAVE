@@ -1,4 +1,4 @@
-[![Static Badge](https://img.shields.io/badge/%E5%88%87%E6%8D%A2-%E4%B8%AD%E6%96%87%E7%89%88%E8%AF%B4%E6%98%8E%E6%96%87%E6%A1%A3-1082C3?style=flat)](使用说明-中文版.md)  ![PyPI](https://img.shields.io/pypi/v/suave-ml)
+[![Static Badge](https://img.shields.io/badge/%E5%88%87%E6%8D%A2-%E4%B8%AD%E6%96%87%E7%89%88%E8%AF%B4%E6%98%8E%E6%96%87%E6%A1%A3-1082C3?style=flat)](https://github.com/xuxu-wei/SUAVE/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E-%E4%B8%AD%E6%96%87%E7%89%88.md)  ![PyPI](https://img.shields.io/pypi/v/suave-ml)
 
 # SUAVE: Supervised and Unified Analysis of Variational Embeddings
 
