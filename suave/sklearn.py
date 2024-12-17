@@ -46,10 +46,10 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
     - The `transform` method maps input data into the latent space, which can be used for dimensionality reduction.
     - The `predict` and `predict_proba` methods support multi-task binary classification.
     """
-
+    
     def fit(self, X, y, *args, **kwargs):
         """
-        see `HybridVAEMultiTaskModel.fit` 
+        see `SUAVE.fit` 
         """
         # Record feature names if provided (e.g., pandas DataFrame)
         if hasattr(X, "columns"):
@@ -283,3 +283,5 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
             Output feature names for the latent space.
         """
         return [f"latent_{i}" for i in range(self.vae.encoder.latent_mu.out_features)]
+
+SuaveClassifier.fit.__doc__ = SUAVE.fit.__doc__
