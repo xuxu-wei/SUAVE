@@ -12,28 +12,21 @@ from sklearn.metrics import mean_squared_error, roc_auc_score
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
+
+from ._base import ResetMixin
 from .utils import *
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# TODO 早停机制
-# 检查早停机制是否正常，或者信息显示是否正常
-# 1. 发现图像上所有模型都early stop 但训练仍在继续
-# 2. 打印信息显示VAE触发early stop后未显示其他消息 直接早停
 
 # TODO 支持回归任务
 
 # TODO 支持回归/分类混合建模?
 
-# TODO 支持部分训练:
-# 在fit中引入参数管理被训练的部分模块以及对应的参数初始化行为和学习率，
-# 从而可以把训练好的VAE冻结，然后在不同任务中仅训练下游任务，使每次fit仅重新初始化需要训练的部分，也可以支持fine-tuning.
-
 # TODO 自定义模型：
 # 引入一个类，使得不同的下游任务predictor模块可以通过parallel的方式连接到latent space上用于预测
 # （但这个模型不支持训练，如需训练应该使用前面的部分训练，完成后再把模型接到这里）
 
-class Encoder(nn.Module):
+class Encoder(nn.Module, ResetMixin):
     """
     Encoder network for Variational Autoencoder (VAE).
 
@@ -119,7 +112,7 @@ class Encoder(nn.Module):
         return mu, logvar
     
 
-class Decoder(nn.Module):
+class Decoder(nn.Module, ResetMixin):
     """
     Decoder network for Variational Autoencoder (VAE).
 
@@ -208,7 +201,7 @@ class Decoder(nn.Module):
         return self.output_layer(h)
     
 
-class VAE(nn.Module):
+class VAE(nn.Module, ResetMixin):
     """
     Variational Autoencoder (VAE) with Encoder and Decoder.
 
@@ -316,7 +309,7 @@ class ResidualBlock(nn.Module):
         h = self.dropout(h)
         return h + residual
     
-class MultiTaskPredictor(nn.Module):
+class MultiTaskPredictor(nn.Module, ResetMixin):
     """
     Multi-task prediction network supporting parallel and sequential task modeling.
 
@@ -443,7 +436,7 @@ class MultiTaskPredictor(nn.Module):
         return outputs
 
 
-class SUAVE(nn.Module):
+class SUAVE(nn.Module, ResetMixin):
     """
     Supervised and Unified Analysis of Variational Embeddings (SUAVE)
 
@@ -729,6 +722,7 @@ class SUAVE(nn.Module):
 
     def fit(self, X, Y, 
             epochs=2000, 
+            predictor_fine_tuning = False,
             early_stopping=True, 
             patience=100,
             verbose=True, 
@@ -762,7 +756,12 @@ class SUAVE(nn.Module):
         self : VAEMultiTaskModel
             The fitted VAEMultiTaskModel instance.
         """
-        self._reset_parameters() #! 注意修改
+        if predictor_fine_tuning:
+            self.vae_lr = 0
+            self.predictor.reset_parameters()
+        else:
+            self.reset_parameters()
+
         self.fit_epochs = epochs
         self._check_prediction_task_name(Y)
         # Data checks and device transfer
@@ -807,10 +806,10 @@ class SUAVE(nn.Module):
         # Initialize best losses and patience counters
         best_vae_loss = float('inf')
         best_per_task_losses = [float('inf')] * len(self.task_classes)
-        self.vae_patience_counter = 0
+        self.vae_patience_counter = patience + 1 if predictor_fine_tuning else 0
         self.task_patience_counters = {task_name: 0 for task_name in self.task_names}  # Initialize task-specific patience counters
         self.training_status = {task_name: True for task_name in self.task_names}
-        self.training_status[self._vae_task_name] = True
+        self.training_status[self._vae_task_name] = 1 - bool(predictor_fine_tuning)
 
         # Training and validation loss storage
         train_vae_losses, train_task_losses, train_aucs = [], [], []
@@ -943,9 +942,10 @@ class SUAVE(nn.Module):
             
             # Early stopping logic
             if early_stopping:
-                if val_vae_loss < best_vae_loss:
+                if (val_vae_loss < best_vae_loss):
                     best_vae_loss = val_vae_loss
-                    self.vae_patience_counter = 0
+                    if not predictor_fine_tuning:
+                        self.vae_patience_counter = 0
                 else:
                     self.vae_patience_counter += 1
 
@@ -1020,7 +1020,7 @@ class SUAVE(nn.Module):
         epoch: int
             Current epoch number for logging.
         """
-        #! old version. can cause Error.
+        #! Old version. Can cause hard Error.
         # for param in module.parameters():
         #     param.requires_grad = False
 
@@ -1049,7 +1049,7 @@ class SUAVE(nn.Module):
             if verbose and self.training_status[name]: # show info at the first time
                 print(f"Epoch {epoch + 1}: Task {name} early stopping triggered.")
             self.training_status[name] = False
-                
+        
     def plot_loss(self, train_vae_losses, val_vae_losses, train_aucs, val_aucs, train_task_losses, val_task_losses, save_path=None, display_id="loss_plot"):
         """
         Plot training and validation loss curves for VAE and task-specific AUCs.
@@ -1245,14 +1245,6 @@ class SUAVE(nn.Module):
         model.load_state_dict(torch.load(os.path.join(load_dir, "epoch_final.pth"), map_location=device, weights_only=True))
         
         return model
-    
-    def _reset_parameters(self, seed=19960816):
-        for layer in self.modules():
-            if isinstance(layer, (nn.Linear, nn.Conv2d)):
-                torch.manual_seed(seed)  # 固定随机种子
-                nn.init.xavier_uniform_(layer.weight)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
 
     def _check_prediction_task_name(self, Y):
         '''check and set prediction task name(s) with passed target Y '''
@@ -1289,7 +1281,8 @@ class SUAVE(nn.Module):
             return X.to(DEVICE)
         else:
             return torch.from_numpy(np.asarray(X, dtype=np.float32)).to(DEVICE)
-
+        
+        
 class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
     """
     Scikit-learn compatible wrapper for the Hybrid VAE and Multi-Task Predictor.
