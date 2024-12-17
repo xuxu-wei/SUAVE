@@ -7,32 +7,24 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.metrics import mean_squared_error, roc_auc_score
-from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
-from .utils import *
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# TODO 早停机制
-# 检查早停机制是否正常，或者信息显示是否正常
-# 1. 发现图像上所有模型都early stop 但训练仍在继续
-# 2. 打印信息显示VAE触发early stop后未显示其他消息 直接早停
+from ._base import ResetMixin
+from .utils import *
 
 # TODO 支持回归任务
 
-# TODO 支持回归/分类混合建模?
-
-# TODO 支持部分训练:
-# 在fit中引入参数管理被训练的部分模块以及对应的参数初始化行为和学习率，
-# 从而可以把训练好的VAE冻结，然后在不同任务中仅训练下游任务，使每次fit仅重新初始化需要训练的部分，也可以支持fine-tuning.
+#? 支持回归/分类混合建模
 
 # TODO 自定义模型：
 # 引入一个类，使得不同的下游任务predictor模块可以通过parallel的方式连接到latent space上用于预测
 # （但这个模型不支持训练，如需训练应该使用前面的部分训练，完成后再把模型接到这里）
 
-class Encoder(nn.Module):
+# TODO 增加可视化分析工具
+
+class Encoder(nn.Module, ResetMixin):
     """
     Encoder network for Variational Autoencoder (VAE).
 
@@ -118,7 +110,7 @@ class Encoder(nn.Module):
         return mu, logvar
     
 
-class Decoder(nn.Module):
+class Decoder(nn.Module, ResetMixin):
     """
     Decoder network for Variational Autoencoder (VAE).
 
@@ -207,7 +199,7 @@ class Decoder(nn.Module):
         return self.output_layer(h)
     
 
-class VAE(nn.Module):
+class VAE(nn.Module, ResetMixin):
     """
     Variational Autoencoder (VAE) with Encoder and Decoder.
 
@@ -315,7 +307,7 @@ class ResidualBlock(nn.Module):
         h = self.dropout(h)
         return h + residual
     
-class MultiTaskPredictor(nn.Module):
+class MultiTaskPredictor(nn.Module, ResetMixin):
     """
     Multi-task prediction network supporting parallel and sequential task modeling.
 
@@ -442,7 +434,7 @@ class MultiTaskPredictor(nn.Module):
         return outputs
 
 
-class SUAVE(nn.Module):
+class SUAVE(nn.Module, ResetMixin):
     """
     Supervised and Unified Analysis of Variational Embeddings (SUAVE)
 
@@ -591,15 +583,7 @@ class SUAVE(nn.Module):
         self.to(DEVICE)
 
         assert self.task_strategy in ['parallel', 'sequential'], f"Unknown task_strategy: {self.task_strategy}. Must be 'parallel' or 'sequential'."
-
-    def reset_parameters(self, seed=19960816):
-        for layer in self.modules():
-            if isinstance(layer, (nn.Linear, nn.Conv2d)):
-                torch.manual_seed(seed)  # 固定随机种子
-                nn.init.xavier_uniform_(layer.weight)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
-
+        
     def forward(self, x, deterministic=False):
         """
         Forward pass through the complete model.
@@ -625,34 +609,11 @@ class SUAVE(nn.Module):
         list of torch.Tensor
             List of task-specific prediction tensors, each with shape (batch_size, 1).
         """
-        x = self.check_tensor(x).to(DEVICE)
+        x = self._check_tensor(x).to(DEVICE)
         recon, mu, logvar, z = self.vae(x, deterministic=deterministic)
         task_outputs = self.predictor(z)
         return recon, mu, logvar, z, task_outputs
     
-    def check_tensor(self, X: torch.Tensor):
-        """
-        Ensures the input is a tensor and moves it to the correct device.
-
-        Parameters
-        ----------
-        X : torch.Tensor or np.ndarray
-            Input data to check and convert if necessary.
-
-        Returns
-        -------
-        torch.Tensor
-            Tensor moved to the specified device.
-
-        Notes
-        -----
-        This method automatically handles input conversion from numpy arrays to tensors.
-        """
-        if isinstance(X, torch.Tensor):
-            return X.to(DEVICE)
-        else:
-            return torch.from_numpy(np.asarray(X, dtype=np.float32)).to(DEVICE)
-
     def compute_loss(self, x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None, normalize_loss=False):
         """
         Compute total loss for VAE and multi-task predictor.
@@ -756,9 +717,10 @@ class SUAVE(nn.Module):
             # Use raw losses with predefined weights
             total_loss = beta * (recon_loss + kl_loss) + gamma_task * task_loss_sum
             return total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores
-    
+
     def fit(self, X, Y, 
             epochs=2000, 
+            predictor_fine_tuning = False,
             early_stopping=True, 
             patience=100,
             verbose=True, 
@@ -766,7 +728,7 @@ class SUAVE(nn.Module):
             plot_path=None,
             save_weights_path=None):
         """
-        Fits the VAEMultiTaskModel to the data.
+        Train the SUAVE model on provided data.
 
         Parameters
         ----------
@@ -775,44 +737,85 @@ class SUAVE(nn.Module):
         Y : np.ndarray or torch.Tensor
             Target matrix of shape (n_samples, n_tasks).
         epochs : int, optional
-            Number of training epochs (default is 2500).
+            Number of training epochs (default is 2000).
+        predictor_fine_tuning : bool, optional
+            If True, the training will focus on fine-tuning the predictor modules after the VAE
+            has been trained or early-stopped. This is useful if the latent representation is already
+            learned and stable, and you only want to optimize task-specific heads (default is False).
         early_stopping : bool, optional
-            Whether to enable early stopping based on validation loss (default is False).
+            If True, enables early stopping based on validation loss improvements. Early stopping 
+            is applied first to the VAE module. Once the VAE stops improving, it is effectively 'frozen'
+            (learning rate set to 0), and training can continue on the predictor modules until their 
+            respective early stopping criteria are met (default is True).
         patience : int, optional
-            Number of epochs to wait for improvement in validation loss before stopping (default is 100).
+            Number of epochs to wait for improvement before triggering early stopping for each module 
+            (default is 100).
         verbose : bool, optional
-            If True, displays tqdm progress bar. If False, suppresses tqdm output (default is True).
+            If True, displays a tqdm progress bar and training metrics per epoch (default is True).
+        animate_monitor : bool, optional
+            If True and running in an interactive environment, attempts to dynamically update training 
+            plots at specified intervals. If False or not in such an environment, no dynamic plotting 
+            will occur (default is False).
         plot_path : str or None, optional
-            Directory to save loss plots every 100 epochs. If None, attempt dynamic plotting in a notebook environment.
+            Directory to save loss plots periodically (e.g., every few epochs). If None, tries dynamic 
+            plotting if `animate_monitor` is True. Otherwise, no plot is saved (default is None).
         save_weights_path : str or None, optional
-            Directory to save model weights every 500 epochs and at the end of training. If None, weights are not saved.
+            Directory to save model weights periodically and at the end of training. If None, weights 
+            are not saved (default is None).
 
         Returns
         -------
-        self : VAEMultiTaskModel
-            The fitted VAEMultiTaskModel instance.
-        """
-        
-        self.reset_parameters()
-        self.fit_epochs = epochs
-        if hasattr(Y, 'columns'):
-            self.task_names = list(Y.columns)
-        elif isinstance(Y, pd.Series):
-            if not Y.name  is None:
-                self.task_names = [Y.name]
-        else:
-            self.task_names = [f'task {i+1}' for i in range(len(self.task_classes))]
+        self : SUAVE
+            The fitted SUAVE model instance.
 
+        Notes
+        -----
+        - Early stopping is conducted in stages. Initially, the VAE portion is monitored. Once it fails 
+        to improve beyond the patience threshold, the VAE's learning rate is set to zero. Subsequently, 
+        the predictor heads can continue training (especially if `predictor_fine_tuning=True`), allowing 
+        for additional optimization of the predictor networks within a stable latent space.
+
+        Examples
+        --------
+        1. Training from scratch (VAE + Predictors):
+        >>> suave_model = SuaveClassifier(input_dim=30, task_classes=[2,2])
+        >>> suave_model.fit(X, y, epochs=500, patience=50, early_stopping=True, animate_monitor=False)
+
+        In this scenario, both the VAE and predictors are trained together from the beginning.
+
+        2. Fine-tuning the predictors:
+        Suppose you already have a trained model or a stable latent space representation. You can then 
+        increase the predictor learning rate and switch to fine-tuning mode:
+
+        >>> suave_model.set_params(multitask_lr=1e-2, lr_scheduler_factor=0.1, batch_size=32)
+        >>> suave_model.fit(X, y, patience=100, predictor_fine_tuning=True, animate_monitor=True)
+
+        Here:
+        - `predictor_fine_tuning=True`: Focus on optimizing the predictor modules after the VAE is stable.
+        - `multitask_lr=1e-2`: Increase the predictor heads' learning rate for quicker adaptation.
+        - `batch_size=32`: Potentially improves generalization and stability during fine-tuning.
+        - `animate_monitor=True`: Dynamically visualize training progress.
+        """
+        if predictor_fine_tuning:
+            self.vae_lr = 0
+            self.predictor.reset_parameters()
+        else:
+            self.reset_parameters()
+
+        self.fit_epochs = epochs
+        self._check_prediction_task_name(Y)
         # Data checks and device transfer
-        X = self.check_tensor(X).to(DEVICE)
-        Y = self.check_tensor(Y).to(DEVICE)
+        X = self._check_tensor(X).to(DEVICE)
+        Y = self._check_tensor(Y).to(DEVICE)
         self.to(DEVICE)  # Ensure the model is on the correct device
         
         # Data validation
         if len(X) != len(Y):
             raise ValueError("Features and targets must have the same number of samples.")
+        
         if torch.isnan(X).any():
             raise ValueError("Features (X) contain NaNs.")
+        
         if torch.isnan(Y).any():
             raise ValueError("Targets (Y) contain NaNs.")
 
@@ -843,10 +846,10 @@ class SUAVE(nn.Module):
         # Initialize best losses and patience counters
         best_vae_loss = float('inf')
         best_per_task_losses = [float('inf')] * len(self.task_classes)
-        vae_patience_counter = 0
-        task_patience_counters = [0] * len(self.task_classes)  # Initialize task-specific patience counters
+        self.vae_patience_counter = patience + 1 if predictor_fine_tuning else 0
+        self.task_patience_counters = {task_name: 0 for task_name in self.task_names}  # Initialize task-specific patience counters
         self.training_status = {task_name: True for task_name in self.task_names}
-        self.training_status['vae'] = True
+        self.training_status[self._vae_task_name] = 1 - bool(predictor_fine_tuning)
 
         # Training and validation loss storage
         train_vae_losses, train_task_losses, train_aucs = [], [], []
@@ -951,7 +954,7 @@ class SUAVE(nn.Module):
                     val_batch_count += 1
 
             if self.use_lr_scheduler:
-                if self.training_status['vae']:
+                if self.training_status[self._vae_task_name]:
                     vae_scheduler.step(val_vae_loss)  # 调用时需传入验证损失
 
                 for (task_name, task_scheduler), task_loss in zip(multitask_scheduler_dict.items(), val_per_task_losses):
@@ -971,54 +974,49 @@ class SUAVE(nn.Module):
                 train_auc_formated = [round(auc, 3) for auc in train_auc_scores]
                 val_auc_formated = [round(auc, 3) for auc in val_auc_scores]
                 iterator.set_postfix({
-                    "VAE(t)": f"{train_vae_loss:.3f}",
-                    "VAE(v)": f"{val_vae_loss:.3f}",
-
-                    # "Train Task Loss": f"{train_task_loss:.3f}",
-                    # "Val Task Loss": f"{val_task_loss:.3f}",
-
-                    # "Train AUC": f"{train_auc_scores.mean():.3f}",
-                    # "Val AUC": f"{val_auc_scores.mean():.3f}"
-                    "AUC(t)": f"{train_auc_formated}",
-                    "AUC(v)": f"{val_auc_formated}"
+                    "VAE(t)": f"{train_vae_loss:.3f}", # train total VAE loss
+                    "VAE(v)": f"{val_vae_loss:.3f}", # validation total VAE loss
+                    "AUC(t)": f"{train_auc_formated}", # train AUC for each task
+                    "AUC(v)": f"{val_auc_formated}" # validation AUC for each task
                 })
             
             # Early stopping logic
             if early_stopping:
-                if val_vae_loss < best_vae_loss:
+                if (val_vae_loss < best_vae_loss):
                     best_vae_loss = val_vae_loss
-                    vae_patience_counter = 0
+                    if not predictor_fine_tuning:
+                        self.vae_patience_counter = 0
                 else:
-                    vae_patience_counter += 1
+                    self.vae_patience_counter += 1
 
             # freeze weights if counter exceed patience
-            if vae_patience_counter >= patience:
-                self.stop_training_module(self.vae, 'vae', verbose, epoch)
+            if self.vae_patience_counter >= patience:
+                self.stop_training_module(self.vae, self._vae_task_name, verbose, epoch)
 
                 # For prediction tasks, start counting for early stopping after VAE has stopped.
                 for t in range(len(self.task_classes)):
                     if val_per_task_losses[t] < best_per_task_losses[t]:
                         best_per_task_losses[t] = val_per_task_losses[t]
-                        task_patience_counters[t] = 0
+                        self.task_patience_counters[self.task_names[t]] = 0
                     else:
-                        task_patience_counters[t] += 1
+                        self.task_patience_counters[self.task_names[t]] += 1
 
                 if self.task_strategy == 'sequential':
                     # Sequential task early stopping
                     for t in range(len(self.task_classes)):
                         # 仅在前置任务已停止时允许检查当前任务
-                        if all(not self.training_status.get(prev_t, False) for prev_t in self.task_names):
+                        if  t==0 or ((t >= 1 ) and (self.training_status[self.task_names[t-1]] == False)):
                             # 如果超出耐心计数，则停止该任务训练
-                            if task_patience_counters[t] >= patience:
+                            if self.task_patience_counters[self.task_names[t]] >= patience:
                                 self.stop_training_module(self.predictor.task_heads[t], self.task_names[t], verbose, epoch)
 
                 elif self.task_strategy == 'parallel':
                     for t in range(len(self.task_classes)):
-                        if task_patience_counters[t] >= patience:
+                        if self.task_patience_counters[self.task_names[t]] >= patience:
                             self.stop_training_module(self.predictor.task_heads[t], self.task_names[t], verbose, epoch)
 
             # Stop if both counters exceed patience
-            if vae_patience_counter >= patience and all(counter >= patience for counter in task_patience_counters):
+            if self.vae_patience_counter >= patience and all(counter >= patience for _, counter in self.task_patience_counters.items()):
                 print("Early stopping triggered due to no improvement in both VAE and task losses.") if verbose > 0 else None
                 if save_weights_path:
                     self.save_model(save_weights_path, "final")
@@ -1062,7 +1060,7 @@ class SUAVE(nn.Module):
         epoch: int
             Current epoch number for logging.
         """
-        #! old version. can cause Error.
+        #! Old version. Can cause hard Error.
         # for param in module.parameters():
         #     param.requires_grad = False
 
@@ -1077,9 +1075,9 @@ class SUAVE(nn.Module):
                 param_group['lr'] = 0
 
             # Update training status
-            if verbose and self.training_status['vae']: # show info at the first time
+            if verbose and self.training_status[self._vae_task_name]: # show info at the first time
                 print(f"Epoch {epoch + 1}: VAE early stopping triggered.")
-            self.training_status['vae'] = False
+            self.training_status[self._vae_task_name] = False
 
         # Handle task head
         elif name in self.multitask_optimizer_dict:
@@ -1091,7 +1089,7 @@ class SUAVE(nn.Module):
             if verbose and self.training_status[name]: # show info at the first time
                 print(f"Epoch {epoch + 1}: Task {name} early stopping triggered.")
             self.training_status[name] = False
-                
+        
     def plot_loss(self, train_vae_losses, val_vae_losses, train_aucs, val_aucs, train_task_losses, val_task_losses, save_path=None, display_id="loss_plot"):
         """
         Plot training and validation loss curves for VAE and task-specific AUCs.
@@ -1131,7 +1129,7 @@ class SUAVE(nn.Module):
         axes = axes.flatten()  # Flatten axes for easy indexing
 
         # VAE Loss Plot
-        stop_flag = {False:'(early stopped)', True:''}[self.training_status['vae']]
+        stop_flag = {False:'(early stopped)', True:''}[self.training_status[self._vae_task_name]]
         ax = axes[0]
         ax.plot(train_vae_losses, label='Train VAE Loss', linestyle='-')
         ax.plot(val_vae_losses, label='Val VAE Loss', linestyle='-')
@@ -1287,279 +1285,39 @@ class SUAVE(nn.Module):
         model.load_state_dict(torch.load(os.path.join(load_dir, "epoch_final.pth"), map_location=device, weights_only=True))
         
         return model
-    
 
-class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
-    """
-    Scikit-learn compatible wrapper for the Hybrid VAE and Multi-Task Predictor.
+    def _check_prediction_task_name(self, Y):
+        '''check and set prediction task name(s) with passed target Y '''
+        self._vae_task_name = 'vae'
 
-    This class extends the `SUAVE` by adding methods compatible with scikit-learn's API,
-    such as `fit`, `transform`, `predict`, and `score`.
+        if hasattr(Y, 'columns'):
+            self.task_names = list(Y.columns)
 
-    Methods
-    -------
-    fit(X, Y, *args, **kwargs)
-        Fit the model to input features `X` and targets `Y`.
-    transform(X)
-        Transform input samples into latent space representations.
-    inverse_transform(Z)
-        Reconstruct samples from latent space representations.
-    predict_proba(X, deterministic=True)
-        Predict probabilities for each task, either deterministically (using the latent mean) or stochastically.
-    predict(X, threshold=0.5)
-        Predict binary classifications for each task based on a threshold.
-    score(X, Y, ...)
-        Compute evaluation metrics (e.g., AUC) for each task on the given dataset.
-    eval_loss(X, Y)
-        Compute the total loss, including reconstruction, KL divergence, and task-specific losses.
-    get_feature_names_out(input_features=None)
-        Get output feature names for the latent space.
-
-    Attributes
-    ----------
-    feature_names_in_ : list of str
-        Feature names for the input data. Automatically populated when `X` is a pandas DataFrame during `fit`.
-
-    Notes
-    -----
-    - This wrapper is designed to integrate seamlessly with scikit-learn pipelines and workflows.
-    - The `transform` method maps input data into the latent space, which can be used for dimensionality reduction.
-    - The `predict` and `predict_proba` methods support multi-task binary classification.
-    """
-
-    def fit(self, X, y, *args, **kwargs):
-        """
-        see `HybridVAEMultiTaskModel.fit` 
-        """
-        # Record feature names if provided (e.g., pandas DataFrame)
-        if hasattr(X, "columns"):
-            self.feature_names_in_ = X.columns.tolist()
+        elif isinstance(Y, pd.Series):
+            if not Y.name  is None:
+                self.task_names = [Y.name]
         else:
-            self.feature_names_in_ = [f"x{i}" for i in range(X.shape[1])]
+            self.task_names = [f'task {i+1}' for i in range(len(self.task_classes))]
 
-        return super().fit(X, y, *args, **kwargs)
-    
-    def transform(self, X, return_latent_sample=False):
+    def _check_tensor(self, X: torch.Tensor):
         """
-        Transforms the input samples into the latent space.
+        Ensures the input is a tensor and moves it to the correct device.
 
         Parameters
         ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        return_latent_sample : bool, optional
-            If True, returns a sampled latent representation `z` instead of the mean `mu`.
-            Default is False.
+        X : torch.Tensor or np.ndarray
+            Input data to check and convert if necessary.
 
         Returns
         -------
-        Z : np.ndarray
-            Latent space representations with shape (n_samples, latent_dim).
-            If `return_latent_sample` is True, returns sampled latent vectors; otherwise, returns the mean.
+        torch.Tensor
+            Tensor moved to the specified device.
+
+        Notes
+        -----
+        This method automatically handles input conversion from numpy arrays to tensors.
         """
-        # Input validation
-        if not isinstance(X, (torch.Tensor, np.ndarray)):
-            raise ValueError("Input X must be a torch.Tensor or numpy.ndarray.")
-        if X.ndim != 2:
-            raise ValueError(f"Input X must have shape (n_samples, n_features). Got shape {X.shape}.")
-
-        X = self.check_tensor(X).to(DEVICE)
-        self.eval()
-        results = []
-
-        with torch.no_grad():
-            for i in range(0, X.size(0), self.batch_size):
-                X_batch = X[i:i + self.batch_size]
-                mu, logvar = self.vae.encoder(X_batch)
-                if return_latent_sample:
-                    z = self.vae.reparameterize(mu, logvar)
-                    results.append(z.cpu().numpy())
-                else:
-                    results.append(mu.cpu().numpy())
-
-        return np.vstack(results)
-
-    def sample_latent(self, X, n_samples=1):
-        """
-        Sample from the latent space using reparameterization trick.
-
-        Parameters
-        ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        n_samples : int, optional
-            Number of samples to generate for each input (default is 1).
-
-        Returns
-        -------
-        Z : np.ndarray
-            Sampled latent representations with shape (n_samples, latent_dim).
-        """
-        X = self.check_tensor(X).to(DEVICE)
-        self.eval()
-        with torch.no_grad():
-            mu, logvar = self.vae.encoder(X)
-            Z = [self.vae.reparameterize(mu, logvar) for _ in range(n_samples)]
-        return torch.stack(Z, dim=1).cpu().numpy()  # Shape: (input_samples, n_samples, latent_dim)
-    
-    def inverse_transform(self, Z):
-        """
-        Reconstructs samples from the latent space.
-
-        Parameters
-        ----------
-        Z : np.ndarray or torch.Tensor
-            Latent space representations with shape (n_samples, latent_dim).
-
-        Returns
-        -------
-        X_recon : np.ndarray
-            Reconstructed samples with shape (n_samples, input_dim).
-        """
-        Z = self.check_tensor(Z).to(DEVICE)
-        self.eval()
-        with torch.no_grad():
-            recon = self.vae.decoder(Z)
-        return recon.cpu().numpy()
-
-    def predict_proba(self, X, deterministic=True):
-        """
-        Predicts probabilities for each task with optional batch processing, using numpy arrays for efficiency.
-
-        Parameters
-        ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        deterministic : bool, optional
-            If True, uses the latent mean (mu) for predictions, avoiding randomness.
-            If False, samples from the latent space using reparameterization trick.
-
-        Returns
-        -------
-        probas : list of np.ndarray
-            Probabilities for each task. Each element is an array of shape (n_samples, n_classes).
-        """
-        X = self.check_tensor(X).to(DEVICE)
-        self.eval()  # Ensure model is in evaluation mode
-
-        # Initialize numpy arrays for storing results
-        n_samples = X.size(0)
-        probas_per_task = [
-            np.zeros((n_samples, num_classes)) for num_classes in self.predictor.task_classes
-        ]
-
-        with torch.no_grad():
-            # Process data in batches
-            for i in range(0, n_samples, self.batch_size):
-                X_batch = X[i:i + self.batch_size]
-                recon, mu, logvar, z, task_outputs = self(X_batch, deterministic=deterministic)
-
-                # Convert logits to probabilities for each task and store in numpy arrays
-                for t, task_output in enumerate(task_outputs):
-                    probas = F.softmax(task_output, dim=1).detach().cpu().numpy()
-
-                    # Copy batch probabilities into preallocated numpy array
-                    probas_per_task[t][i:i + self.batch_size] = probas
-
-        return probas_per_task 
-
-    def predict(self, X, threshold=0.5):
-        """
-        Predicts classifications for each task, compatible with multi-class and binary classification.
-
-        Parameters
-        ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        threshold : float, optional
-            Decision threshold for binary classification (default is 0.5). Ignored for multi-class tasks.
-
-        Returns
-        -------
-        predictions : list of np.ndarray
-            Predictions for each task. Each element is an array of shape (n_samples,).
-            For binary tasks, this contains {0, 1}; for multi-class tasks, it contains {0, 1, ..., n_classes-1}.
-        """
-        probas = self.predict_proba(X)
-        predictions = []
-
-        for t, task_probas in enumerate(probas):
-            num_classes = self.predictor.task_classes[t]
-            if num_classes > 2:
-                # Multi-class: return class with highest probability
-                predictions.append(np.argmax(task_probas, axis=1))
-            else:
-                # Binary: use threshold to predict class
-                predictions.append((task_probas[:, 1] >= threshold).astype(int))
-
-        return predictions  # List of arrays, one per task
-
-
-    def score(self, X, Y, *args, **kwargs):
-        """
-        Computes AUC scores for each task.
-
-        Parameters
-        ----------
-        X : np.ndarray or torch.Tensor
-            Input samples with shape (n_samples, n_features).
-        Y : np.ndarray
-            Ground truth labels with shape (n_samples, n_tasks).
-
-        Returns
-        -------
-        scores : np.ndarray
-            AUC scores for each task, shape (n_tasks,).
-        """
-        self.eval()
-        probas_per_task = self.predict_proba(X) # expcted on cpu numpy
-        Y = to_numpy(Y) # ensure cpu numpy array
-
-        # Calculate AUC for each task (detach to avoid affecting gradient)
-        auc_scores = []
-        for t, (task_proba, target) in enumerate(zip(probas_per_task, Y.T)):
-            num_classes = self.predictor.task_classes[t]
-            # Compute probabilities for AUC
-            if num_classes > 2:
-                # Multi-class task: apply softmax for probabilities
-                task_output_prob = task_proba
-            else:
-                # Binary task: apply sigmoid for probabilities of positive class
-                task_output_prob = task_proba[:, 1]  # Use prob of class 1
-            # Calculate AUC
-            try:
-                auc = roc_auc_score(y_true=target, y_score=task_output_prob, multi_class='ovo', average='macro', *args, **kwargs)
-            except ValueError:
-                auc = 0.5  # Default AUC for invalid cases (e.g., all labels are the same)
-            auc_scores.append(auc)
-
-        return np.array(auc_scores)
-
-    def eval_loss(self, X, Y):
-        X = self.check_tensor(X).to(DEVICE)
-        Y = self.check_tensor(Y).to(DEVICE)
-        self.eval()
-        # Forward pass
-        with torch.no_grad():
-            recon, mu, logvar, z, task_outputs = self(X)
-            total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores = self.compute_loss(
-                X, recon, mu, logvar, z, task_outputs, Y, 
-                beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas, normalize_loss=False
-            )
-
-        # Convert losses to NumPy arrays
-        return (total_loss.item() / len(X),  # Convert scalar tensor to Python float
-                recon_loss.item() / len(X),
-                kl_loss.item() / len(X),
-                task_loss.item() / len(X))
-    
-    def get_feature_names_out(self, input_features=None):
-        """
-        Get output feature names (latent space).
-
-        Returns
-        -------
-        output_feature_names : list of str
-            Output feature names for the latent space.
-        """
-        return [f"latent_{i}" for i in range(self.vae.encoder.latent_mu.out_features)]
+        if isinstance(X, torch.Tensor):
+            return X.to(DEVICE)
+        else:
+            return torch.from_numpy(np.asarray(X, dtype=np.float32)).to(DEVICE)

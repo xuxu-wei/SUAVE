@@ -1,3 +1,5 @@
+[![Static Badge](https://img.shields.io/badge/%E5%88%87%E6%8D%A2-%E4%B8%AD%E6%96%87%E7%89%88%E8%AF%B4%E6%98%8E%E6%96%87%E6%A1%A3-1082C3?style=flat)](使用说明-中文版.md)  ![PyPI](https://img.shields.io/pypi/v/suave-ml)
+
 # SUAVE: Supervised and Unified Analysis of Variational Embeddings
 
 **SUAVE** is a Python package built upon a **Hybrid Variational Autoencoder (VAE)** integrated with Multi-Task Learning. It unifies unsupervised latent representation learning with supervised prediction tasks. By guiding the latent space with label information, SUAVE not only achieves dimensionality reduction but also yields discriminative and interpretable embeddings that directly benefit downstream classification or regression tasks.
@@ -27,7 +29,7 @@
 
 ### 5. Comprehensive Training Utilities
 
-- **Joint Objective Optimization**: Simultaneously optimizes the VAE reconstruction/KL losses and supervised binary cross-entropy losses.  
+- **Joint Objective Optimization**: Simultaneously optimizes the VAE reconstruction/KL losses and supervised cross-entropy losses.  
 - **Early Stopping & LR Scheduling**: Monitors validation metrics for early stopping and dynamically adjusts learning rates to ensure stable convergence.
 
 ---
@@ -42,7 +44,7 @@
 
 ## Installation
 
-**Please Note** This package requires PyTorch. Please install the appropriate version of PyTorch for your system using the [official PyTorch guide](https://pytorch.org/get-started/locally/).
+**Please Note** This package requires PyTorch. Please install the appropriate version of PyTorch for your system using the [official PyTorch guide](https://pytorch.org/get-started/locally/). By default, SUAVE will detect the system environment during installation and automatically install a suitable PyTorch version, but this feature has not been thoroughly tested.
 
 - Install from Pypi
 

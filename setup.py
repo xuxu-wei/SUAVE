@@ -77,6 +77,7 @@ setup(
     author="Xuxu Wei",
     author_email="wxxtcm@163.com",
     license="BSD-3-Clause",
+    description="Deep learning model for label information-guided dimensionality reduction and multi-task learning.",
 
     packages=find_packages(include=["suave", "suave.*"]),
     python_requires=">=3.8",
