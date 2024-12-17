@@ -11,10 +11,66 @@ from .suave import SUAVE
 
 class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
     """
-    Scikit-learn compatible wrapper for the Hybrid VAE and Multi-Task Predictor.
-
+    Scikit-learn compatible wrapper for SUAVE.
+    
+    SUAVE combines a Variational Autoencoder (VAE) for dimensionality reduction
+    with a Multi-Task Predictor for performing parallel predictive tasks.
+    
     This class extends the `SUAVE` by adding methods compatible with scikit-learn's API,
     such as `fit`, `transform`, `predict`, and `score`.
+
+    Parameters
+    ----------
+    input_dim : int
+        Dimension of the input data.
+    task_count : int
+        Number of parallel prediction tasks.
+    layer_strategy : str, optional
+        Strategy for scaling hidden layer dimensions in both the VAE and Multi-Task Predictor:
+        - "constant" or "c": All hidden layers have the same width.
+        - "linear" or "l": Linearly increase/decrease the width.
+        - "geometric" or "g": Geometrically increase/decrease the width.
+        Default is "linear".
+    vae_hidden_dim : int, optional
+        Number of neurons in the first hidden layer of the VAE encoder/decoder (default is 64).
+    vae_depth : int, optional
+        Number of hidden layers in the VAE encoder/decoder (default is 1).
+    vae_dropout_rate : float, optional
+        Dropout rate for VAE hidden layers (default is 0.3).
+    latent_dim : int, optional
+        Dimension of the latent space in the VAE (default is 10).
+    predictor_hidden_dim : int, optional
+        Number of neurons in the first hidden layer of the Multi-Task Predictor (default is 64).
+    predictor_depth : int, optional
+        Number of shared hidden layers in the Multi-Task Predictor (default is 1).
+    predictor_dropout_rate : float, optional
+        Dropout rate for Multi-Task Predictor hidden layers (default is 0.3).
+    vae_lr : float, optional
+        Learning rate for the VAE optimizer (default is 1e-3).
+    vae_weight_decay : float, optional
+        Weight decay (L2 regularization) for the VAE optimizer (default is 1e-3).
+    multitask_lr : float, optional
+        Learning rate for the MultiTask Predictor optimizer (default is 1e-3).
+    multitask_weight_decay : float, optional
+        Weight decay (L2 regularization) for the MultiTask Predictor optimizer (default is 1e-3).
+    alphas : list or torch.Tensor, optional
+        Per-task weights for the task loss term, shape `(num_tasks,)`. Default is uniform weights (1 for all tasks).
+    beta : float, optional
+        Weight of the KL divergence term in the VAE loss (default is 1.0).
+    gamma_task : float, optional
+        Weight of the task loss term in the total loss (default is 1.0).
+    batch_size : int, optional
+        Batch size for training (default is 200).
+    validation_split : float, optional
+        Fraction of the data to use for validation (default is 0.3).
+    use_lr_scheduler : bool, optional
+        Whether to enable learning rate schedulers for both the VAE and Multi-Task Predictor (default is True).
+    lr_scheduler_factor : float, optional
+        Factor by which the learning rate is reduced when the scheduler is triggered (default is 0.1).
+    lr_scheduler_patience : int, optional
+        Number of epochs to wait for validation loss improvement before triggering the scheduler (default is 50).
+    use_batch_norm : bool, optional
+        Whether to apply batch normalization to hidden layers in both the VAE and Multi-Task Predictor (default is True).
 
     Methods
     -------
