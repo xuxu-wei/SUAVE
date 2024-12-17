@@ -66,12 +66,17 @@ def read_requirements():
     """从 requirements.txt 文件中读取依赖"""
     with open("requirements.txt") as f:
         return f.read().splitlines()
+
+def read_long_description():
+    with open("README.md", encoding="utf-8") as f:
+        return f.read()
+
 #%%
 setup(
     name="suave-ml",
     version=suave.__version__,
 
-    long_description=open("README.md").read(),
+    long_description=read_long_description(),
     long_description_content_type='text/markdown',
     url="https://github.com/xuxu-wei/SUAVE",
     author="Xuxu Wei",
