@@ -2,6 +2,7 @@ import sys
 import numpy as np
 import random
 import torch
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def is_interactive_environment():
