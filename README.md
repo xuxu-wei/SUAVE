@@ -72,7 +72,7 @@ from suave import SuaveClassifier
 
 # Instantiate the model
 model = SuaveClassifier(input_dim=X_train.shape[1],                                             # Input feature dimension
-                        task_classes=[len(Y_train[col].unique()) for col in Y_train.columns],     # Number of binary classification tasks
+                        task_classes=[len(Y_train[col].unique()) for col in Y_train.columns],   # Number of binary classification tasks
                         latent_dim=20                                                           # Latent dimension
                         )
 
