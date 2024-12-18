@@ -622,10 +622,10 @@ class SUAVE(nn.Module, ResetMixin):
     beta : float, optional, default=1.0
         Weight of the KL divergence term in the VAE loss.
         
-    gamma_task : float, optional, default=1.0
+    gamma_task : float, optional, default=10000.0
         Weight of the task loss term in the total loss.
         
-    batch_size : int, optional, default=200
+    batch_size : int, optional, default=32
         Batch size for training.
         
     validation_split : float, optional, default=0.3
@@ -721,8 +721,8 @@ class SUAVE(nn.Module, ResetMixin):
                  multitask_weight_decay=1e-3,
                  alphas=None,
                  beta=1.0, 
-                 gamma_task=1.0,
-                 batch_size=200, 
+                 gamma_task=1e4,
+                 batch_size=32, 
                  validation_split=0.3, 
                  use_lr_scheduler=True,
                  lr_scheduler_factor=0.1,
@@ -921,11 +921,11 @@ class SUAVE(nn.Module, ResetMixin):
             return total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores
 
     def fit(self, X, Y, 
-            epochs=2000, 
+            epochs=1000, 
             predictor_fine_tuning = False,
             early_stopping=True, 
             early_stop_method=None,
-            patience=100,
+            patience=50,
             verbose=True, 
             animate_monitor=False,
             plot_path=None,
@@ -941,7 +941,7 @@ class SUAVE(nn.Module, ResetMixin):
         Y : np.ndarray or torch.Tensor
             Target matrix of shape (n_samples, n_tasks).
             
-        epochs : int, optional, default=2000
+        epochs : int, optional, default=1000
             Number of training epochs.
             
         predictor_fine_tuning : bool, optional, default=False
@@ -962,7 +962,7 @@ class SUAVE(nn.Module, ResetMixin):
             - `'sequential'`: Tasks are monitored and stopped in sequence, where each task is only monitored
                 after the preceding tasks have been early stopped (applicable only if `task_strategy` is `'sequential'`).
                 
-        patience : int, optional, default=100
+        patience : int, optional, default=50
             Number of epochs to wait for improvement before triggering early stopping for each module.
             
         verbose : bool, optional, default=True
@@ -1401,8 +1401,8 @@ class SUAVE(nn.Module, ResetMixin):
         for t, task_name in enumerate(self.task_names):
             stop_flag = {False:'(early stopped)', True:''}[self.training_status[task_name]]
             ax = axes[t + 1]
-            ax.plot(train_aucs[:,t], label=f'Train AUC for Task {t+1})', linestyle='-')
-            ax.plot(val_aucs[:,t], label=f'Val AUC  for Task {t+1})', linestyle='-')
+            ax.plot(train_aucs[:,t], label=f'Train AUC for Task {t+1}', linestyle='-')
+            ax.plot(val_aucs[:,t], label=f'Validation AUC  for Task {t+1}', linestyle='-')
             ax.set_xlabel('Epochs')
             ax.set_ylabel('AUC')
             ax.legend()
