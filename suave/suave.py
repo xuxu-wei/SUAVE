@@ -861,11 +861,11 @@ class SUAVE(nn.Module, ResetMixin):
             List of AUC scores for each task.
         """
         # Reconstruction loss
-        reconstruction_loss_fn = nn.MSELoss(reduction='mean')
+        reconstruction_loss_fn = nn.MSELoss(reduction='sum')
         recon_loss = reconstruction_loss_fn(recon, x)
 
         # KL divergence loss: sum over latent dimensions and average over batch
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / x.size(0)
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
         # Task-specific losses
         per_task_losses = []
@@ -1203,8 +1203,8 @@ class SUAVE(nn.Module, ResetMixin):
                 train_auc_formated = [round(auc, 3) for auc in train_auc_scores]
                 val_auc_formated = [round(auc, 3) for auc in val_auc_scores]
                 iterator.set_postfix({
-                    "VAE(t)": f"{train_vae_loss:.3f}", # train total VAE loss
-                    "VAE(v)": f"{val_vae_loss:.3f}", # validation total VAE loss
+                    "VAE(t)": f"{train_vae_loss / self.batch_size:.3f}", # train total VAE loss, normalized by batch size
+                    "VAE(v)": f"{train_vae_loss / self.batch_size:.3f}", # validation total VAE loss, normalized by batch size
                     "AUC(t)": f"{train_auc_formated}", # train AUC for each task
                     "AUC(v)": f"{val_auc_formated}" # validation AUC for each task
                 })
@@ -1255,9 +1255,12 @@ class SUAVE(nn.Module, ResetMixin):
                 loss_plot_path = None
                 if plot_path:
                     loss_plot_path = os.path.join(plot_path, f"loss_epoch.jpg")
-                self.plot_loss(train_vae_losses, val_vae_losses,
-                               train_aucs, val_aucs, 
-                               train_task_losses,  val_task_losses,
+                self.plot_loss(np.array(train_vae_losses) / self.batch_size,  # normalize by batch size
+                               np.array(val_vae_losses) / self.batch_size, # normalize by batch size
+                               train_aucs, 
+                               val_aucs, 
+                               train_task_losses, 
+                               val_task_losses,
                                save_path=loss_plot_path
                                )
             # Save weights every 20% epochs
