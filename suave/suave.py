@@ -861,11 +861,11 @@ class SUAVE(nn.Module, ResetMixin):
             List of AUC scores for each task.
         """
         # Reconstruction loss
-        reconstruction_loss_fn = nn.MSELoss(reduction='sum')
+        reconstruction_loss_fn = nn.MSELoss(reduction='mean')
         recon_loss = reconstruction_loss_fn(recon, x)
 
-        # KL divergence loss
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        # KL divergence loss: sum over latent dimensions and average over batch
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / x.size(0)
 
         # Task-specific losses
         per_task_losses = []
@@ -904,7 +904,7 @@ class SUAVE(nn.Module, ResetMixin):
                 else:
                     auc = roc_auc_score(target_cpu, task_output_prob)
             except ValueError:
-                auc = 0.5  # Default AUC for invalid cases (e.g., all labels are the same)
+                auc = np.nan  # Default AUC for invalid cases (e.g., all labels are the same)
             auc_scores.append(auc)
 
         if normalize_loss:
