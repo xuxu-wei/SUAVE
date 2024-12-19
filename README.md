@@ -8,14 +8,16 @@
 
 ## Installation
 
-**Please Note** This package requires PyTorch. Please install the appropriate version of PyTorch for your system using the [official PyTorch guide](https://pytorch.org/get-started/locally/). By default, SUAVE will detect the system environment during installation and automatically install a suitable PyTorch version, but this feature has not been thoroughly tested.
-
-- Install from Pypi
+**Please Note** By default, SUAVE attempts to detect the system environment and automatically installs the appropriate version of PyTorch during installation. However, this feature has not been thoroughly tested.
 
 ```bash
 pip install suave-ml
 ```
 
+It is recommended to install the suitable PyTorch version for your system environment before installing this package. Please refer to the [official PyTorch guide](https://pytorch.org/get-started/locally/) for installation instructions. For example, on Windows, you can use the following pip command to install the version of PyTorch corresponding to CUDA 12.1:
+```bash
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
 ---
 
 ## Quick Start
