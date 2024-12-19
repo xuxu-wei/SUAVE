@@ -2,7 +2,7 @@
 
 # SUAVE: Supervised and Unified Analysis of Variational Embeddings
 
-**SUAVE** is a Python package built upon a **Hybrid Variational Autoencoder (VAE)** integrated with Multi-Task Learning. It unifies unsupervised latent representation learning with supervised prediction tasks. By guiding the latent space with label information, SUAVE not only achieves dimensionality reduction but also yields discriminative and interpretable embeddings that directly benefit downstream classification or regression tasks.
+**SUAVE** is a Python package built upon a **Hybrid Variational Autoencoder (VAE)** . It unifies unsupervised latent representation learning with supervised prediction tasks. By guiding the latent space with label information, SUAVE not only achieves dimensionality reduction but also yields discriminative and interpretable embeddings that directly benefit downstream classification or regression tasks. SUAVE integrates multi-task learning, enabling the incorporation of information from various downstream prediction tasks into the latent space learning process by adjusting task weights.
 
 ---
 
