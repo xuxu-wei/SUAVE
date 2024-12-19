@@ -6,42 +6,6 @@
 
 ---
 
-## Key Features
-
-### 1. Supervised & Unsupervised Fusion
-
-- **Unsupervised (VAE)**: Learns a latent space representation by reconstructing input features and regularizing the latent variables using a Kullback-Leibler (KL) divergence term.
-- **Supervised (MTL)**: Incorporates label information to shape the latent space, ensuring that the learned features are informative for one or multiple prediction tasks.
-
-### 2. Multi-Task Learning Integration
-
-- **Shared Representations**: A single latent space underpins multiple related classification (or other) tasks, leveraging common data structure for efficient, joint learning.
-- **Task-Specific Heads**: Independent prediction heads are built atop the shared latent space. This encourages knowledge transfer among tasks and can improve predictive performance on each one.
-
-### 3. Flexible and Customizable Architecture
-
-- **Configurable Networks**: Easily adjust encoder and decoder depths, widths, and layer scaling strategies (e.g., constant, linear, geometric).
-- **Regularization Built-In**: Batch normalization and dropout help stabilize training and mitigate overfitting.
-
-### 4. Scikit-Learn Compatibility
-
-- **Seamless Integration**: The `SuaveSklearn` class is compatible with scikit-learn’s pipeline and model selection APIs. Perform hyperparameter tuning with `GridSearchCV` and integrate SUAVE models into complex ML workflows with minimal friction.
-
-### 5. Comprehensive Training Utilities
-
-- **Joint Objective Optimization**: Simultaneously optimizes the VAE reconstruction/KL losses and supervised cross-entropy losses.
-- **Early Stopping & LR Scheduling**: Monitors validation metrics for early stopping and dynamically adjusts learning rates to ensure stable convergence.
-
----
-
-## Example Use Cases
-
-- **Supervised Dimensionality Reduction**: Obtain a low-dimensional feature representation that preserves predictive signals for classification tasks.
-- **Multi-Task Classification**: Tackle multiple related outcomes (e.g., multiple mortality endpoints) within a unified model and benefit from shared latent factors.
-- **Generative Modeling & Data Insight**: Interpolate, generate synthetic samples, and visualize latent structures that capture underlying data patterns and decision boundaries.
-
----
-
 ## Installation
 
 **Please Note** This package requires PyTorch. Please install the appropriate version of PyTorch for your system using the [official PyTorch guide](https://pytorch.org/get-started/locally/). By default, SUAVE will detect the system environment during installation and automatically install a suitable PyTorch version, but this feature has not been thoroughly tested.
@@ -124,6 +88,42 @@ X_reconstructed = pd.DataFrame(reconstructed, index=X_test.index, columns=X_test
 ```
 
 ---
+## Key Features
+
+### 1. Supervised & Unsupervised Fusion
+
+- **Unsupervised (VAE)**: Learns a latent space representation by reconstructing input features and regularizing the latent variables using a Kullback-Leibler (KL) divergence term.
+- **Supervised (MTL)**: Incorporates label information to shape the latent space, ensuring that the learned features are informative for one or multiple prediction tasks.
+
+### 2. Multi-Task Learning Integration
+
+- **Shared Representations**: A single latent space underpins multiple related classification (or other) tasks, leveraging common data structure for efficient, joint learning.
+- **Task-Specific Heads**: Independent prediction heads are built atop the shared latent space. This encourages knowledge transfer among tasks and can improve predictive performance on each one.
+
+### 3. Flexible and Customizable Architecture
+
+- **Configurable Networks**: Easily adjust encoder and decoder depths, widths, and layer scaling strategies (e.g., constant, linear, geometric).
+- **Regularization Built-In**: Batch normalization and dropout help stabilize training and mitigate overfitting.
+
+### 4. Scikit-Learn Compatibility
+
+- **Seamless Integration**: The `SuaveSklearn` class is compatible with scikit-learn’s pipeline and model selection APIs. Perform hyperparameter tuning with `GridSearchCV` and integrate SUAVE models into complex ML workflows with minimal friction.
+
+### 5. Comprehensive Training Utilities
+
+- **Joint Objective Optimization**: Simultaneously optimizes the VAE reconstruction/KL losses and supervised cross-entropy losses.
+- **Early Stopping & LR Scheduling**: Monitors validation metrics for early stopping and dynamically adjusts learning rates to ensure stable convergence.
+
+---
+
+## Example Use Cases
+
+- **Supervised Dimensionality Reduction**: Obtain a low-dimensional feature representation that preserves predictive signals for classification tasks.
+- **Multi-Task Classification**: Tackle multiple related outcomes (e.g., multiple mortality endpoints) within a unified model and benefit from shared latent factors.
+- **Generative Modeling & Data Insight**: Interpolate, generate synthetic samples, and visualize latent structures that capture underlying data patterns and decision boundaries.
+
+---
+
 
 ## License
 
