@@ -900,9 +900,8 @@ class SUAVE(nn.Module, ResetMixin):
             try:
                 auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, multi_class='ovo', average='macro')
             except ValueError:
-                # auc = np.nan  # Default AUC for invalid cases (e.g., all labels are the same)
-                # Warning(f"Invalid AUC calculation for task {t}. All labels are the same.")
-                raise 
+                auc = 0.5  # Default AUC for invalid cases (e.g., all labels are the same)
+                # raise 
             auc_scores.append(auc)
 
         # Use raw losses with predefined weights
@@ -1059,7 +1058,6 @@ class SUAVE(nn.Module, ResetMixin):
                         for cls, count in zip(unique_classes, class_counts):
                             print(f"  Class {int(cls)}: {int(count)} samples")
                 break
-
         if not success:
             raise ValueError("Failed to split data: One or more tasks have imbalanced classes in training or validation sets.")
         
