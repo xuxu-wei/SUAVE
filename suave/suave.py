@@ -1036,15 +1036,25 @@ class SUAVE(nn.Module, ResetMixin):
         
         if torch.isnan(Y).any():
             raise ValueError("Targets (Y) contain NaNs.")
+        
+        # Attempt to split the data multiple times
+        success = False
+        for attempt in range(10):  # Maximum 10 attempts to find a valid split
+            # Split data into training and validation sets
+            n_samples = len(X)
+            n_val = int(n_samples * self.validation_split)
+            perm = torch.randperm(n_samples)
+            train_idx, val_idx = perm[:-n_val], perm[-n_val:]
+            X_train, X_val = X[train_idx], X[val_idx]
+            Y_train, Y_val = Y[train_idx], Y[val_idx]
+            
+            if self._validate_split(Y.shape[1], Y_train, Y_val):
+                success = True
+                break
 
-        # Split data into training and validation sets
-        n_samples = len(X)
-        n_val = int(n_samples * self.validation_split)
-        perm = torch.randperm(n_samples)
-        train_idx, val_idx = perm[:-n_val], perm[-n_val:]
-        X_train, X_val = X[train_idx], X[val_idx]
-        Y_train, Y_val = Y[train_idx], Y[val_idx]
-
+        if not success:
+            raise ValueError("Failed to split data: One or more tasks have imbalanced classes in training or validation sets.")
+        
         # Separate optimizers for VAE and MultiTask predictor
         self.vae_optimizer = torch.optim.Adam(self.vae.parameters(), lr=self.vae_lr, weight_decay=self.vae_weight_decay, eps=1e-8)
         
@@ -1057,6 +1067,7 @@ class SUAVE(nn.Module, ResetMixin):
             if self.lr_scheduler_patience is None:
                 self.lr_scheduler_patience = patience * 1/3
             vae_scheduler = ReduceLROnPlateau(self.vae_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
+            # Check if each task and class has at
             multitask_scheduler_dict = {task_name: ReduceLROnPlateau(self.multitask_optimizer_dict[task_name], 
                                                                      mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
                                                                      for task_name in self.task_names}
@@ -1582,7 +1593,33 @@ class SUAVE(nn.Module, ResetMixin):
             return X.to(DEVICE)
         else:
             return torch.from_numpy(np.asarray(X, dtype=np.float32)).to(DEVICE)
-        
+    
+    @staticmethod
+    def _validate_split(num_tasks, Y_train, Y_val):
+        """
+        Validate that each task's training and validation sets contain all necessary classes.
+
+        Parameters
+        ----------
+        num_tasks : int
+            Number of tasks in the model. Should be Y.shape[1].
+            
+        Y_train, Y_val : torch.Tensor
+            Training and validation target tensors of shape (n_samples, num_tasks).
+
+        Returns
+        -------
+        bool
+            True if all tasks have balanced classes in both training and validation sets, False otherwise.
+        """
+        for task_idx in range(num_tasks):
+            train_classes = torch.unique(Y_train[:, task_idx])
+            val_classes = torch.unique(Y_val[:, task_idx])
+            # Ensure each task has at least two classes (for binary/multi-class classification)
+            if len(train_classes) < 2 or len(val_classes) < 2:
+                return False
+        return True
+
     def eval_loss(self, X, Y):
         """
         Compute the total loss, including reconstruction, KL divergence, and task-specific losses.
