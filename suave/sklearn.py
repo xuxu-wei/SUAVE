@@ -378,49 +378,6 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
             auc_scores.append(auc)
 
         return np.array(auc_scores)
-
-    def eval_loss(self, X, Y):
-        """
-        Compute the total loss, including reconstruction, KL divergence, and task-specific losses.
-
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            Input samples.
-
-        y : array-like of shape (n_samples, n_tasks)
-            True labels for each task.
-
-        Returns
-        -------
-        total_loss : float
-            Total loss averaged over the samples.
-
-        recon_loss : float
-            Reconstruction loss averaged over the samples.
-
-        kl_loss : float
-            KL divergence loss averaged over the samples.
-
-        task_loss : float
-            Task-specific loss averaged over the samples.
-        """
-        X = self._check_tensor(X).to(DEVICE)
-        Y = self._check_tensor(Y).to(DEVICE)
-        self.eval()
-        # Forward pass
-        with torch.no_grad():
-            recon, mu, logvar, z, task_outputs = self(X)
-            total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores = self.compute_loss(
-                X, recon, mu, logvar, z, task_outputs, Y, 
-                beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas, normalize_loss=False
-            )
-
-        # Convert losses to NumPy arrays
-        return (total_loss.item() / len(X),  # Convert scalar tensor to Python float
-                recon_loss.item() / len(X),
-                kl_loss.item() / len(X),
-                task_loss.item() / len(X))
     
     def get_feature_names_out(self, input_features=None):
         """
