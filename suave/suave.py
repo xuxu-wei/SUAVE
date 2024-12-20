@@ -898,13 +898,10 @@ class SUAVE(nn.Module, ResetMixin):
 
             target_cpu = target.detach().cpu().numpy()
             try:
-                if num_classes > 2:
-                    auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, multi_class='ovo', average='macro')
-                else:
-                    auc = roc_auc_score(target_cpu, task_output_prob)
+                auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, multi_class='ovo', average='macro')
             except ValueError:
-                # auc = np.nan  # Default AUC for invalid cases (e.g., all labels are the same)
-                raise
+                auc = np.nan  # Default AUC for invalid cases (e.g., all labels are the same)
+                Warning(f"Invalid AUC calculation for task {t}. All labels are the same.")
             
             auc_scores.append(auc)
 
