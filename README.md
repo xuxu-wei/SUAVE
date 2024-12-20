@@ -15,9 +15,11 @@ pip install suave-ml
 ```
 
 It is recommended to install the suitable PyTorch version for your system environment before installing this package. Please refer to the [official PyTorch guide](https://pytorch.org/get-started/locally/) for installation instructions. For example, on Windows, you can use the following pip command to install the version of PyTorch corresponding to CUDA 12.1:
+
 ```bash
 pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
+
 ---
 
 ## Quick Start
@@ -49,8 +51,8 @@ model.fit(X_train, Y_train, epochs=1000, animate_monitor=True, verbose=1)
 ![png](readme_files/readme_3_0.png)
 
 ```
-Training:  31%|███       | 306/1000 [02:55<06:38,  1.74epoch/s, VAE(t)=217.777, VAE(v)=197.522, AUC(t)=[0.975, 0.977, 0.988], AUC(v)=[0.85, 0.808, 0.923]] 
-Epoch 307: Task task_2 early stopping triggered.
+Training:  70%|███████   | 704/1000 [06:00<02:31,  1.95epoch/s, VAE(t)=6.104, VAE(v)=5.546, AUC(t)=[0.98, 0.961, 0.983], AUC(v)=[0.83, 0.797, 0.922]]  
+Epoch 705: Task task_3 early stopping triggered.
 Early stopping triggered due to no improvement in both VAE and task losses.
 ```
 
@@ -68,7 +70,7 @@ print("AUC Scores:", auc_scores)
 ```
 
 ```
-AUC Scores: [0.84756281 0.8265501  0.90290179]
+AUC Scores: [0.8314483  0.8053462  0.90158279]
 ```
 
 ---
@@ -90,6 +92,7 @@ X_reconstructed = pd.DataFrame(reconstructed, index=X_test.index, columns=X_test
 ```
 
 ---
+
 ## Key Features
 
 ### 1. Supervised & Unsupervised Fusion
@@ -125,7 +128,6 @@ X_reconstructed = pd.DataFrame(reconstructed, index=X_test.index, columns=X_test
 - **Generative Modeling & Data Insight**: Interpolate, generate synthetic samples, and visualize latent structures that capture underlying data patterns and decision boundaries.
 
 ---
-
 
 ## License
 
