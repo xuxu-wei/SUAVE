@@ -622,7 +622,7 @@ class SUAVE(nn.Module, ResetMixin):
     beta : float, optional, default=1.0
         Weight of the KL divergence term in the VAE loss.
         
-    gamma_task : float, optional, default=10000.0
+    gamma_task : float, optional, default=100.0
         Weight of the task loss term in the total loss.
         
     batch_size : int, optional, default=32
@@ -721,7 +721,7 @@ class SUAVE(nn.Module, ResetMixin):
                  multitask_weight_decay=1e-3,
                  alphas=None,
                  beta=1.0, 
-                 gamma_task=1e4,
+                 gamma_task=100,
                  batch_size=32, 
                  validation_split=0.3, 
                  use_lr_scheduler=True,
@@ -875,7 +875,7 @@ class SUAVE(nn.Module, ResetMixin):
             alpha = torch.tensor(alpha, device=DEVICE, dtype=torch.float32)
 
         for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
-            task_loss_fn = nn.CrossEntropyLoss(reduction='mean')
+            task_loss_fn = nn.CrossEntropyLoss(reduction='sum')
             task_loss = task_loss_fn(task_output, target.long())
             weighted_task_loss = alpha[t] * task_loss
             per_task_losses.append(weighted_task_loss)
@@ -1125,9 +1125,9 @@ class SUAVE(nn.Module, ResetMixin):
                     task_optimizer.step()
 
                 # Accumulate losses
-                train_vae_loss += (recon_loss.item() + kl_loss.item())
-                train_task_loss_sum += task_loss_sum.item()
-                train_per_task_losses += np.array([loss.cpu().detach().numpy() for loss in per_task_losses])
+                train_vae_loss += (recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size # record batch normalized loss after backward pass
+                train_task_loss_sum += task_loss_sum.item() / self.batch_size # record batch normalized loss after backward pass
+                train_per_task_losses += np.array([loss.cpu().detach().numpy() / self.batch_size  for loss in per_task_losses]) # record batch normalized loss after backward pass
                 train_auc_scores += np.array(auc_scores)
                 train_batch_count += 1
 
@@ -1135,6 +1135,7 @@ class SUAVE(nn.Module, ResetMixin):
             train_vae_loss /= len(X_train)
             train_task_loss_sum /= len(X_train)
             train_auc_scores /= train_batch_count
+            
             train_vae_losses.append(train_vae_loss)
             train_task_losses.append(train_task_loss_sum)
             train_aucs.append(train_auc_scores)
@@ -1164,9 +1165,9 @@ class SUAVE(nn.Module, ResetMixin):
                     )
 
                     # Accumulate losses
-                    val_vae_loss += (recon_loss.item() + kl_loss.item())
-                    val_task_loss_sum += task_loss_sum.item()
-                    val_per_task_losses += np.array([loss.cpu().detach().numpy() for loss in per_task_losses])
+                    val_vae_loss += (recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size
+                    val_task_loss_sum += task_loss_sum.item() / self.batch_size
+                    val_per_task_losses += np.array([loss.cpu().detach().numpy() / self.batch_size for loss in per_task_losses])
                     val_auc_scores += np.array(auc_scores)
                     val_batch_count += 1
 
@@ -1182,6 +1183,7 @@ class SUAVE(nn.Module, ResetMixin):
             val_vae_loss /= len(X_val)
             val_task_loss_sum /= len(X_val)
             val_auc_scores /= val_batch_count
+            
             val_vae_losses.append(val_vae_loss)
             val_task_losses.append(val_task_loss_sum)
             val_aucs.append(val_auc_scores)
@@ -1191,8 +1193,8 @@ class SUAVE(nn.Module, ResetMixin):
                 train_auc_formated = [round(auc, 3) for auc in train_auc_scores]
                 val_auc_formated = [round(auc, 3) for auc in val_auc_scores]
                 iterator.set_postfix({
-                    "VAE(t)": f"{train_vae_loss / self.batch_size:.3f}", # train total VAE loss, normalized by batch size
-                    "VAE(v)": f"{train_vae_loss / self.batch_size:.3f}", # validation total VAE loss, normalized by batch size
+                    "VAE(t)": f"{train_vae_loss:.3f}", # train total VAE loss, normalized by batch size
+                    "VAE(v)": f"{val_vae_loss:.3f}", # validation total VAE loss, normalized by batch size
                     "AUC(t)": f"{train_auc_formated}", # train AUC for each task
                     "AUC(v)": f"{val_auc_formated}" # validation AUC for each task
                 })
@@ -1243,8 +1245,8 @@ class SUAVE(nn.Module, ResetMixin):
                 loss_plot_path = None
                 if plot_path:
                     loss_plot_path = os.path.join(plot_path, f"loss_epoch.jpg")
-                self.plot_loss(np.array(train_vae_losses) / self.batch_size,  # orginally reduction by sum, normalize by batch size here
-                               np.array(val_vae_losses) / self.batch_size, # orginally reduction by sum, normalize by batch size here
+                self.plot_loss(train_vae_losses,  # orginally reduction by sum, normalize by batch size here
+                               val_vae_losses, # orginally reduction by sum, normalize by batch size here
                                train_aucs, 
                                val_aucs, 
                                train_task_losses, 
