@@ -1050,6 +1050,14 @@ class SUAVE(nn.Module, ResetMixin):
             
             if self._validate_split(Y.shape[1], Y_train, Y_val):
                 success = True
+                # Print class distribution for each task in validation set
+                if verbose > 1:
+                    print("Validation set class distribution:")
+                    for task_idx in range(Y.shape[1]):
+                        print(f"\nTask {self.task_names[task_idx]}:")
+                        unique_classes, class_counts = torch.unique(Y_val[:, task_idx], return_counts=True)
+                        for cls, count in zip(unique_classes, class_counts):
+                            print(f"  Class {int(cls)}: {int(count)} samples")
                 break
 
         if not success:
