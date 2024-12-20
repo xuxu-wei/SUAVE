@@ -26,6 +26,8 @@ from .utils import *
 
 # TODO 调用 score 计算AUC以后 会用一个属性记录最佳阈值，更新predict行为
 
+# 2024.12.20 统一度量方法，损失计算使用 sum-reduction,verbose信息显示 mean-reduction 以便不同batch size进行比较
+
 class Encoder(nn.Module, ResetMixin):
     """
     Encoder network for Variational Autoencoder (VAE).
@@ -801,7 +803,7 @@ class SUAVE(nn.Module, ResetMixin):
         task_outputs = self.predictor(z)
         return recon, mu, logvar, z, task_outputs
     
-    def compute_loss(self, x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None, normalize_loss=False):
+    def compute_loss(self, x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None):
         """
         Compute total loss for VAE and multi-task predictor.
 
@@ -901,7 +903,9 @@ class SUAVE(nn.Module, ResetMixin):
                 else:
                     auc = roc_auc_score(target_cpu, task_output_prob)
             except ValueError:
-                auc = np.nan  # Default AUC for invalid cases (e.g., all labels are the same)
+                # auc = np.nan  # Default AUC for invalid cases (e.g., all labels are the same)
+                raise
+            
             auc_scores.append(auc)
 
         # Use raw losses with predefined weights
@@ -1616,7 +1620,7 @@ class SUAVE(nn.Module, ResetMixin):
             recon, mu, logvar, z, task_outputs = self(X)
             total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores = self.compute_loss(
                 X, recon, mu, logvar, z, task_outputs, Y, 
-                beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas, normalize_loss=False
+                beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
             )
 
         # Convert losses to NumPy arrays
