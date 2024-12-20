@@ -836,9 +836,6 @@ class SUAVE(nn.Module, ResetMixin):
             
         alpha : list or torch.Tensor, optional, default=None
             Per-task weights, shape (num_tasks,). Default is uniform weights (1 for all tasks).
-            
-        normalize_loss : bool, optional, default=False
-            Whether to normalize each loss term before combining them.
 
         Returns
         -------
@@ -907,18 +904,9 @@ class SUAVE(nn.Module, ResetMixin):
                 auc = np.nan  # Default AUC for invalid cases (e.g., all labels are the same)
             auc_scores.append(auc)
 
-        if normalize_loss:
-            # Normalize each loss by its scale
-            recon_loss_norm = recon_loss / (recon_loss.item() + 1e-8)
-            kl_loss_norm = kl_loss / (kl_loss.item() + 1e-8)
-            task_loss_sum_norm = task_loss_sum / (task_loss_sum.item() + 1e-8)
-
-            total_loss = beta * (recon_loss_norm + kl_loss_norm) + gamma_task * task_loss_sum_norm
-            return total_loss, recon_loss_norm, kl_loss_norm, task_loss_sum_norm, per_task_losses, auc_scores
-        else:
-            # Use raw losses with predefined weights
-            total_loss = beta * (recon_loss + kl_loss) + gamma_task * task_loss_sum
-            return total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores
+        # Use raw losses with predefined weights
+        total_loss = recon_loss + beta * kl_loss + gamma_task * task_loss_sum
+        return total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores
 
     def fit(self, X, Y, 
             epochs=1000, 
@@ -1633,4 +1621,6 @@ class SUAVE(nn.Module, ResetMixin):
         return (total_loss.item() / len(X), 
                 recon_loss.item() / len(X),
                 kl_loss.item() / len(X),
-                task_loss.item())
+                task_loss.item(),
+                auc_scores,
+                )
