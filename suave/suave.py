@@ -877,7 +877,7 @@ class SUAVE(nn.Module, ResetMixin):
             alpha = torch.tensor(alpha, device=DEVICE, dtype=torch.float32)
 
         for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
-            task_loss_fn = nn.CrossEntropyLoss(reduction='sum')
+            task_loss_fn = nn.CrossEntropyLoss(reduction='mean')
             task_loss = task_loss_fn(task_output, target.long())
             weighted_task_loss = alpha[t] * task_loss
             per_task_losses.append(weighted_task_loss)
@@ -900,9 +900,9 @@ class SUAVE(nn.Module, ResetMixin):
             try:
                 auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, multi_class='ovo', average='macro')
             except ValueError:
-                auc = np.nan  # Default AUC for invalid cases (e.g., all labels are the same)
-                Warning(f"Invalid AUC calculation for task {t}. All labels are the same.")
-            
+                # auc = np.nan  # Default AUC for invalid cases (e.g., all labels are the same)
+                # Warning(f"Invalid AUC calculation for task {t}. All labels are the same.")
+                raise 
             auc_scores.append(auc)
 
         # Use raw losses with predefined weights
@@ -1146,8 +1146,8 @@ class SUAVE(nn.Module, ResetMixin):
 
                 # Accumulate losses
                 train_vae_loss += (recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size # record batch normalized loss after backward pass
-                train_task_loss_sum += task_loss_sum.item() / self.batch_size # record batch normalized loss after backward pass
-                train_per_task_losses += np.array([loss.cpu().detach().numpy() / self.batch_size  for loss in per_task_losses]) # record batch normalized loss after backward pass
+                train_task_loss_sum += task_loss_sum.item()
+                train_per_task_losses += np.array([loss.cpu().detach().numpy() for loss in per_task_losses])
                 train_auc_scores += np.array(auc_scores)
                 train_batch_count += 1
 
@@ -1186,8 +1186,8 @@ class SUAVE(nn.Module, ResetMixin):
 
                     # Accumulate losses
                     val_vae_loss += (recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size
-                    val_task_loss_sum += task_loss_sum.item() / self.batch_size
-                    val_per_task_losses += np.array([loss.cpu().detach().numpy() / self.batch_size for loss in per_task_losses])
+                    val_task_loss_sum += task_loss_sum.item()
+                    val_per_task_losses += np.array([loss.cpu().detach().numpy() for loss in per_task_losses])
                     val_auc_scores += np.array(auc_scores)
                     val_batch_count += 1
 
