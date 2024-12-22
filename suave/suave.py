@@ -1630,7 +1630,7 @@ class SUAVE(nn.Module, ResetMixin):
                 return False
         return True
 
-    def eval_loss(self, X, Y):
+    def eval_loss(self, X, Y, deterministic=False):
         """
         Compute the total loss, including reconstruction, KL divergence, and task-specific losses.
 
@@ -1641,6 +1641,10 @@ class SUAVE(nn.Module, ResetMixin):
 
         y : array-like of shape (n_samples, n_tasks)
             True labels for each task.
+
+        deterministic : bool, default=True
+            If `True`, uses the latent mean (`mu`) for predictions, ensuring deterministic outputs.
+            If `False`, samples from the latent space using the reparameterization trick, introducing stochasticity.
 
         Returns
         -------
@@ -1661,7 +1665,7 @@ class SUAVE(nn.Module, ResetMixin):
         self.eval()
         # Forward pass
         with torch.no_grad():
-            recon, mu, logvar, z, task_outputs = self(X)
+            recon, mu, logvar, z, task_outputs = self(X, deterministic=deterministic)
             total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores = self.compute_loss(
                 X, recon, mu, logvar, z, task_outputs, Y, 
                 beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas

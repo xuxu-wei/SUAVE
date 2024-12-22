@@ -331,7 +331,7 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
         return predictions  # List of arrays, one per task
 
 
-    def score(self, X, Y, *args, **kwargs):
+    def score(self, X, Y, deterministic=True, *args, **kwargs):
         """
         Compute evaluation metrics (e.g., AUC) for each task.
 
@@ -342,6 +342,10 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
 
         y : array-like of shape (n_samples, n_tasks)
             True labels for each task.
+
+        deterministic : bool, default=True
+            If `True`, uses the latent mean (`mu`) for predictions, ensuring deterministic outputs.
+            If `False`, samples from the latent space using the reparameterization trick, introducing stochasticity.
 
         *args : 
             Additional positional arguments for metric computation.
@@ -356,7 +360,7 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
             For example, AUC scores if `roc_auc_score` is used.
         """
         self.eval()
-        probas_per_task = self.predict_proba(X) # expcted on cpu numpy
+        probas_per_task = self.predict_proba(X, deterministic=deterministic) # expcted on cpu numpy
         Y = to_numpy(Y) # ensure cpu numpy array
 
         # Calculate AUC for each task (detach to avoid affecting gradient)
