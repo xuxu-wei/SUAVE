@@ -677,7 +677,7 @@ class SUAVE(nn.Module, ResetMixin):
     compute_loss(x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None, normalize_loss=False)
         Compute the total loss, combining VAE loss (reconstruction + KL divergence) and task-specific loss.
 
-    fit(X, Y, epochs=2000, predictor_fine_tuning=False, early_stopping=True, early_stop_method=None, patience=100, verbose=True, animate_monitor=False, plot_path=None, save_weights_path=None)
+    fit(X, Y, epochs=2000, freeze_vae=False, early_stopping=True, early_stop_method=None, patience=100, verbose=True, animate_monitor=False, plot_path=None, save_weights_path=None)
         Train the model on the input data `X` and labels `Y`.
 
     plot_loss(train_vae_losses, val_vae_losses, train_aucs, val_aucs, train_task_losses, val_task_losses, save_path=None, display_id="loss_plot")
@@ -910,6 +910,7 @@ class SUAVE(nn.Module, ResetMixin):
 
     def fit(self, X, Y, 
             epochs=1000, 
+            freeze_vae = False,
             predictor_fine_tuning = False,
             early_stopping=True, 
             early_stop_method=None,
@@ -932,11 +933,16 @@ class SUAVE(nn.Module, ResetMixin):
         epochs : int, optional, default=1000
             Number of training epochs.
             
-        predictor_fine_tuning : bool, optional, default=False
-            If True, the training will focus on fine-tuning the predictor modules after the VAE
-            has been trained or early-stopped. This is useful if the latent representation is already
-            learned and stable, and you only want to optimize task-specific heads.
+        freeze_vae : bool, optional, default=False
+            - If True, the training will freeze the VAE. This is useful 
+            - if the latent representation is already learned and stable, 
+            and you only want to optimize task-specific heads.
             
+        predictor_fine_tuning : bool, optional, default=False
+            Controls whether the predictor weights are reset during training.
+            - If True, the predictor weights are not reset, allowing for fine-tuning.
+            - If False, the predictor weights are reset to their initial state.
+    
         early_stopping : bool, optional, default=True
             If True, enables early stopping based on validation loss improvements. Early stopping 
             is applied first to the VAE module. Once the VAE stops improving, it is effectively 'frozen'
@@ -980,8 +986,9 @@ class SUAVE(nn.Module, ResetMixin):
           to improve beyond the patience threshold, the VAE's learning rate is set to zero. Subsequently, based on the 
           `early_stop_method`, the predictor heads are monitored either in parallel or sequentially.
           
-        - **Predictor Fine-Tuning**: When `predictor_fine_tuning=True`, after VAE early stopping, only the predictor modules are 
-          trained (with VAE effectively frozen). This is useful when the latent space has already been well-learned.
+        - **Predictor Fine-Tuning**: When `freeze_vae=True`, only the predictor modules are trained. 
+          This is useful when the latent space has already been well-learned. 
+          Additionally, `predictor_fine_tuning=True` ensures predictor weights are not reset.
           
         - **Early Stop Method vs. Task Strategy**: The `early_stop_method` allows independent control over how task-specific 
           predictors are stopped after VAE early stopping. It can be set to `'parallel'` or `'sequential'` regardless of the 
@@ -1000,20 +1007,24 @@ class SUAVE(nn.Module, ResetMixin):
         increase the predictor learning rate and switch to fine-tuning mode:
 
         >>> suave_model.set_params(multitask_lr=1e-2, lr_scheduler_factor=0.1, batch_size=32)
-        >>> suave_model.fit(X, Y, patience=100, predictor_fine_tuning=True, early_stop_method='parallel', animate_monitor=True)
+        >>> suave_model.fit(X, Y, patience=100, freeze_vae=True, predictor_fine_tuning=True)
 
         Here:
-        - `predictor_fine_tuning=True`: Focus on optimizing the predictor modules after the VAE is stable.
+        - `freeze_vae=True`: Focus on optimizing the predictor modules after the VAE is stable.
         - `early_stop_method='parallel'`: Monitor each predictor independently for early stopping.
         - `multitask_lr=1e-2`: Increase the predictor heads' learning rate for quicker adaptation.
         - `batch_size=32`: Potentially improves generalization and stability during fine-tuning.
         - `animate_monitor=True`: Dynamically visualize training progress.
         """
-        if predictor_fine_tuning:
+        if freeze_vae:
             self.vae_lr = 0
-            self.predictor.reset_parameters()
         else:
-            self.reset_parameters()
+            self.vae.reset_parameters()
+            
+        if predictor_fine_tuning:
+            pass
+        else:
+            self.predictor.reset_parameters()
             
         self.early_stop_method = self.task_strategy if early_stop_method is None else early_stop_method
         assert self.early_stop_method in ['parallel', 'sequential'], f"Unrecognized param `early_stop_method`={early_stop_method}. Must be \'parallel\' or \'sequential\'"
@@ -1081,10 +1092,10 @@ class SUAVE(nn.Module, ResetMixin):
         # Initialize best losses and patience counters
         best_vae_loss = float('inf')
         best_per_task_losses = [float('inf')] * len(self.task_classes)
-        self.vae_patience_counter = patience + 1 if predictor_fine_tuning else 0
+        self.vae_patience_counter = patience + 1 if freeze_vae else 0
         self.task_patience_counters = {task_name: 0 for task_name in self.task_names}  # Initialize task-specific patience counters
         self.training_status = {task_name: True for task_name in self.task_names}
-        self.training_status[self._vae_task_name] = 1 - bool(predictor_fine_tuning)
+        self.training_status[self._vae_task_name] = 1 - bool(freeze_vae)
 
         # Training and validation loss storage
         train_vae_losses, train_task_losses, train_aucs = [], [], []
@@ -1221,7 +1232,7 @@ class SUAVE(nn.Module, ResetMixin):
             if early_stopping:
                 if (val_vae_loss < best_vae_loss):
                     best_vae_loss = val_vae_loss
-                    if not predictor_fine_tuning:
+                    if not freeze_vae:
                         self.vae_patience_counter = 0
                 else:
                     self.vae_patience_counter += 1
