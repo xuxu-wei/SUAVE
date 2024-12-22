@@ -15,16 +15,14 @@ from ._base import ResetMixin
 from .utils import *
 
 # TODO 支持回归任务
-
-#? 支持回归/分类混合建模
+# 考虑建立一个新的类，用于回归任务（因为回归损失的尺度与分类损失差异太大 很难管理 一起训练可能效果很差）
+# 考虑如何尽可能复用代码 拓展 compute_loss, eval_loss， plot_loss
 
 # TODO 自定义模型：
 # 引入一个类，使得不同的下游任务predictor模块可以通过parallel的方式连接到latent space上用于预测
 # （但这个模型不支持训练，如需训练应该使用前面的部分训练，完成后再把模型接到这里）
 
-# TODO 增加可视化分析工具
-
-# TODO 调用 score 计算AUC以后 会用一个属性记录最佳阈值，更新predict行为
+# TODO 增加可视化潜空间分析工具
 
 # 2024.12.20 统一度量方法，损失计算使用 sum-reduction,verbose信息显示 mean-reduction 以便不同batch size进行比较
 
@@ -1307,7 +1305,6 @@ class SUAVE(nn.Module, ResetMixin):
         else:
             self.task_patience_counters[self.task_names[task_ix]] += 1
 
-                
     def stop_training_module(self, module, name, verbose, epoch):
         """
         Freeze a module by setting its parameters to not require gradients.
