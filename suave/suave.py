@@ -1008,13 +1008,6 @@ class SUAVE(nn.Module, ResetMixin):
 
         >>> suave_model.set_params(multitask_lr=1e-2, lr_scheduler_factor=0.1, batch_size=32)
         >>> suave_model.fit(X, Y, patience=100, freeze_vae=True, predictor_fine_tuning=True)
-
-        Here:
-        - `freeze_vae=True`: Focus on optimizing the predictor modules after the VAE is stable.
-        - `early_stop_method='parallel'`: Monitor each predictor independently for early stopping.
-        - `multitask_lr=1e-2`: Increase the predictor heads' learning rate for quicker adaptation.
-        - `batch_size=32`: Potentially improves generalization and stability during fine-tuning.
-        - `animate_monitor=True`: Dynamically visualize training progress.
         """
         if freeze_vae:
             self.vae_lr = 0
