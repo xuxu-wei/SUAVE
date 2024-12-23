@@ -166,48 +166,6 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
             self.feature_names_in_ = [f"x{i}" for i in range(X.shape[1])]
 
         return super().fit(X, y, *args, **kwargs)
-    
-    def transform(self, X, return_latent_sample=False):
-        """
-        Transform the input samples into the latent space.
-
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            Input samples to transform.
-
-        return_latent_sample : bool, default=False
-            If `True`, returns a sampled latent representation `z` instead of the mean `mu`.
-            This introduces stochasticity into the transformation.
-
-        Returns
-        -------
-        Z : ndarray of shape (n_samples, latent_dim)
-            Latent space representations.
-            - If `return_latent_sample` is `False`, returns the mean `mu`.
-            - If `True`, returns sampled latent vectors `z`.
-        """
-        # Input validation
-        if not isinstance(X, (torch.Tensor, np.ndarray)):
-            raise ValueError("Input X must be a torch.Tensor or numpy.ndarray.")
-        if X.ndim != 2:
-            raise ValueError(f"Input X must have shape (n_samples, n_features). Got shape {X.shape}.")
-
-        X = self._check_tensor(X).to(DEVICE)
-        self.eval()
-        results = []
-
-        with torch.no_grad():
-            for i in range(0, X.size(0), self.batch_size):
-                X_batch = X[i:i + self.batch_size]
-                mu, logvar = self.vae.encoder(X_batch)
-                if return_latent_sample:
-                    z = self.vae.reparameterize(mu, logvar)
-                    results.append(z.cpu().numpy())
-                else:
-                    results.append(mu.cpu().numpy())
-
-        return np.vstack(results)
 
     def sample_latent(self, X, n_samples=1):
         """
@@ -233,6 +191,48 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
             Z = [self.vae.reparameterize(mu, logvar) for _ in range(n_samples)]
         return torch.stack(Z, dim=1).cpu().numpy()  # Shape: (input_samples, n_samples, latent_dim)
     
+    def transform(self, X, deterministic=True):
+        """
+        Transform the input samples into the latent space.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Input samples to transform.
+
+        deterministic : bool, default=True
+            If `False`, returns a sampled latent representation `z` instead of the mean `mu`.
+            This introduces stochasticity into the transformation.
+
+        Returns
+        -------
+        Z : ndarray of shape (n_samples, latent_dim)
+            Latent space representations.
+            - If `deterministic` is `True`, returns the mean `mu`.
+            - If `deterministic` is `False`, returns sampled latent vectors `z`.
+        """
+        # Input validation
+        if not isinstance(X, (torch.Tensor, np.ndarray)):
+            raise ValueError("Input X must be a torch.Tensor or numpy.ndarray.")
+        if X.ndim != 2:
+            raise ValueError(f"Input X must have shape (n_samples, n_features). Got shape {X.shape}.")
+
+        X = self._check_tensor(X).to(DEVICE)
+        self.eval()
+        results = []
+
+        with torch.no_grad():
+            for i in range(0, X.size(0), self.batch_size):
+                X_batch = X[i:i + self.batch_size]
+                mu, logvar = self.vae.encoder(X_batch)
+                if deterministic:
+                    results.append(mu.cpu().numpy())
+                else:
+                    z = self.vae.reparameterize(mu, logvar)
+                    results.append(z.cpu().numpy())
+                    
+        return np.vstack(results)
+
     def inverse_transform(self, Z):
         """
         Reconstruct samples from the latent space.
