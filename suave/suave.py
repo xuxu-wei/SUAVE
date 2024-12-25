@@ -801,94 +801,87 @@ class SUAVE(nn.Module, ResetMixin):
         task_outputs = self.predictor(z)
         return recon, mu, logvar, z, task_outputs
     
-    def compute_loss(self, x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None):
+    def compute_recon_loss(self, x, recon, mu, logvar):
         """
-        Compute total loss for VAE and multi-task predictor.
+        Compute VAE reconstruction and KL divergence losses.
 
         Parameters
         ----------
         x : torch.Tensor
             Original input tensor, shape (batch_size, input_dim).
-            
+        
         recon : torch.Tensor
             Reconstructed input tensor, shape (batch_size, input_dim).
-            
+        
         mu : torch.Tensor
             Latent mean tensor, shape (batch_size, latent_dim).
-            
+        
         logvar : torch.Tensor
             Latent log variance tensor, shape (batch_size, latent_dim).
-            
-        z : torch.Tensor
-            Latent representation tensor, shape (batch_size, latent_dim).
-            
-        task_outputs : list of torch.Tensor
-            List of task-specific predictions, each shape (batch_size, n_classes).
-            
-        y : torch.Tensor
-            Ground truth target tensor, shape (batch_size, num_tasks).
-            
-        beta : float, optional, default=1.0
-            Weight of the KL divergence term in the VAE loss.
-            
-        gamma_task : float, optional, default=1.0
-            Weight of the task loss term in the total loss.
-            
-        alpha : list or torch.Tensor, optional, default=None
-            Per-task weights, shape (num_tasks,). Default is uniform weights (1 for all tasks).
 
         Returns
         -------
-        total_loss : torch.Tensor
-            Combined loss value.
-            
         recon_loss : torch.Tensor
             Reconstruction loss value.
-            
+        
         kl_loss : torch.Tensor
             KL divergence loss value.
-            
-        task_loss_sum : torch.Tensor
-            Sum of all task-specific losses.
-            
-        per_task_losses : list of torch.Tensor
-            List of task-specific loss values.
-            
-        auc_scores : list of float
-            List of AUC scores for each task.
         """
-        # Reconstruction loss
+        # Reconstruction loss using sum reduction
         reconstruction_loss_fn = nn.MSELoss(reduction='sum')
         recon_loss = reconstruction_loss_fn(recon, x)
 
-        # KL divergence loss: sum over latent dimensions and average over batch
+        # KL divergence loss: sum over latent dimensions
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
-        # Task-specific losses
-        per_task_losses = []
-        task_loss_sum = 0.0
+        return recon_loss, kl_loss
 
+    def compute_pred_loss(self, task_outputs, y, alpha=None):
+        """
+        Compute prediction losses and AUC scores for each task.
+
+        Parameters
+        ----------
+        task_outputs : list of torch.Tensor
+            List of task-specific predictions, each shape (batch_size, n_classes).
+        
+        y : torch.Tensor
+            Ground truth target tensor, shape (batch_size, num_tasks).
+        
+        alpha : list or torch.Tensor, optional
+            Per-task weights, shape (num_tasks,). Default is uniform weights.
+
+        Returns
+        -------
+        task_loss_sum : torch.Tensor
+            Sum of all weighted task-specific losses.
+        
+        per_task_losses : list of torch.Tensor
+            List of task-specific loss values.
+        
+        auc_scores : list of float
+            List of AUC scores for each task.
+        """
+        # Initialize task losses
+        per_task_losses = []
+        
         # Handle alpha for task weighting
         if alpha is None:
-            alpha = torch.ones(len(task_outputs), device=DEVICE)  # Default to uniform weights
+            alpha = torch.ones(len(task_outputs), device=DEVICE)
         else:
             alpha = torch.tensor(alpha, device=DEVICE, dtype=torch.float32)
 
+        # Compute losses and AUCs for each task
+        auc_scores = []
         for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
+            # Compute task loss using sum reduction
             task_loss_fn = nn.CrossEntropyLoss(reduction='sum')
             task_loss = task_loss_fn(task_output, target.long())
             weighted_task_loss = alpha[t] * task_loss
             per_task_losses.append(weighted_task_loss)
 
-        # Sum up weighted task losses
-        task_loss_sum = sum(per_task_losses)
-
-        # Calculate AUC for each task (detach to avoid affecting gradient)
-        auc_scores = []
-        for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
+            # Compute AUC
             num_classes = self.predictor.task_classes[t]
-
-            # Compute probabilities for AUC
             if num_classes > 2:
                 task_output_prob = F.softmax(task_output, dim=1).detach().cpu().numpy()
             else:
@@ -896,14 +889,68 @@ class SUAVE(nn.Module, ResetMixin):
 
             target_cpu = target.detach().cpu().numpy()
             try:
-                auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, multi_class='ovo', average='macro')
+                auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, 
+                                  multi_class='ovo', average='macro')
             except ValueError:
-                auc = 0.5  # Default AUC for invalid cases (e.g., all labels are the same)
-                # raise 
+                auc = 0.5
             auc_scores.append(auc)
 
-        # Use raw losses with predefined weights
+        # Sum up weighted task losses
+        task_loss_sum = sum(per_task_losses)
+
+        return task_loss_sum, per_task_losses, auc_scores
+
+    def compute_loss(self, x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None):
+        """
+        Compute total loss combining VAE and prediction losses.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Original input tensor, shape (batch_size, input_dim).
+        recon : torch.Tensor
+            Reconstructed input tensor, shape (batch_size, input_dim).
+        mu : torch.Tensor
+            Latent mean tensor, shape (batch_size, latent_dim).
+        logvar : torch.Tensor
+            Latent log variance tensor, shape (batch_size, latent_dim).
+        z : torch.Tensor
+            Latent representation tensor, shape (batch_size, latent_dim).
+        task_outputs : list of torch.Tensor
+            List of task-specific predictions.
+        y : torch.Tensor
+            Ground truth target tensor.
+        beta : float, optional, default=1.0
+            Weight of KL divergence loss.
+        gamma_task : float, optional, default=1.0
+            Weight of task loss.
+        alpha : list or torch.Tensor, optional
+            Per-task weights.
+
+        Returns
+        -------
+        total_loss : torch.Tensor
+            Combined loss value.
+        recon_loss : torch.Tensor
+            Reconstruction loss value.
+        kl_loss : torch.Tensor
+            KL divergence loss value.
+        task_loss_sum : torch.Tensor
+            Sum of task losses.
+        per_task_losses : list of torch.Tensor
+            Individual task losses.
+        auc_scores : list of float
+            AUC scores for each task.
+        """
+        # Compute VAE losses
+        recon_loss, kl_loss = self.compute_recon_loss(x, recon, mu, logvar)
+        
+        # Compute prediction losses
+        task_loss_sum, per_task_losses, auc_scores = self.compute_pred_loss(task_outputs, y, alpha)
+
+        # Combine losses with weights
         total_loss = recon_loss + beta * kl_loss + gamma_task * task_loss_sum
+
         return total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores
 
     def fit(self, X, Y, 
@@ -1656,6 +1703,9 @@ class SUAVE(nn.Module, ResetMixin):
 
         task_loss : float
             Task-specific loss averaged over the samples.
+            
+        auc_scores: list of float
+            List of AUC scores for each task.
         """
         X = self._check_tensor(X).to(DEVICE)
         Y = self._check_tensor(Y).to(DEVICE)
@@ -1663,6 +1713,7 @@ class SUAVE(nn.Module, ResetMixin):
         # Forward pass
         with torch.no_grad():
             recon, mu, logvar, z, task_outputs = self(X, deterministic=deterministic)
+
             
             total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores = self.compute_loss(
                 X, recon, mu, logvar, z, task_outputs, Y, 
@@ -1676,3 +1727,41 @@ class SUAVE(nn.Module, ResetMixin):
                 task_loss.item(),
                 auc_scores,
                 )
+    
+    
+    def eval_recon_loss(self, X, recon, mu, logvar):
+        """
+        Evaluates reconstruction loss and KL divergence loss for given data.
+        This method computes the reconstruction loss and KL divergence loss in evaluation mode
+        with gradient computation disabled. The losses are normalized by batch size.
+        Parameters
+        ----------
+        X : torch.Tensor
+            Input data tensor to reconstruct
+            
+        recon : torch.Tensor
+            Reconstructed data tensor
+            
+        mu : torch.Tensor
+            Mean of the latent distribution
+            
+        logvar : torch.Tensor
+            Log variance of the latent distribution
+            
+        Returns
+        -------
+        tuple
+            A tuple containing:
+            - recon_loss (float): Mean reconstruction loss per sample
+            - kl_loss (float): Mean KL divergence loss per sample
+        """
+        X = self._check_tensor(X).to(DEVICE)
+        self.eval()
+        # Forward pass
+        with torch.no_grad():
+            recon_loss, kl_loss = self.compute_recon_loss(X, recon, mu, logvar)
+            recon_loss = recon_loss.detach().item() / len(X)
+            kl_loss = kl_loss.detach().item() / len(X)
+            
+        # Convert losses to NumPy arrays
+        return recon_loss, kl_loss
