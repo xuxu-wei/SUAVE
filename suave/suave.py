@@ -672,7 +672,7 @@ class SUAVE(nn.Module, ResetMixin):
     forward(x, deterministic=False)
         Forward pass through the VAE and Multi-Task Predictor.
 
-    compute_loss(x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None, normalize_loss=False)
+    compute_loss(x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None)
         Compute the total loss, combining VAE loss (reconstruction + KL divergence) and task-specific loss.
 
     fit(X, Y, epochs=2000, freeze_vae=False, early_stopping=True, early_stop_method=None, patience=100, verbose=True, animate_monitor=False, plot_path=None, save_weights_path=None)
@@ -1663,13 +1663,14 @@ class SUAVE(nn.Module, ResetMixin):
         # Forward pass
         with torch.no_grad():
             recon, mu, logvar, z, task_outputs = self(X, deterministic=deterministic)
+            
             total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores = self.compute_loss(
                 X, recon, mu, logvar, z, task_outputs, Y, 
                 beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
             )
 
         # Convert losses to NumPy arrays
-        return (total_loss.item() / len(X), 
+        return (total_loss.item() / len(X),
                 recon_loss.item() / len(X),
                 kl_loss.item() / len(X),
                 task_loss.item(),
