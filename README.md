@@ -2,7 +2,10 @@
 
 # SUAVE: Supervised and Unified Analysis of Variational Embeddings
 
-**SUAVE** is a Python package built upon a **Hybrid Variational Autoencoder (VAE)** . It unifies unsupervised latent representation learning with supervised prediction tasks. By guiding the latent space with label information, SUAVE not only achieves dimensionality reduction but also yields discriminative and interpretable embeddings that directly benefit downstream classification or regression tasks. SUAVE integrates multi-task learning, enabling the incorporation of information from various downstream prediction tasks into the latent space learning process by adjusting task weights.
+**SUAVE** is a Python package built upon a  **Hybrid Variational Autoencoder (VAE)** . It unifies unsupervised latent representation learning with supervised prediction tasks:
+
+* **Supervised Learning** : Utilizes VAE to map high-dimensional input features to a low-dimensional, independent latent space. This approach not only retains feature interpretability but also effectively addresses multicollinearity issues, enhancing the model's robustness and generalization capabilities when handling highly correlated features.
+* **Representation Learning** : Guides the latent space with label information, enabling dimensionality reduction and producing discriminative and interpretable embeddings beneficial for downstream classification or regression tasks. Additionally, SUAVE integrates multi-task learning, allowing the incorporation of information from various downstream prediction tasks into the latent space learning process by adjusting task weights.
 
 ---
 
@@ -97,29 +100,28 @@ X_reconstructed = pd.DataFrame(reconstructed, index=X_test.index, columns=X_test
 
 ### 1. Supervised & Unsupervised Fusion
 
-- **Unsupervised (VAE)**: Learns a latent space representation by reconstructing input features and regularizing the latent variables using a Kullback-Leibler (KL) divergence term.
-- **Supervised (MTL)**: Incorporates label information to shape the latent space, ensuring that the learned features are informative for one or multiple prediction tasks.
+* **Unsupervised (VAE)** : Learns a latent space representation by reconstructing input features and regularizing the latent variables using a Kullback-Leibler (KL) divergence term.
+* **Supervised (MTL)** : Incorporates label information to shape the latent space, ensuring that the learned features are informative for one or multiple prediction tasks.
 
 ### 2. Multi-Task Learning Integration
 
-- **Shared Representations**: A single latent space underpins multiple related classification (or other) tasks, leveraging common data structure for efficient, joint learning.
-- **Task-Specific Heads**: Independent prediction heads are built atop the shared latent space. This encourages knowledge transfer among tasks and can improve predictive performance on each one.
+* **Shared Representations** : A single latent space underpins multiple related classification (or other) tasks, leveraging common data structures for efficient, joint learning.
+* **Task-Specific Heads** : Independent prediction heads are built atop the shared latent space. This encourages knowledge transfer among tasks and can improve predictive performance on each one.
+* **Representation Learning to Mitigate Multicollinearity** : By mapping high-dimensional input features to a low-dimensional latent space, SUAVE effectively reduces linear correlations between features, alleviating multicollinearity issues.
 
 ### 3. Flexible and Customizable Architecture
 
-- **Configurable Networks**: Easily adjust encoder and decoder depths, widths, and layer scaling strategies (e.g., constant, linear, geometric).
-- **Regularization Built-In**: Batch normalization and dropout help stabilize training and mitigate overfitting.
+* **Configurable Networks** : Easily adjust encoder and decoder depths, widths, and layer scaling strategies (e.g., constant, linear, geometric).
+* **Regularization Built-In** : Batch normalization and dropout help stabilize training and mitigate overfitting.
 
 ### 4. Scikit-Learn Compatibility
 
-- **Seamless Integration**: The `SuaveSklearn` class is compatible with scikit-learn’s pipeline and model selection APIs. Perform hyperparameter tuning with `GridSearchCV` and integrate SUAVE models into complex ML workflows with minimal friction.
+* **Seamless Integration** : The `SuaveClassifier` class is compatible with scikit-learn’s pipeline and model selection APIs. Perform hyperparameter tuning with `GridSearchCV` and integrate SUAVE models into complex ML workflows with minimal friction.
 
 ### 5. Comprehensive Training Utilities
 
-- **Joint Objective Optimization**: Simultaneously optimizes the VAE reconstruction/KL losses and supervised cross-entropy losses.
-- **Early Stopping & LR Scheduling**: Monitors validation metrics for early stopping and dynamically adjusts learning rates to ensure stable convergence.
-
----
+* **Joint Objective Optimization** : Simultaneously optimizes the VAE reconstruction/KL losses and supervised cross-entropy losses.
+* **Early Stopping & LR Scheduling** : Monitors validation metrics for early stopping and dynamically adjusts learning rates to ensure stable convergence.
 
 ## Example Use Cases
 
