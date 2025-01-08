@@ -1152,7 +1152,7 @@ class SUAVE(nn.Module, ResetMixin):
             train_vae_loss = 0.0
             train_task_loss_sum = 0.0
             train_per_task_losses = np.zeros(len(self.task_classes)) # 每个 task 的 loss 
-            train_auc_scores = np.zeros(len(self.task_classes))
+            train_auc_scores_tasks = []
             train_batch_count = 0
             for i in range(0, len(X_train), self.batch_size):
                 X_batch = X_train[i:i + self.batch_size]
@@ -1192,27 +1192,27 @@ class SUAVE(nn.Module, ResetMixin):
                     task_optimizer.step()
 
                 # Accumulate losses
-                train_vae_loss += (recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size # record batch normalized loss after backward pass
-                train_task_loss_sum += task_loss_sum.item()  / self.batch_size
-                train_per_task_losses += np.array([loss.cpu().detach().numpy()  / self.batch_size for loss in per_task_losses])
-                train_auc_scores += np.array(auc_scores)
+                train_vae_loss += ((recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size) # record batch normalized loss after backward pass
+                train_task_loss_sum += (task_loss_sum.item() / self.batch_size)
+                train_per_task_losses += np.array([(loss.cpu().detach().numpy() / self.batch_size) for loss in per_task_losses])
+                train_auc_scores_tasks.append(np.array(auc_scores))
                 train_batch_count += 1
 
             # Normalize training losses by the number of batches
-            train_vae_loss /= len(X_train)
-            train_task_loss_sum /= len(X_train)
-            train_auc_scores /= train_batch_count
+            train_vae_loss /= train_batch_count
+            train_task_loss_sum /= train_batch_count
+            train_auc_scores_tasks= np.mean(np.stack(train_auc_scores_tasks), axis=0)
             
             train_vae_losses.append(train_vae_loss)
             train_task_losses.append(train_task_loss_sum)
-            train_aucs.append(train_auc_scores)
+            train_aucs.append(train_auc_scores_tasks)
 
             # Validation phase
             self.eval()
             val_vae_loss = 0.0
             val_task_loss_sum = 0.0 # 总 task loss
             val_per_task_losses = np.zeros(len(self.task_classes)) # 每个 task 的 loss 
-            val_auc_scores = np.zeros(len(self.task_classes))
+            val_auc_scores_tasks = []
             val_batch_count = 0
             with torch.no_grad():
                 for i in range(0, len(X_val), self.batch_size):
@@ -1232,10 +1232,10 @@ class SUAVE(nn.Module, ResetMixin):
                     )
 
                     # Accumulate losses
-                    val_vae_loss += (recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size
-                    val_task_loss_sum += task_loss_sum.item()  / self.batch_size
-                    val_per_task_losses += np.array([loss.cpu().detach().numpy()  / self.batch_size for loss in per_task_losses])
-                    val_auc_scores += np.array(auc_scores)
+                    val_vae_loss += ((recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size)
+                    val_task_loss_sum += (task_loss_sum.item() / self.batch_size)
+                    val_per_task_losses += np.array([(loss.cpu().detach().numpy() / self.batch_size) for loss in per_task_losses])
+                    val_auc_scores_tasks.append(np.array(auc_scores))
                     val_batch_count += 1
 
             if self.use_lr_scheduler:
@@ -1245,20 +1245,20 @@ class SUAVE(nn.Module, ResetMixin):
                 for (task_name, task_scheduler), task_loss in zip(multitask_scheduler_dict.items(), val_per_task_losses):
                     if self.training_status[task_name]:
                         task_scheduler.step(task_loss)
-
-            # Normalize validation losses by the number of batches
-            val_vae_loss /= len(X_val)
-            val_task_loss_sum /= len(X_val)
-            val_auc_scores /= val_batch_count
+                    
+            # Normalize Validation losses by the number of batches
+            val_vae_loss /= val_batch_count
+            val_task_loss_sum /= val_batch_count
+            val_auc_scores_tasks = np.mean(np.stack(val_auc_scores_tasks), axis=0)
             
             val_vae_losses.append(val_vae_loss)
             val_task_losses.append(val_task_loss_sum)
-            val_aucs.append(val_auc_scores)
+            val_aucs.append(val_auc_scores_tasks)
 
             # Update progress bar
             if verbose:
-                train_auc_formated = [round(auc, 3) for auc in train_auc_scores]
-                val_auc_formated = [round(auc, 3) for auc in val_auc_scores]
+                train_auc_formated = [round(auc, 3) for auc in train_auc_scores_tasks]
+                val_auc_formated = [round(auc, 3) for auc in val_auc_scores_tasks]
                 iterator.set_postfix({
                     "VAE(t)": f"{train_vae_loss:.3f}", # train total VAE loss, normalized by batch size
                     "VAE(v)": f"{val_vae_loss:.3f}", # validation total VAE loss, normalized by batch size
