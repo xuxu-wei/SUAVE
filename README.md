@@ -54,7 +54,7 @@ model.fit(X_train, Y_train, epochs=1000, animate_monitor=True, verbose=1)
 ![png](readme_files/readme_3_0.png)
 
 ```
-Training:  70%|███████   | 704/1000 [06:00<02:31,  1.95epoch/s, VAE(t)=6.104, VAE(v)=5.546, AUC(t)=[0.98, 0.961, 0.983], AUC(v)=[0.83, 0.797, 0.922]]  
+Training:  70%|███████   | 704/1000 [06:26<02:42,  1.82epoch/s, VAE(t)=189.910, VAE(v)=166.365, AUC(t)=[0.98, 0.961, 0.983], AUC(v)=[0.83, 0.797, 0.922]]  
 Epoch 705: Task task_3 early stopping triggered.
 Early stopping triggered due to no improvement in both VAE and task losses.
 ```

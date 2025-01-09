@@ -1451,9 +1451,9 @@ class SUAVE(nn.Module, ResetMixin):
         ax.plot(train_vae_losses, label='Train VAE Loss', linestyle='-')
         ax.plot(val_vae_losses, label='Val VAE Loss', linestyle='-')
         ax.set_xlabel('Epochs')
-        ax.set_ylabel('Reconstruction + KL')
+        ax.set_ylabel(r'Reconstruction + $\beta$KL')
         ax.legend()
-        ax.set_title(f'VAE Loss (Reconstruction + KL) {stop_flag}')
+        ax.set_title(fr'VAE Loss (Reconstruction + $\beta$KL) {stop_flag}')
         ax.grid()
 
         # Task-specific AUC Plots
@@ -1728,8 +1728,7 @@ class SUAVE(nn.Module, ResetMixin):
                 auc_scores,
                 )
     
-    
-    def eval_recon_loss(self, X, recon, mu, logvar):
+    def eval_recon_loss_with_pred(self, X, recon, mu, logvar):
         """
         Evaluates reconstruction loss and KL divergence loss for given data.
         This method computes the reconstruction loss and KL divergence loss in evaluation mode
@@ -1759,9 +1758,38 @@ class SUAVE(nn.Module, ResetMixin):
         self.eval()
         # Forward pass
         with torch.no_grad():
+            
             recon_loss, kl_loss = self.compute_recon_loss(X, recon, mu, logvar)
             recon_loss = recon_loss.detach().item() / len(X)
             kl_loss = kl_loss.detach().item() / len(X)
             
         # Convert losses to NumPy arrays
+        return recon_loss, kl_loss
+    
+    def eval_recon_loss(self, X):
+        """
+        Evaluates reconstruction loss and KL divergence loss for given data.
+        This method computes the reconstruction loss and KL divergence loss in evaluation mode
+        with gradient computation disabled. The losses are normalized by batch size.
+        Parameters
+        ----------
+        X : torch.Tensor
+            Input data tensor to reconstruct
+
+        Returns
+        -------
+        tuple
+            A tuple containing:
+            - recon_loss (float): Mean reconstruction loss per sample
+            - kl_loss (float): Mean KL divergence loss per sample
+        """
+        X = self._check_tensor(X).to(DEVICE)
+        self.eval()
+        
+        with torch.no_grad():
+            recon, mu, logvar, z = self.vae(X) # Forward pass
+            recon_loss, kl_loss = self.compute_recon_loss(X, recon, mu, logvar)
+            recon_loss = recon_loss.detach().item() / len(X)
+            kl_loss = kl_loss.detach().item() / len(X)
+            
         return recon_loss, kl_loss
