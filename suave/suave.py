@@ -24,8 +24,6 @@ from .utils import *
 
 # TODO 增加可视化潜空间分析工具
 
-# 2024.12.20 统一度量方法，损失计算使用 sum-reduction,verbose信息显示 mean-reduction 以便不同batch size进行比较
-
 class Encoder(nn.Module, ResetMixin):
     """
     Encoder network for Variational Autoencoder (VAE).
