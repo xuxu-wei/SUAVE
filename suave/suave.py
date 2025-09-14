@@ -1166,6 +1166,7 @@ class SUAVE(nn.Module, ResetMixin):
         
         # Training loop with tqdm
         iterator = range(epochs)
+        plot_interval = max(1, int(self.fit_epochs * 0.01))
         if verbose:  # 控制进度条显示
             if animate_monitor:
                 iterator = tqdm(iterator, desc="Training", unit="epoch")
@@ -1335,7 +1336,7 @@ class SUAVE(nn.Module, ResetMixin):
                 break
 
             # Save loss plot every 5% epochs
-            if ((epoch + 1) % int((self.fit_epochs * 0.01)) == 0) and ((is_interactive_environment() and animate_monitor) or plot_path):
+            if ((epoch + 1) % plot_interval == 0) and ((is_interactive_environment() and animate_monitor) or plot_path):
                 loss_plot_path = None
                 if plot_path:
                     loss_plot_path = os.path.join(plot_path, f"loss_epoch.jpg")
