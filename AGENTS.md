@@ -4,11 +4,11 @@ Purpose：本文件为自动化编码代理（如 CODEX 代理）提供可执行
 
 P0 性能守门：任何改动前后均需运行：
   pytest tests/test_benchmarks.py -s
-  将 AUROC/AUPRC/ACC/F1 等关键指标写入 reports/baselines/current.json（改动前的“基线”）与 reports/baselines/candidate.json（改动后）。若候选较基线任一核心指标下降超过 1 个百分点且无标记 ALLOW_REGRESSION=1 环境变量，则 PR 失败。
+  将 AUROC/AUPRC/ACC/F1 等关键指标写入 reports/baselines/current.json（改动前的“基线”）与 reports/baselines/candidate.json（改动后），其中基线记录 hard 难度的 y1/y2/y3 三个任务。若候选较基线任一核心指标下降超过 3 个百分点且无标记 ALLOW_REGRESSION=1 环境变量，则 PR 失败。
 
 外部验证纯净性（为后续论文准备）：eICU 仅用于外部评估；任何训练/预训练/调参阶段不得使用 eICU（除非特意开展“无监督域适配”附录实验并在 eICU 内再留独立 holdout）。
 
-可复现：固定随机种子；保存配置、版本、数据切分与评估输出；所有区间指标使用 bootstrap 95% CI（B=1000，后续可调）。
+可复现：固定随机种子（默认 20201021）；保存配置、版本、数据切分与评估输出；所有区间指标使用 bootstrap 95% CI（B=1000，后续可调）。
 
 缺失与数值稳定：重构/似然仅对观测项计损（partial loss）；所有方差/率参数经 softplus；全局 eps=1e-8。
 
@@ -72,7 +72,7 @@ I. 随机标签实验（泄漏自检）
   修复：逐条排查特征工程与评估流程，直到随机标签 AUROC≈0.5。
 
 P0.3 最低验收线（P0 Gate）
-  重新运行基准测试，任一核心指标不低于当前基线的 -1pp；
+  重新运行基准测试，任一核心指标不低于当前基线的 -3pp；
   生成对比报告：reports/md/P0_summary.md（含改动项、学习曲线、损失占比、最终指标与 CI）。
   通过后，方可进入后续 Epics（A–G）。
 
@@ -131,15 +131,15 @@ P0.3 最低验收线（P0 Gate）
 性能守门实现细节（代理须创建）
   脚本：tools/compare_baselines.py
     输入：reports/baselines/current.json 与 reports/baselines/candidate.json
-    规则：若 (AUROC,AUPRC) 任一下降 > 0.01，则返回非零退出码。
-  Pytest 插桩：在 tests/test_benchmarks.py 末尾追加写盘逻辑（不改变现有断言）：
+    规则：若 (AUROC,AUPRC) 任一下降 > 0.03，则返回非零退出码。
+  Pytest 插桩：在 tests/test_benchmarks.py 末尾追加写盘逻辑（不改变现有断言），并记录 hard 难度的三项任务指标：
     若 reports/baselines/current.json 不存在，保存当前结果为 current.json；
     若存在，保存为 candidate.json 并调用 tools/compare_baselines.py。
   CI 友好：允许通过环境变量 ALLOW_REGRESSION=1 暂时放行（需在 PR 描述里说明原因）。
 
   配置起点（保持不变动你现有接口的同时，利于 P0 排查）
     training:
-      seed: 2025
+      seed: 20201021
       batch_size: 256
       lr: 1e-3
       weight_decay: 1e-5

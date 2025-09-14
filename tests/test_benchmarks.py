@@ -11,13 +11,25 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    accuracy_score,
+    f1_score,
+)
+
+import json
+from pathlib import Path
 
 from suave.sklearn import SuaveClassifier
 import optuna
+import torch
 
 # Suppress Optuna's output to keep benchmark tables clean
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+torch.manual_seed(20201021)
+np.random.seed(20201021)
 
 try:
     from autogluon.tabular import TabularPredictor
@@ -25,7 +37,7 @@ try:
 except Exception:  # pragma: no cover
     HAS_AG = False
 
-rng = np.random.default_rng(0)
+rng = np.random.default_rng(20201021)
 
 
 def _insert_missing(X, mcar=0.0, mnar_indices=None, y=None):
@@ -113,16 +125,17 @@ def generate_hard():
 
 def _model_factory(name):
     if name == "Linear":
-        clf = LogisticRegression(max_iter=1000)
+        clf = LogisticRegression(max_iter=1000, random_state=20201021)
     elif name == "SVM":
-        clf = SVC(kernel="rbf", max_iter=200)
+        clf = SVC(kernel="rbf", max_iter=200, random_state=20201021)
     elif name == "KNN":
         clf = KNeighborsClassifier()
     elif name == "RandomForest":
-        clf = RandomForestClassifier(n_estimators=100)
+        clf = RandomForestClassifier(n_estimators=100, random_state=20201021)
     else:
         raise ValueError(name)
-    return Pipeline([("imputer", SimpleImputer()), ("scaler", StandardScaler(with_mean=False) if name in ["SVM", "KNN", "Linear"] else "passthrough"), ("clf", clf)])
+    scaler = StandardScaler() if name in ["SVM", "KNN"] else "passthrough"
+    return Pipeline([("imputer", SimpleImputer()), ("scaler", scaler), ("clf", clf)])
 
 
 def benchmark_models(X_train, X_test, y_train, y_test, task_classes):
@@ -171,7 +184,7 @@ def optimize_suave_params(X_train, y_train, task_classes):
     # Use a subset of data for tuning while keeping enough samples for reliability
     max_samples = min(len(X_train), 500)
     X_sub, y_sub = X_train[:max_samples], y_train[:max_samples]
-    X_tr, X_val, y_tr, y_val = train_test_split(X_sub, y_sub, test_size=0.2, random_state=0)
+    X_tr, X_val, y_tr, y_val = train_test_split(X_sub, y_sub, test_size=0.2, random_state=20201021)
 
     def objective(trial):
         params = {
@@ -187,7 +200,7 @@ def optimize_suave_params(X_train, y_train, task_classes):
         auc = np.mean(model.score(X_val, y_val))
         return float(auc)
 
-    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=0))
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=20201021))
     study.optimize(objective, n_trials=10, show_progress_bar=False)
     return study.best_params
 
@@ -210,28 +223,66 @@ def run_task(generator, name):
     model = SuaveClassifier(input_dim=Xtr.shape[1], task_classes=task_classes, **best_params)
     model.fit(Xtr, y_train, epochs=150, patience=10, verbose=False)
     suave_auc = model.score(Xte, y_test)
+    probas = model.predict_proba(Xte)
+    preds = model.predict(Xte)
+    metrics = []
+    for t, num_classes in enumerate(task_classes):
+        y_true = y_test[:, t]
+        proba = probas[t]
+        pred = preds[t]
+        if num_classes > 2:
+            aupr = average_precision_score(y_true, proba, average="macro")
+            acc = accuracy_score(y_true, pred)
+            f1 = f1_score(y_true, pred, average="macro")
+        else:
+            aupr = average_precision_score(y_true, proba[:, 1])
+            acc = accuracy_score(y_true, pred)
+            f1 = f1_score(y_true, pred)
+        metrics.append(
+            {
+                "auroc": float(suave_auc[t]),
+                "auprc": float(aupr),
+                "acc": float(acc),
+                "f1": float(f1),
+            }
+        )
     _, recon_loss, _, _, _ = model.eval_loss(Xte, y_test)
     for t, auc in enumerate(suave_auc, start=1):
         bench = pd.concat(
             [bench, pd.DataFrame({"model": ["SUAVE"], "task": [f"y{t}"], "auc": [auc]})],
             ignore_index=True,
         )
-    return bench, recon_loss
+    return bench, recon_loss, metrics, int(rs)
 
 
 def test_benchmarks():
     tasks = [(generate_simple, "simple"), (generate_medium, "medium"), (generate_hard, "hard")]
     recon_rows = []
     tables = []
+    seeds = {}
+    hard_task_metrics = {}
     for gen, name in tasks:
-        res_df, recon = run_task(gen, name)
+        res_df, recon, metrics, seed = run_task(gen, name)
         table = res_df.pivot(index="model", columns="task", values="auc")
         tables.append((name, table))
         recon_rows.append({"dataset": name, "recon": recon})
+        if name == "hard":
+            hard_task_metrics = {f"y{i+1}": m for i, m in enumerate(metrics)}
+        seeds[name] = seed
 
     for name, table in tables:
         print(f"\nBenchmark AUCs ({name}):\n", table.to_markdown())
 
     recon_df = pd.DataFrame(recon_rows)
     print("\nSUAVE Reconstruction Loss:\n", recon_df.to_markdown(index=False))
+
+    base_dir = Path("reports/baselines")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"hard": hard_task_metrics, "seeds": seeds}
+    cand_path = base_dir / "candidate.json"
+    with cand_path.open("w") as f:
+        json.dump(payload, f, indent=2)
+    curr_path = base_dir / "current.json"
+    if not curr_path.exists():
+        curr_path.write_text(cand_path.read_text())
 
