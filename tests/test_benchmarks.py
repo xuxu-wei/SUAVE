@@ -125,9 +125,10 @@ def benchmark_models(X_train, X_test, y_train, y_test, task_classes):
     model_names = ["Linear", "SVM", "KNN", "RandomForest"]
     if HAS_AG:
         model_names.append("AutoGluon")
-    results = {m: [] for m in model_names}
-    for t, n_class in enumerate(task_classes):
+    rows = []
+    for t, _ in enumerate(task_classes):
         ytr, yte = y_train[:, t], y_test[:, t]
+        task_label = f"y{t+1}"
         for m in model_names:
             if m == "AutoGluon":
                 train_df = pd.DataFrame(X_train)
@@ -147,7 +148,7 @@ def benchmark_models(X_train, X_test, y_train, y_test, task_classes):
                 else:
                     scores = model.decision_function(X_test)
                     if scores.ndim == 1:
-                        proba = 1/ (1 + np.exp(-scores))
+                        proba = 1 / (1 + np.exp(-scores))
                     else:
                         exp_s = np.exp(scores)
                         proba = exp_s / exp_s.sum(axis=1, keepdims=True)
@@ -157,8 +158,8 @@ def benchmark_models(X_train, X_test, y_train, y_test, task_classes):
                 auc = roc_auc_score(yte, proba[:, 1])
             else:
                 auc = roc_auc_score(yte, proba, multi_class="ovr", average="macro")
-            results[m].append(auc)
-    return {m: float(np.mean(v)) for m, v in results.items() if v}
+            rows.append({"model": m, "task": task_label, "auc": auc})
+    return pd.DataFrame(rows)
 
 
 def run_task(generator, name):
@@ -177,24 +178,24 @@ def run_task(generator, name):
     Xte = scaler.transform(imputer.transform(X_test))
     model = SuaveClassifier(input_dim=Xtr.shape[1], task_classes=task_classes, latent_dim=16, vae_depth=2, predictor_depth=2, batch_size=256, gamma_task=1.0)
     model.fit(Xtr, y_train, epochs=100, patience=5, verbose=False)
-    suave_auc = model.score(Xte, y_test).mean()
+    suave_auc = model.score(Xte, y_test)
     _, recon_loss, _, _, _ = model.eval_loss(Xte, y_test)
-    bench["SUAVE"] = suave_auc
+    for t, auc in enumerate(suave_auc, start=1):
+        bench = pd.concat(
+            [bench, pd.DataFrame({"model": ["SUAVE"], "task": [f"y{t}"], "auc": [auc]})],
+            ignore_index=True,
+        )
     return bench, recon_loss
 
 
 def test_benchmarks():
     tasks = [(generate_simple, "simple"), (generate_medium, "medium"), (generate_hard, "hard")]
-    rows = []
     recon_rows = []
     for gen, name in tasks:
-        res, recon = run_task(gen, name)
-        for model, auc in res.items():
-            rows.append({"dataset": name, "model": model, "auc": auc})
+        res_df, recon = run_task(gen, name)
+        table = res_df.pivot(index="model", columns="task", values="auc")
+        print(f"\nBenchmark AUCs ({name}):\n", table.to_markdown())
         recon_rows.append({"dataset": name, "recon": recon})
-    df = pd.DataFrame(rows)
-    table = df.pivot(index="model", columns="dataset", values="auc")
-    print("\nBenchmark AUCs:\n", table.to_markdown())
     recon_df = pd.DataFrame(recon_rows)
     print("\nSUAVE Reconstruction Loss:\n", recon_df.to_markdown(index=False))
 
