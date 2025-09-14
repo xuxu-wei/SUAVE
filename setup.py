@@ -4,9 +4,22 @@ from setuptools.command.install import install
 import os
 import sys
 import platform
-import suave 
+import re
+from pathlib import Path
 
-print(f"curent SUAVE version: {suave.__version__}")
+
+def read_version():
+    """Extract package version without importing the package."""
+    init_path = Path(__file__).resolve().parent / "suave" / "__init__.py"
+    with init_path.open(encoding="utf-8") as f:
+        match = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", f.read())
+    if match:
+        return match.group(1)
+    raise RuntimeError("Unable to find version string.")
+
+
+VERSION = read_version()
+print(f"curent SUAVE version: {VERSION}")
 
 class InstallWithPytorch(install):
     def run(self):
@@ -74,7 +87,7 @@ def read_long_description():
 #%%
 setup(
     name="suave-ml",
-    version=suave.__version__,
+    version=VERSION,
 
     long_description=read_long_description(),
     long_description_content_type='text/markdown',
