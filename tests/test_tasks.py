@@ -3,6 +3,8 @@ import os
 import sys
 import pandas as pd
 import pytest
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -129,6 +131,43 @@ def generate_dataset(difficulty):
     return X, Y, task_classes
 
 
+def evaluate_linear(X_train, Y_train, X_test, Y_test, task_classes):
+    aucs = []
+    for k, classes in enumerate(task_classes):
+        clf = LogisticRegression(max_iter=200)
+        clf.fit(X_train, Y_train[:, k])
+        proba = clf.predict_proba(X_test)
+        if classes == 2:
+            auc = roc_auc_score(Y_test[:, k], proba[:, 1])
+        else:
+            auc = roc_auc_score(Y_test[:, k], proba, multi_class="ovr")
+        aucs.append(auc)
+    return aucs
+
+
+def evaluate_autogluon(X_train, Y_train, X_test, Y_test, task_classes):
+    from autogluon.tabular import TabularPredictor
+
+    columns = [f"f{i}" for i in range(X_train.shape[1])]
+    aucs = []
+    for k, classes in enumerate(task_classes):
+        train_df = pd.DataFrame(X_train, columns=columns)
+        train_df["label"] = Y_train[:, k]
+        test_df = pd.DataFrame(X_test, columns=columns)
+        test_df["label"] = Y_test[:, k]
+        problem = "binary" if classes == 2 else "multiclass"
+        predictor = TabularPredictor(
+            label="label", problem_type=problem, eval_metric="roc_auc" if classes == 2 else "roc_auc_ovr"
+        ).fit(train_df, time_limit=10, presets="medium_quality_faster_train", verbosity=0)
+        proba = predictor.predict_proba(test_df)
+        if classes == 2:
+            auc = roc_auc_score(test_df["label"], proba[1])
+        else:
+            auc = roc_auc_score(test_df["label"], proba, multi_class="ovr")
+        aucs.append(auc)
+    return aucs
+
+
 @pytest.mark.parametrize("difficulty", ["simple", "medium", "hard"])
 def test_suave_on_synthetic_tasks(difficulty):
     set_random_seed(0)
@@ -155,4 +194,14 @@ def test_suave_on_synthetic_tasks(difficulty):
     model.fit(X_train, Y_train, epochs=epochs, patience=5, verbose=False, early_stopping=False)
     total_loss, recon_loss, kl_loss, task_loss, aucs = model.eval_loss(X_test, Y_test)
     print(f"{difficulty} task test AUCs={aucs} recon={recon_loss:.4f}")
+    lin_aucs = evaluate_linear(X_train, Y_train, X_test, Y_test, task_classes)
+    try:
+        auto_aucs = evaluate_autogluon(X_train, Y_train, X_test, Y_test, task_classes)
+    except Exception as err:
+        print(f"AutoGluon failed: {err}")
+        auto_aucs = [np.nan] * len(task_classes)
+    table = pd.DataFrame({"Model": ["SUAVE", "Linear", "AutoGluon"]})
+    for i in range(len(task_classes)):
+        table[f"task{i+1}_AUC"] = [aucs[i], lin_aucs[i], auto_aucs[i]]
+    print(table.to_string(index=False))
     assert np.isfinite(recon_loss)
