@@ -620,7 +620,7 @@ class SUAVE(nn.Module, ResetMixin):
     beta : float, optional, default=1.0
         Weight of the KL divergence term in the VAE loss.
         
-    gamma_task : float, optional, default=100.0
+    gamma_task : float, optional, default=1.0
         Weight of the task loss term in the total loss.
         
     batch_size : int, optional, default=32
@@ -719,7 +719,7 @@ class SUAVE(nn.Module, ResetMixin):
                  multitask_weight_decay=1e-3,
                  alphas=None,
                  beta=1.0, 
-                 gamma_task=100,
+                 gamma_task=1,
                  batch_size=32, 
                  validation_split=0.3, 
                  use_lr_scheduler=True,
@@ -825,12 +825,13 @@ class SUAVE(nn.Module, ResetMixin):
         kl_loss : torch.Tensor
             KL divergence loss value.
         """
-        # Reconstruction loss using sum reduction
-        reconstruction_loss_fn = nn.MSELoss(reduction='sum')
-        recon_loss = reconstruction_loss_fn(recon, x)
+        # Compute reconstruction loss: sum over features then mean over batch
+        recon_elementwise = F.mse_loss(recon, x, reduction='none')
+        recon_loss = recon_elementwise.sum(dim=1).mean()
 
-        # KL divergence loss: sum over latent dimensions
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        # KL divergence loss summed over latent dims then averaged over batch
+        kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+        kl_loss = kl_per_sample.mean()
 
         return recon_loss, kl_loss
 
@@ -873,8 +874,9 @@ class SUAVE(nn.Module, ResetMixin):
         # Compute losses and AUCs for each task
         auc_scores = []
         for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
-            # Compute task loss using sum reduction
-            task_loss_fn = nn.CrossEntropyLoss(reduction='sum')
+            # Compute mean task loss so that each task contributes on a similar
+            # scale regardless of batch size
+            task_loss_fn = nn.CrossEntropyLoss(reduction='mean')
             task_loss = task_loss_fn(task_output, target.long())
             weighted_task_loss = alpha[t] * task_loss
             per_task_losses.append(weighted_task_loss)

@@ -184,9 +184,10 @@ def test_suave_on_synthetic_tasks(difficulty):
         task_classes=task_classes,
         validation_split=0.1,
         use_lr_scheduler=False,
+        gamma_task=X_train.shape[1],
         **params,
     )
-    epochs = {"simple": 5, "medium": 10, "hard": 15}[difficulty]
+    epochs = {"simple": 20, "medium": 40, "hard": 60}[difficulty]
     model.fit(X_train, Y_train, epochs=epochs, patience=5, verbose=False, early_stopping=False)
     total_loss, recon_loss, kl_loss, task_loss, aucs = model.eval_loss(X_test, Y_test)
     print(f"{difficulty} task test AUCs={aucs} recon={recon_loss:.4f}")
