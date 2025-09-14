@@ -5,6 +5,8 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -168,6 +170,27 @@ def evaluate_autogluon(X_train, Y_train, X_test, Y_test, task_classes):
     return aucs
 
 
+def evaluate_sklearn_baselines(X_train, Y_train, X_test, Y_test, task_classes):
+    models = {
+        "RandomForest": lambda: RandomForestClassifier(n_estimators=200, n_jobs=-1),
+        "SVM": lambda: SVC(probability=True, gamma="scale"),
+    }
+    results = {}
+    for name, ctor in models.items():
+        aucs = []
+        for k, classes in enumerate(task_classes):
+            clf = ctor()
+            clf.fit(X_train, Y_train[:, k])
+            proba = clf.predict_proba(X_test)
+            if classes == 2:
+                auc = roc_auc_score(Y_test[:, k], proba[:, 1])
+            else:
+                auc = roc_auc_score(Y_test[:, k], proba, multi_class="ovr")
+            aucs.append(auc)
+        results[name] = aucs
+    return results
+
+
 @pytest.mark.parametrize("difficulty", ["simple", "medium", "hard"])
 def test_suave_on_synthetic_tasks(difficulty):
     set_random_seed(0)
@@ -197,11 +220,17 @@ def test_suave_on_synthetic_tasks(difficulty):
     lin_aucs = evaluate_linear(X_train, Y_train, X_test, Y_test, task_classes)
     try:
         auto_aucs = evaluate_autogluon(X_train, Y_train, X_test, Y_test, task_classes)
+        baseline_names = ["AutoGluon"]
+        baseline_aucs = [auto_aucs]
     except Exception as err:
-        print(f"AutoGluon failed: {err}")
-        auto_aucs = [np.nan] * len(task_classes)
-    table = pd.DataFrame({"Model": ["SUAVE", "Linear", "AutoGluon"]})
-    for i in range(len(task_classes)):
-        table[f"task{i+1}_AUC"] = [aucs[i], lin_aucs[i], auto_aucs[i]]
+        print(f"AutoGluon unavailable: {err}. Using sklearn baselines instead.")
+        baseline_dict = evaluate_sklearn_baselines(X_train, Y_train, X_test, Y_test, task_classes)
+        baseline_names = list(baseline_dict.keys())
+        baseline_aucs = list(baseline_dict.values())
+    rows = [["SUAVE", *aucs], ["Linear", *lin_aucs]]
+    for name, model_aucs in zip(baseline_names, baseline_aucs):
+        rows.append([name, *model_aucs])
+    columns = ["Model"] + [f"task{i+1}_AUC" for i in range(len(task_classes))]
+    table = pd.DataFrame(rows, columns=columns)
     print(table.to_string(index=False))
     assert np.isfinite(recon_loss)
