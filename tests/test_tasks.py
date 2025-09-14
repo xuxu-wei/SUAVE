@@ -13,68 +13,114 @@ from suave.utils import set_random_seed
 def generate_dataset(difficulty):
     rng = np.random.default_rng(0)
     if difficulty == "simple":
-        n = 60
-        x1 = rng.normal(size=n)
-        x2 = rng.normal(size=n)
-        logits = x1 + 0.5 * x2
+        n = 200
+        base = rng.normal(size=(n, 5))
+        noise = rng.normal(scale=0.1, size=(n, 5))
+        x1, x2, x3, x4, x5 = base.T
+        x6 = x1 + noise[:, 0]
+        x7 = 0.5 * x2 - 0.3 * x3 + noise[:, 1]
+        x8 = 0.2 * x4 + 0.8 * x5 + noise[:, 2]
+        x9 = -x1 + x5 + noise[:, 3]
+        x10 = x2 - x4 + 0.5 * x3 + noise[:, 4]
+        X = np.column_stack([x1, x2, x3, x4, x5, x6, x7, x8, x9, x10]).astype(np.float32)
+        logits = 2 * x1 + 1.5 * x2 - x3 + 0.5 * x4
         prob = 1 / (1 + np.exp(-logits))
         y1 = (prob > 0.5).astype(int)
-        X = np.column_stack([x1, x2]).astype(np.float32)
         Y = y1[:, None].astype(np.int64)
         task_classes = [2]
     elif difficulty == "medium":
-        n = 100
-        numeric = rng.normal(size=(n, 3))
-        categorical = rng.integers(0, 4, size=n)
-        cat_onehot = np.eye(4)[categorical]
-        X = np.concatenate([numeric, cat_onehot], axis=1).astype(np.float32)
-        logits = numeric[:, 0] ** 2 + np.sin(numeric[:, 1]) + cat_onehot[:, 1] - cat_onehot[:, 2]
+        n = 1000
+        numeric = rng.normal(size=(n, 5))
+        categorical = rng.integers(0, 5, size=n)
+        cat_onehot = np.eye(5)[categorical]
+        derived1 = numeric[:, 0] * numeric[:, 1]
+        derived2 = np.sin(numeric[:, 2])
+        derived3 = np.log1p(np.abs(numeric[:, 3]))
+        derived4 = numeric[:, 4] * categorical
+        derived5 = numeric[:, 1] + categorical
+        noise = rng.normal(size=(n, 5))
+        X = np.column_stack([
+            numeric,
+            cat_onehot,
+            derived1,
+            derived2,
+            derived3,
+            derived4,
+            derived5,
+            noise,
+        ]).astype(np.float32)
+        mask = rng.random(X.shape) < 0.1
+        X[mask] = np.nan
+        col_means = np.nanmean(X, axis=0)
+        inds = np.where(np.isnan(X))
+        X[inds] = np.take(col_means, inds[1])
+        logits = derived1 + derived2 + cat_onehot[:, 1] - cat_onehot[:, 2]
         prob = 1 / (1 + np.exp(-logits))
         y1 = (prob > 0.5).astype(int)
-        y2_raw = numeric[:, 0] + numeric[:, 1] * numeric[:, 2] + categorical
+        y2_raw = numeric[:, 0] + derived3 + categorical
         y2 = pd.qcut(y2_raw, 3, labels=False)
         Y = np.column_stack([y1, y2]).astype(np.int64)
         task_classes = [2, 3]
     elif difficulty == "hard":
         n = 5000
-        num1 = rng.normal(size=n)
-        num2 = rng.exponential(size=n)
-        num3 = rng.uniform(-2, 2, size=n)
-        num4 = 0.5 * num1 + rng.normal(scale=0.5, size=n)
-        cat = rng.integers(0, 4, size=n)
-        cat_onehot = np.eye(4)[cat]
-        bin_feat = rng.binomial(1, 0.2, size=n)
-        count_feat = rng.poisson(2, size=n)
-        heavy_tail = rng.gamma(2.0, 1.0, size=n)
-        nonlinear = np.sin(num1) * num3 + np.log1p(num2) + 0.1 * count_feat
+        num = rng.normal(size=(n, 5))
+        exp = rng.exponential(size=(n, 3))
+        uniform = rng.uniform(-3, 3, size=(n, 2))
+        heavy = rng.gamma(2.0, 2.0, size=n)
+        cat = rng.integers(0, 5, size=n)
+        cat_onehot = np.eye(5)[cat]
+        bin_feat = rng.binomial(1, 0.3, size=n)
+        count_feat = rng.poisson(3, size=n)
+        derived1 = 0.5 * num[:, 0] + uniform[:, 0] + rng.normal(scale=0.1, size=n)
+        derived2 = num[:, 1] * uniform[:, 1] + np.log1p(exp[:, 0])
+        derived3 = np.sin(num[:, 2]) - exp[:, 1]
+        derived4 = num[:, 3] ** 2 + count_feat
+        derived5 = np.tanh(num[:, 4] + heavy)
+        derived6 = derived1 * derived2
+        derived7 = np.abs(num[:, 0] - uniform[:, 1])
+        derived8 = exp[:, 2] / (1 + np.abs(num[:, 3]))
+        derived9 = (cat == 3).astype(float) * num[:, 2]
+        derived10 = bin_feat * heavy
+        noise = rng.normal(size=(n, 15))
+        dup = num[:, [0, 1]]
+        dup_count = count_feat[:, None]
+        const = np.ones((n, 4))
         X = np.column_stack([
-            num1,
-            num2,
-            num3,
-            num4,
+            num,
+            exp,
+            uniform,
+            heavy[:, None],
             cat_onehot,
-            bin_feat,
-            count_feat,
-            heavy_tail,
-            nonlinear,
+            bin_feat[:, None],
+            count_feat[:, None],
+            derived1,
+            derived2,
+            derived3,
+            derived4,
+            derived5,
+            derived6,
+            derived7,
+            derived8,
+            derived9,
+            derived10,
+            noise,
+            dup,
+            dup_count,
+            const,
         ]).astype(np.float32)
-        # random missingness (MCAR)
-        mask = rng.random(X.shape) < 0.15
+        assert X.shape[1] == 50
+        mask = rng.random(X.shape) < 0.1
         X[mask] = np.nan
-        # non-random missingness conditioned on bin_feat and category
         X[bin_feat == 1, 0] = np.nan
         X[cat == 2, 1] = np.nan
-        # mean imputation
         col_means = np.nanmean(X, axis=0)
         inds = np.where(np.isnan(X))
         X[inds] = np.take(col_means, inds[1])
-        logits1 = (
-            0.8 * num1 - 1.2 * num3 + 0.5 * bin_feat + cat_onehot[:, 1] - cat_onehot[:, 2]
-        )
+        logits1 = 0.7 * num[:, 0] - 1.1 * derived3 + 0.5 * bin_feat + cat_onehot[:, 2] - cat_onehot[:, 3]
         prob1 = 1 / (1 + np.exp(-logits1))
-        thresh = np.quantile(prob1, 0.85)
+        thresh = np.quantile(prob1, 0.9)
         y1 = (prob1 > thresh).astype(int)
-        raw2 = num1 * num3 + np.cos(num2) + cat + 0.1 * count_feat
+        raw2 = derived2 + np.cos(heavy) + cat + 0.1 * count_feat
         y2 = pd.qcut(raw2, 4, labels=False)
         Y = np.column_stack([y1, y2]).astype(np.int64)
         task_classes = [2, 4]
@@ -87,18 +133,26 @@ def generate_dataset(difficulty):
 def test_suave_on_synthetic_tasks(difficulty):
     set_random_seed(0)
     X, Y, task_classes = generate_dataset(difficulty)
+    rng = np.random.default_rng(0)
+    idx = rng.permutation(len(X))
+    split = int(0.8 * len(X))
+    train_idx, test_idx = idx[:split], idx[split:]
+    X_train, Y_train = X[train_idx], Y[train_idx]
+    X_test, Y_test = X[test_idx], Y[test_idx]
+    params = {
+        "simple": dict(latent_dim=5, vae_depth=1, predictor_depth=1, batch_size=32),
+        "medium": dict(latent_dim=8, vae_depth=1, predictor_depth=1, batch_size=64),
+        "hard": dict(latent_dim=10, vae_depth=2, predictor_depth=2, batch_size=128),
+    }[difficulty]
     model = SUAVE(
-        input_dim=X.shape[1],
+        input_dim=X_train.shape[1],
         task_classes=task_classes,
-        latent_dim=5,
-        vae_depth=1,
-        predictor_depth=1,
-        batch_size=64,
-        validation_split=0.2,
+        validation_split=0.1,
         use_lr_scheduler=False,
+        **params,
     )
     epochs = {"simple": 5, "medium": 10, "hard": 15}[difficulty]
-    model.fit(X, Y, epochs=epochs, patience=5, verbose=False, early_stopping=False)
-    total_loss, recon_loss, kl_loss, task_loss, aucs = model.eval_loss(X, Y)
-    print(f"{difficulty} task AUCs={aucs} recon={recon_loss:.4f}")
+    model.fit(X_train, Y_train, epochs=epochs, patience=5, verbose=False, early_stopping=False)
+    total_loss, recon_loss, kl_loss, task_loss, aucs = model.eval_loss(X_test, Y_test)
+    print(f"{difficulty} task test AUCs={aucs} recon={recon_loss:.4f}")
     assert np.isfinite(recon_loss)
