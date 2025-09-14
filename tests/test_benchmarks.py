@@ -14,6 +14,10 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 
 from suave.sklearn import SuaveClassifier
+import optuna
+
+# Suppress Optuna's output to keep benchmark tables clean
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 try:
     from autogluon.tabular import TabularPredictor
@@ -162,6 +166,32 @@ def benchmark_models(X_train, X_test, y_train, y_test, task_classes):
     return pd.DataFrame(rows)
 
 
+def optimize_suave_params(X_train, y_train, task_classes):
+    """Search for SUAVE hyperparameters using Optuna."""
+    # Use a subset of data for tuning while keeping enough samples for reliability
+    max_samples = min(len(X_train), 500)
+    X_sub, y_sub = X_train[:max_samples], y_train[:max_samples]
+    X_tr, X_val, y_tr, y_val = train_test_split(X_sub, y_sub, test_size=0.2, random_state=0)
+
+    def objective(trial):
+        params = {
+            "latent_dim": trial.suggest_int("latent_dim", 8, 32),
+            "vae_depth": trial.suggest_int("vae_depth", 1, 3),
+            "predictor_depth": trial.suggest_int("predictor_depth", 1, 3),
+            "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256]),
+            # Search gamma across orders of magnitude (0.1-10000)
+            "gamma_task": trial.suggest_float("gamma_task", 1e-1, 1e4, log=True),
+        }
+        model = SuaveClassifier(input_dim=X_tr.shape[1], task_classes=task_classes, **params)
+        model.fit(X_tr, y_tr, epochs=100, patience=5, verbose=False)
+        auc = np.mean(model.score(X_val, y_val))
+        return float(auc)
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=0))
+    study.optimize(objective, n_trials=10, show_progress_bar=False)
+    return study.best_params
+
+
 def run_task(generator, name):
     X, Y, task_classes = generator()
     for _ in range(10):
@@ -176,8 +206,9 @@ def run_task(generator, name):
     scaler = StandardScaler()
     Xtr = scaler.fit_transform(imputer.fit_transform(X_train))
     Xte = scaler.transform(imputer.transform(X_test))
-    model = SuaveClassifier(input_dim=Xtr.shape[1], task_classes=task_classes, latent_dim=16, vae_depth=2, predictor_depth=2, batch_size=256, gamma_task=1.0)
-    model.fit(Xtr, y_train, epochs=100, patience=5, verbose=False)
+    best_params = optimize_suave_params(Xtr, y_train, task_classes)
+    model = SuaveClassifier(input_dim=Xtr.shape[1], task_classes=task_classes, **best_params)
+    model.fit(Xtr, y_train, epochs=150, patience=10, verbose=False)
     suave_auc = model.score(Xte, y_test)
     _, recon_loss, _, _, _ = model.eval_loss(Xte, y_test)
     for t, auc in enumerate(suave_auc, start=1):
@@ -191,11 +222,16 @@ def run_task(generator, name):
 def test_benchmarks():
     tasks = [(generate_simple, "simple"), (generate_medium, "medium"), (generate_hard, "hard")]
     recon_rows = []
+    tables = []
     for gen, name in tasks:
         res_df, recon = run_task(gen, name)
         table = res_df.pivot(index="model", columns="task", values="auc")
-        print(f"\nBenchmark AUCs ({name}):\n", table.to_markdown())
+        tables.append((name, table))
         recon_rows.append({"dataset": name, "recon": recon})
+
+    for name, table in tables:
+        print(f"\nBenchmark AUCs ({name}):\n", table.to_markdown())
+
     recon_df = pd.DataFrame(recon_rows)
     print("\nSUAVE Reconstruction Loss:\n", recon_df.to_markdown(index=False))
 
