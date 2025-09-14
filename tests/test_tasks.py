@@ -37,20 +37,10 @@ def generate_dataset(difficulty):
         numeric = rng.normal(size=(n, 5))
         categorical = rng.integers(0, 5, size=n)
         cat_onehot = np.eye(5)[categorical]
-        derived1 = numeric[:, 0] * numeric[:, 1]
-        derived2 = np.sin(numeric[:, 2])
-        derived3 = np.log1p(np.abs(numeric[:, 3]))
-        derived4 = numeric[:, 4] * categorical
-        derived5 = numeric[:, 1] + categorical
-        noise = rng.normal(size=(n, 5))
+        noise = rng.normal(size=(n, 10))
         X = np.column_stack([
             numeric,
             cat_onehot,
-            derived1,
-            derived2,
-            derived3,
-            derived4,
-            derived5,
             noise,
         ]).astype(np.float32)
         mask = rng.random(X.shape) < 0.1
@@ -58,11 +48,15 @@ def generate_dataset(difficulty):
         col_means = np.nanmean(X, axis=0)
         inds = np.where(np.isnan(X))
         X[inds] = np.take(col_means, inds[1])
-        logits = derived1 + derived2 + cat_onehot[:, 1] - cat_onehot[:, 2]
-        prob = 1 / (1 + np.exp(-logits))
-        y1 = (prob > 0.5).astype(int)
-        y2_raw = numeric[:, 0] + derived3 + categorical
-        y2 = pd.qcut(y2_raw, 3, labels=False)
+        sign1 = numeric[:, 0] > 0
+        sign2 = numeric[:, 1] > 0
+        cat_even = (categorical % 2) == 0
+        y1 = (sign1 ^ sign2 ^ cat_even).astype(int)
+        y2 = (
+            sign1.astype(int)
+            + (numeric[:, 2] > 0).astype(int)
+            + categorical
+        ) % 3
         Y = np.column_stack([y1, y2]).astype(np.int64)
         task_classes = [2, 3]
     elif difficulty == "hard":
@@ -75,21 +69,7 @@ def generate_dataset(difficulty):
         cat_onehot = np.eye(5)[cat]
         bin_feat = rng.binomial(1, 0.3, size=n)
         count_feat = rng.poisson(3, size=n)
-        derived1 = 0.5 * num[:, 0] + uniform[:, 0] + rng.normal(scale=0.1, size=n)
-        derived2 = num[:, 1] * uniform[:, 1] + np.log1p(exp[:, 0])
-        derived3 = np.sin(num[:, 2]) - exp[:, 1]
-        derived4 = num[:, 3] ** 2 + count_feat
-        derived5 = np.tanh(num[:, 4] + heavy)
-        derived6 = derived1 * derived2
-        derived7 = np.abs(num[:, 0] - uniform[:, 1])
-        derived8 = exp[:, 2] / (1 + np.abs(num[:, 3]))
-        derived9 = (cat == 3).astype(float) * num[:, 2]
-        derived10 = bin_feat * heavy
-        noise = rng.normal(size=(n, 15))
-        dup = num[:, [0, 1]]
-        dup_count = count_feat[:, None]
-        const = np.ones((n, 4))
-        X = np.column_stack([
+        base = np.column_stack([
             num,
             exp,
             uniform,
@@ -97,21 +77,9 @@ def generate_dataset(difficulty):
             cat_onehot,
             bin_feat[:, None],
             count_feat[:, None],
-            derived1,
-            derived2,
-            derived3,
-            derived4,
-            derived5,
-            derived6,
-            derived7,
-            derived8,
-            derived9,
-            derived10,
-            noise,
-            dup,
-            dup_count,
-            const,
-        ]).astype(np.float32)
+        ])
+        noise = rng.normal(size=(n, 32))
+        X = np.column_stack([base, noise]).astype(np.float32)
         assert X.shape[1] == 50
         mask = rng.random(X.shape) < 0.1
         X[mask] = np.nan
@@ -120,12 +88,17 @@ def generate_dataset(difficulty):
         col_means = np.nanmean(X, axis=0)
         inds = np.where(np.isnan(X))
         X[inds] = np.take(col_means, inds[1])
-        logits1 = 0.7 * num[:, 0] - 1.1 * derived3 + 0.5 * bin_feat + cat_onehot[:, 2] - cat_onehot[:, 3]
-        prob1 = 1 / (1 + np.exp(-logits1))
-        thresh = np.quantile(prob1, 0.9)
-        y1 = (prob1 > thresh).astype(int)
-        raw2 = derived2 + np.cos(heavy) + cat + 0.1 * count_feat
-        y2 = pd.qcut(raw2, 4, labels=False)
+        b1 = num[:, 0] > 0
+        b2 = uniform[:, 0] > 0
+        b3 = (cat % 2) == 0
+        b4 = bin_feat == 1
+        y1 = (b1 ^ b2 ^ b3 ^ b4).astype(int)
+        y2 = (
+            (exp[:, 1] > 1).astype(int)
+            + (num[:, 1] > 0).astype(int)
+            + 2 * (uniform[:, 1] > 0).astype(int)
+            + cat
+        ) % 4
         Y = np.column_stack([y1, y2]).astype(np.int64)
         task_classes = [2, 4]
     else:
