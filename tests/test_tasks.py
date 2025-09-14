@@ -36,32 +36,48 @@ def generate_dataset(difficulty):
         Y = np.column_stack([y1, y2]).astype(np.int64)
         task_classes = [2, 3]
     elif difficulty == "hard":
-        n = 200
+        n = 5000
         num1 = rng.normal(size=n)
         num2 = rng.exponential(size=n)
         num3 = rng.uniform(-2, 2, size=n)
-        cat = rng.integers(0, 3, size=n)
-        cat_onehot = np.eye(3)[cat]
-        bin_feat = rng.binomial(1, 0.3, size=n)
-        nonlinear = np.sin(num1) * num3 + np.log1p(num2)
-        X = np.column_stack([num1, num2, num3, cat_onehot, bin_feat, nonlinear]).astype(np.float32)
-        # random missingness
-        mask = rng.random(X.shape) < 0.1
+        num4 = 0.5 * num1 + rng.normal(scale=0.5, size=n)
+        cat = rng.integers(0, 4, size=n)
+        cat_onehot = np.eye(4)[cat]
+        bin_feat = rng.binomial(1, 0.2, size=n)
+        count_feat = rng.poisson(2, size=n)
+        heavy_tail = rng.gamma(2.0, 1.0, size=n)
+        nonlinear = np.sin(num1) * num3 + np.log1p(num2) + 0.1 * count_feat
+        X = np.column_stack([
+            num1,
+            num2,
+            num3,
+            num4,
+            cat_onehot,
+            bin_feat,
+            count_feat,
+            heavy_tail,
+            nonlinear,
+        ]).astype(np.float32)
+        # random missingness (MCAR)
+        mask = rng.random(X.shape) < 0.15
         X[mask] = np.nan
-        # non-random missingness conditioned on bin_feat
+        # non-random missingness conditioned on bin_feat and category
         X[bin_feat == 1, 0] = np.nan
+        X[cat == 2, 1] = np.nan
         # mean imputation
         col_means = np.nanmean(X, axis=0)
         inds = np.where(np.isnan(X))
         X[inds] = np.take(col_means, inds[1])
-        logits1 = 0.8 * num1 - 1.2 * num3 + 0.5 * bin_feat + cat_onehot[:, 1] - cat_onehot[:, 2]
+        logits1 = (
+            0.8 * num1 - 1.2 * num3 + 0.5 * bin_feat + cat_onehot[:, 1] - cat_onehot[:, 2]
+        )
         prob1 = 1 / (1 + np.exp(-logits1))
-        thresh = np.quantile(prob1, 0.7)
+        thresh = np.quantile(prob1, 0.85)
         y1 = (prob1 > thresh).astype(int)
-        raw2 = num1 * num3 + np.cos(num2) + cat
-        y2 = pd.qcut(raw2, 3, labels=False)
+        raw2 = num1 * num3 + np.cos(num2) + cat + 0.1 * count_feat
+        y2 = pd.qcut(raw2, 4, labels=False)
         Y = np.column_stack([y1, y2]).astype(np.int64)
-        task_classes = [2, 3]
+        task_classes = [2, 4]
     else:
         raise ValueError("unknown difficulty")
     return X, Y, task_classes
@@ -77,11 +93,11 @@ def test_suave_on_synthetic_tasks(difficulty):
         latent_dim=5,
         vae_depth=1,
         predictor_depth=1,
-        batch_size=16,
+        batch_size=64,
         validation_split=0.2,
         use_lr_scheduler=False,
     )
-    epochs = {"simple": 5, "medium": 10, "hard": 20}[difficulty]
+    epochs = {"simple": 5, "medium": 10, "hard": 15}[difficulty]
     model.fit(X, Y, epochs=epochs, patience=5, verbose=False, early_stopping=False)
     total_loss, recon_loss, kl_loss, task_loss, aucs = model.eval_loss(X, Y)
     print(f"{difficulty} task AUCs={aucs} recon={recon_loss:.4f}")
