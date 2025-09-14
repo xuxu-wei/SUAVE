@@ -94,10 +94,11 @@ def set_random_seed(seed):
     random.seed(seed)  # Python 的随机数生成器
     np.random.seed(seed)  # NumPy 的随机数生成器
     torch.manual_seed(seed)  # PyTorch 的随机数生成器（CPU）
-    torch.cuda.manual_seed(seed)  # PyTorch 的随机数生成器（当前 GPU）
-    torch.cuda.manual_seed_all(seed)  # PyTorch 的随机数生成器（所有 GPU）
-    torch.backends.cudnn.deterministic = True  # 保证每次卷积的结果一致
-    torch.backends.cudnn.benchmark = False  # 禁用自动优化
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)  # PyTorch 的随机数生成器（当前 GPU）
+        torch.cuda.manual_seed_all(seed)  # PyTorch 的随机数生成器（所有 GPU）
+        torch.backends.cudnn.deterministic = True  # 保证每次卷积的结果一致
+        torch.backends.cudnn.benchmark = False  # 禁用自动优化
 
 def to_numpy(x):
     """

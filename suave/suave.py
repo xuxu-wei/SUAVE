@@ -7,12 +7,12 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from sklearn.metrics import mean_squared_error, roc_auc_score
-from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
+from sklearn.metrics import roc_auc_score
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import matplotlib.pyplot as plt
 
 from ._base import ResetMixin
-from .utils import *
+from .utils import DEVICE, generate_hidden_dims, is_interactive_environment
 
 # TODO 支持回归任务
 # 考虑建立一个新的类，用于回归任务（因为回归损失的尺度与分类损失差异太大 很难管理 一起训练可能效果很差）
@@ -834,6 +834,7 @@ class SUAVE(nn.Module, ResetMixin):
 
         return recon_loss, kl_loss
 
+
     def compute_pred_loss(self, task_outputs, y, alpha=None):
         """
         Compute prediction losses and AUC scores for each task.
@@ -977,9 +978,9 @@ class SUAVE(nn.Module, ResetMixin):
             Number of training epochs.
             
         freeze_vae : bool, optional, default=False
-            - If True, the training will freeze the VAE. This is useful 
-            - if the latent representation is already learned and stable, 
-            and you only want to optimize task-specific heads.
+            - If True, VAE parameters are frozen (no gradients or optimizer steps).
+            - Use this when the latent representation is already learned and stable,
+              and you only want to optimize task-specific heads.
             
         predictor_fine_tuning : bool, optional, default=False
             Controls whether the predictor weights are reset during training.
@@ -1053,7 +1054,8 @@ class SUAVE(nn.Module, ResetMixin):
         >>> suave_model.fit(X, Y, patience=100, freeze_vae=True, predictor_fine_tuning=True)
         """
         if freeze_vae:
-            self.vae_lr = 0
+            for param in self.vae.parameters():
+                param.requires_grad = False
         else:
             self.vae.reset_parameters()
             
@@ -1109,21 +1111,46 @@ class SUAVE(nn.Module, ResetMixin):
             raise ValueError("Failed to split data: One or more tasks have imbalanced classes in training or validation sets.")
         
         # Separate optimizers for VAE and MultiTask predictor
-        self.vae_optimizer = torch.optim.Adam(self.vae.parameters(), lr=self.vae_lr, weight_decay=self.vae_weight_decay, eps=1e-8)
-        
-        self.multitask_optimizer_dict = {task_name: torch.optim.Adam(self.predictor.task_heads[t].parameters(), 
-                                                                     lr=self.multitask_lr, weight_decay=self.multitask_weight_decay, eps=1e-8)
-                                                                     for t, task_name in enumerate(self.task_names)}
+        if not freeze_vae:
+            self.vae_optimizer = torch.optim.Adam(
+                self.vae.parameters(),
+                lr=self.vae_lr,
+                weight_decay=self.vae_weight_decay,
+                eps=1e-8,
+            )
+        else:
+            self.vae_optimizer = None
+
+        self.multitask_optimizer_dict = {
+            task_name: torch.optim.Adam(
+                self.predictor.task_heads[t].parameters(),
+                lr=self.multitask_lr,
+                weight_decay=self.multitask_weight_decay,
+                eps=1e-8,
+            )
+            for t, task_name in enumerate(self.task_names)
+        }
         
         # 初始化调度器（仅当启用时）
         if self.use_lr_scheduler:
             if self.lr_scheduler_patience is None:
                 self.lr_scheduler_patience = patience * 1/3
-            vae_scheduler = ReduceLROnPlateau(self.vae_optimizer, mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
-            # Check if each task and class has at
-            multitask_scheduler_dict = {task_name: ReduceLROnPlateau(self.multitask_optimizer_dict[task_name], 
-                                                                     mode='min', factor=self.lr_scheduler_factor, patience=self.lr_scheduler_patience)
-                                                                     for task_name in self.task_names}
+            if not freeze_vae:
+                vae_scheduler = ReduceLROnPlateau(
+                    self.vae_optimizer,
+                    mode='min',
+                    factor=self.lr_scheduler_factor,
+                    patience=self.lr_scheduler_patience,
+                )
+            multitask_scheduler_dict = {
+                task_name: ReduceLROnPlateau(
+                    self.multitask_optimizer_dict[task_name],
+                    mode='min',
+                    factor=self.lr_scheduler_factor,
+                    patience=self.lr_scheduler_patience,
+                )
+                for task_name in self.task_names
+            }
 
         # Initialize best losses and patience counters
         best_vae_loss = float('inf')
@@ -1170,7 +1197,8 @@ class SUAVE(nn.Module, ResetMixin):
                     continue  # 仍然太小，跳过
                 
                 # Reset gradients
-                self.vae_optimizer.zero_grad()
+                if not freeze_vae:
+                    self.vae_optimizer.zero_grad()
                 for task_name, task_optimizer in self.multitask_optimizer_dict.items():
                     task_optimizer.zero_grad()
 
@@ -1185,7 +1213,8 @@ class SUAVE(nn.Module, ResetMixin):
 
                 # Backward pass and optimization
                 total_loss.backward()
-                self.vae_optimizer.step()
+                if not freeze_vae:
+                    self.vae_optimizer.step()
                 for task_name, task_optimizer in self.multitask_optimizer_dict.items():
                     task_optimizer.step()
 
@@ -1237,7 +1266,7 @@ class SUAVE(nn.Module, ResetMixin):
                     val_batch_count += 1
 
             if self.use_lr_scheduler:
-                if self.training_status[self._vae_task_name]:
+                if self.training_status[self._vae_task_name] and not freeze_vae:
                     vae_scheduler.step(val_vae_loss)  # 调用时需传入验证损失
 
                 for (task_name, task_scheduler), task_loss in zip(multitask_scheduler_dict.items(), val_per_task_losses):
@@ -1274,7 +1303,7 @@ class SUAVE(nn.Module, ResetMixin):
                     self.vae_patience_counter += 1
 
             # freeze weights if counter exceed patience
-            if self.vae_patience_counter >= patience:
+            if (not freeze_vae) and (self.vae_patience_counter >= patience):
                 self.stop_training_module(self.vae, self._vae_task_name, verbose, epoch)
 
                 # For prediction tasks, start counting for early stopping after VAE has stopped.
