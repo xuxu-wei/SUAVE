@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
@@ -231,19 +231,28 @@ def run_task(generator, name):
         proba = probas[t]
         pred = preds[t]
         if num_classes > 2:
-            aupr = average_precision_score(y_true, proba, average="macro")
-            acc = accuracy_score(y_true, pred)
-            f1 = f1_score(y_true, pred, average="macro")
+            y_true_bin = label_binarize(y_true, classes=np.arange(num_classes))
+            auroc_macro = roc_auc_score(y_true, proba, multi_class="ovr", average="macro")
+            auroc_micro = roc_auc_score(y_true_bin, proba, average="micro")
+            auprc_macro = average_precision_score(y_true_bin, proba, average="macro")
+            auprc_micro = average_precision_score(y_true_bin, proba, average="micro")
+            acc_top1 = accuracy_score(y_true, pred)
+            f1_macro = f1_score(y_true, pred, average="macro")
         else:
+            auroc = roc_auc_score(y_true, proba[:, 1])
             aupr = average_precision_score(y_true, proba[:, 1])
-            acc = accuracy_score(y_true, pred)
-            f1 = f1_score(y_true, pred)
+            acc_top1 = accuracy_score(y_true, pred)
+            f1_macro = f1_score(y_true, pred)
+            auroc_macro = auroc_micro = auroc
+            auprc_macro = auprc_micro = aupr
         metrics.append(
             {
-                "auroc": float(suave_auc[t]),
-                "auprc": float(aupr),
-                "acc": float(acc),
-                "f1": float(f1),
+                "auroc_macro": float(auroc_macro),
+                "auroc_micro": float(auroc_micro),
+                "auprc_macro": float(auprc_macro),
+                "auprc_micro": float(auprc_micro),
+                "acc_top1": float(acc_top1),
+                "f1_macro": float(f1_macro),
             }
         )
     _, recon_loss, _, _, _ = model.eval_loss(Xte, y_test)
