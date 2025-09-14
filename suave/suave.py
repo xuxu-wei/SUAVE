@@ -1,5 +1,6 @@
 import os, sys, json
 import inspect
+from pathlib import Path
 from tqdm import tqdm
 from tqdm.notebook import tqdm_notebook
 import pandas as pd
@@ -7,7 +8,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from sklearn.metrics import mean_squared_error, roc_auc_score
+from sklearn.metrics import mean_squared_error, roc_auc_score, average_precision_score
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
 
@@ -869,8 +870,9 @@ class SUAVE(nn.Module, ResetMixin):
         else:
             alpha = torch.tensor(alpha, device=DEVICE, dtype=torch.float32)
 
-        # Compute losses and AUCs for each task
+        # Compute losses and AUCs/AUPRCs for each task
         auc_scores = []
+        auprc_scores = []
         for t, (task_output, target) in enumerate(zip(task_outputs, y.T)):
             # Compute task loss using sum reduction
             task_loss_fn = nn.CrossEntropyLoss(reduction='sum')
@@ -887,16 +889,24 @@ class SUAVE(nn.Module, ResetMixin):
 
             target_cpu = target.detach().cpu().numpy()
             try:
-                auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob, 
+                auc = roc_auc_score(y_true=target_cpu, y_score=task_output_prob,
                                   multi_class='ovo', average='macro')
             except ValueError:
                 auc = 0.5
             auc_scores.append(auc)
 
+            # Compute AUPRC using average precision
+            try:
+                auprc = average_precision_score(target_cpu, task_output_prob,
+                                                average='macro' if num_classes > 2 else None)
+            except ValueError:
+                auprc = 0.5
+            auprc_scores.append(auprc)
+
         # Sum up weighted task losses
         task_loss_sum = sum(per_task_losses)
 
-        return task_loss_sum, per_task_losses, auc_scores
+        return task_loss_sum, per_task_losses, auc_scores, auprc_scores
 
     def compute_loss(self, x, recon, mu, logvar, z, task_outputs, y, beta=1.0, gamma_task=1.0, alpha=None):
         """
@@ -944,12 +954,12 @@ class SUAVE(nn.Module, ResetMixin):
         recon_loss, kl_loss = self.compute_recon_loss(x, recon, mu, logvar)
         
         # Compute prediction losses
-        task_loss_sum, per_task_losses, auc_scores = self.compute_pred_loss(task_outputs, y, alpha)
+        task_loss_sum, per_task_losses, auc_scores, auprc_scores = self.compute_pred_loss(task_outputs, y, alpha)
 
         # Combine losses with weights
         total_loss = recon_loss + beta * kl_loss + gamma_task * task_loss_sum
 
-        return total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores
+        return total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores, auprc_scores
 
     def fit(self, X, Y, 
             epochs=1000, 
@@ -1136,6 +1146,8 @@ class SUAVE(nn.Module, ResetMixin):
         # Training and validation loss storage
         train_vae_losses, train_task_losses, train_aucs = [], [], []
         val_vae_losses, val_task_losses, val_aucs = [], [], []
+        val_auprcs = []
+        log_rows = []
         
         # Training loop with tqdm
         iterator = range(epochs)
@@ -1147,10 +1159,12 @@ class SUAVE(nn.Module, ResetMixin):
 
         for epoch in iterator:
             self.train()
-            train_vae_loss = 0.0
+            train_recon_loss = 0.0
+            train_kl_loss = 0.0
             train_task_loss_sum = 0.0
-            train_per_task_losses = np.zeros(len(self.task_classes)) # 每个 task 的 loss 
+            train_per_task_losses = np.zeros(len(self.task_classes)) # 每个 task 的 loss
             train_auc_scores_tasks = []
+            train_auprc_scores_tasks = []
             train_batch_count = 0
             for i in range(0, len(X_train), self.batch_size):
                 X_batch = X_train[i:i + self.batch_size]
@@ -1178,8 +1192,8 @@ class SUAVE(nn.Module, ResetMixin):
                 recon, mu, logvar, z, task_outputs = self(X_batch)
 
                 # Compute loss
-                total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores = self.compute_loss(
-                    X_batch, recon, mu, logvar, z, task_outputs, Y_batch, 
+                total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores, auprc_scores = self.compute_loss(
+                    X_batch, recon, mu, logvar, z, task_outputs, Y_batch,
                     beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
                 )
 
@@ -1190,27 +1204,38 @@ class SUAVE(nn.Module, ResetMixin):
                     task_optimizer.step()
 
                 # Accumulate losses
-                train_vae_loss += ((recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size) # record batch normalized loss after backward pass
+                train_recon_loss += (recon_loss.item() / self.batch_size)
+                train_kl_loss += (kl_loss.item() / self.batch_size)
                 train_task_loss_sum += (task_loss_sum.item() / self.batch_size)
                 train_per_task_losses += np.array([(loss.cpu().detach().numpy() / self.batch_size) for loss in per_task_losses])
                 train_auc_scores_tasks.append(np.array(auc_scores))
+                train_auprc_scores_tasks.append(np.array(auprc_scores))
                 train_batch_count += 1
 
             # Normalize training losses by the number of batches
-            train_vae_loss /= train_batch_count
+            train_recon_loss /= train_batch_count
+            train_kl_loss /= train_batch_count
             train_task_loss_sum /= train_batch_count
-            train_auc_scores_tasks= np.mean(np.stack(train_auc_scores_tasks), axis=0)
-            
-            train_vae_losses.append(train_vae_loss)
+            train_auc_scores_tasks = np.mean(np.stack(train_auc_scores_tasks), axis=0)
+            train_auprc_scores_tasks = np.mean(np.stack(train_auprc_scores_tasks), axis=0)
+
+            train_total_loss = train_recon_loss + self.beta * train_kl_loss + train_task_loss_sum
+
+            train_vae_loss_epoch = train_recon_loss + self.beta * train_kl_loss
+            train_vae_losses.append(train_vae_loss_epoch)
             train_task_losses.append(train_task_loss_sum)
             train_aucs.append(train_auc_scores_tasks)
 
+            val_aucs = getattr(self, 'val_aucs', [])
+
             # Validation phase
             self.eval()
-            val_vae_loss = 0.0
+            val_recon_loss = 0.0
+            val_kl_loss = 0.0
             val_task_loss_sum = 0.0 # 总 task loss
-            val_per_task_losses = np.zeros(len(self.task_classes)) # 每个 task 的 loss 
+            val_per_task_losses = np.zeros(len(self.task_classes)) # 每个 task 的 loss
             val_auc_scores_tasks = []
+            val_auprc_scores_tasks = []
             val_batch_count = 0
             with torch.no_grad():
                 for i in range(0, len(X_val), self.batch_size):
@@ -1224,50 +1249,71 @@ class SUAVE(nn.Module, ResetMixin):
                     recon, mu, logvar, z, task_outputs = self(X_batch)
 
                     # Compute validation losses
-                    total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores = self.compute_loss(
-                        X_batch, recon, mu, logvar, z, task_outputs, Y_batch, 
+                    total_loss, recon_loss, kl_loss, task_loss_sum, per_task_losses, auc_scores, auprc_scores = self.compute_loss(
+                        X_batch, recon, mu, logvar, z, task_outputs, Y_batch,
                         beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
                     )
 
                     # Accumulate losses
-                    val_vae_loss += ((recon_loss.item() + self.beta * kl_loss.item()) / self.batch_size)
+                    val_recon_loss += (recon_loss.item() / self.batch_size)
+                    val_kl_loss += (kl_loss.item() / self.batch_size)
                     val_task_loss_sum += (task_loss_sum.item() / self.batch_size)
                     val_per_task_losses += np.array([(loss.cpu().detach().numpy() / self.batch_size) for loss in per_task_losses])
                     val_auc_scores_tasks.append(np.array(auc_scores))
+                    val_auprc_scores_tasks.append(np.array(auprc_scores))
                     val_batch_count += 1
 
             if self.use_lr_scheduler:
                 if self.training_status[self._vae_task_name]:
-                    vae_scheduler.step(val_vae_loss)  # 调用时需传入验证损失
+                    val_vae_loss_metric = val_recon_loss + self.beta * val_kl_loss
+                    vae_scheduler.step(val_vae_loss_metric)  # 调用时需传入验证损失
 
                 for (task_name, task_scheduler), task_loss in zip(multitask_scheduler_dict.items(), val_per_task_losses):
                     if self.training_status[task_name]:
                         task_scheduler.step(task_loss)
                     
             # Normalize Validation losses by the number of batches
-            val_vae_loss /= val_batch_count
+            val_recon_loss /= val_batch_count
+            val_kl_loss /= val_batch_count
             val_task_loss_sum /= val_batch_count
             val_auc_scores_tasks = np.mean(np.stack(val_auc_scores_tasks), axis=0)
-            
-            val_vae_losses.append(val_vae_loss)
+            val_auprc_scores_tasks = np.mean(np.stack(val_auprc_scores_tasks), axis=0)
+
+            val_total_loss = val_recon_loss + self.beta * val_kl_loss + val_task_loss_sum
+
+            val_vae_loss_epoch = val_recon_loss + self.beta * val_kl_loss
+            val_vae_losses.append(val_vae_loss_epoch)
             val_task_losses.append(val_task_loss_sum)
             val_aucs.append(val_auc_scores_tasks)
+            val_auprcs.append(val_auprc_scores_tasks)
+
+            val_auroc_mean = float(np.mean(val_auc_scores_tasks))
+            val_auprc_mean = float(np.mean(val_auprc_scores_tasks))
+            log_rows.append({
+                'epoch': epoch + 1,
+                'L_total': train_total_loss,
+                'L_cls': train_task_loss_sum,
+                'L_recon': train_recon_loss,
+                'KL': self.beta * train_kl_loss,
+                'val_auroc': val_auroc_mean,
+                'val_auprc': val_auprc_mean,
+            })
 
             # Update progress bar
             if verbose:
                 train_auc_formated = [round(auc, 3) for auc in train_auc_scores_tasks]
                 val_auc_formated = [round(auc, 3) for auc in val_auc_scores_tasks]
                 iterator.set_postfix({
-                    "VAE(t)": f"{train_vae_loss:.3f}", # train total VAE loss, normalized by batch size
-                    "VAE(v)": f"{val_vae_loss:.3f}", # validation total VAE loss, normalized by batch size
+                    "VAE(t)": f"{train_vae_loss_epoch:.3f}", # train total VAE loss, normalized by batch size
+                    "VAE(v)": f"{val_vae_loss_epoch:.3f}", # validation total VAE loss, normalized by batch size
                     "AUC(t)": f"{train_auc_formated}", # train AUC for each task
                     "AUC(v)": f"{val_auc_formated}" # validation AUC for each task
                 })
             
             # Early stopping logic
             if early_stopping:
-                if (val_vae_loss < best_vae_loss):
-                    best_vae_loss = val_vae_loss
+                if (val_vae_loss_epoch < best_vae_loss):
+                    best_vae_loss = val_vae_loss_epoch
                     if not freeze_vae:
                         self.vae_patience_counter = 0
                 else:
@@ -1305,11 +1351,11 @@ class SUAVE(nn.Module, ResetMixin):
                     self.save_model(save_weights_path, "final")
                 break
 
-            # Save loss plot every 5% epochs
-            if ((epoch + 1) % int((self.fit_epochs * 0.01)) == 0) and ((is_interactive_environment() and animate_monitor) or plot_path):
-                loss_plot_path = None
-                if plot_path:
-                    loss_plot_path = os.path.join(plot_path, f"loss_epoch.jpg")
+        # Save loss plot every 5% epochs
+        if ((epoch + 1) % int((self.fit_epochs * 0.01)) == 0) and ((is_interactive_environment() and animate_monitor) or plot_path):
+            loss_plot_path = None
+            if plot_path:
+                loss_plot_path = os.path.join(plot_path, f"loss_epoch.jpg")
                 self.plot_loss(train_vae_losses,  # orginally reduction by sum, normalize by batch size here
                                val_vae_losses, # orginally reduction by sum, normalize by batch size here
                                train_aucs, 
@@ -1321,6 +1367,60 @@ class SUAVE(nn.Module, ResetMixin):
             # Save weights every 20% epochs
             if ((epoch + 1) % int((self.fit_epochs * 0.2)) == 0) and save_weights_path:
                 self.save_model(save_weights_path, epoch + 1)
+
+        # Write training diagnostics
+        diag_dir = Path("reports/diagnostics")
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        log_df = pd.DataFrame(
+            log_rows,
+            columns=["epoch", "L_total", "L_cls", "L_recon", "KL", "val_auroc", "val_auprc"],
+        )
+        log_df.to_csv(diag_dir / "train_log.csv", index=False)
+
+        fig_dir = Path("reports/figures")
+        fig_dir.mkdir(parents=True, exist_ok=True)
+
+        # Learning curves
+        fig, ax1 = plt.subplots()
+        ax1.plot(log_df["epoch"], log_df["L_total"], label="L_total")
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("Loss")
+        ax2 = ax1.twinx()
+        ax2.plot(log_df["epoch"], log_df["val_auroc"], label="Val AUROC", color="C1")
+        ax2.plot(log_df["epoch"], log_df["val_auprc"], label="Val AUPRC", color="C2")
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+        fig.tight_layout()
+        fig.savefig(fig_dir / "P0_learning_curves.png", dpi=360)
+        plt.close(fig)
+
+        # Loss mix
+        mix = log_df[["L_cls", "L_recon", "KL"]]
+        mix_pct = mix.div(mix.sum(axis=1), axis=0)
+        fig, ax = plt.subplots()
+        ax.stackplot(log_df["epoch"], mix_pct["L_cls"], mix_pct["L_recon"], mix_pct["KL"],
+                     labels=["L_cls", "L_recon", "KL"])
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Proportion")
+        ax.legend(loc="upper right")
+        fig.tight_layout()
+        fig.savefig(fig_dir / "P0_loss_mix.png", dpi=360)
+        plt.close(fig)
+
+        # Summary markdown
+        md_dir = Path("reports/md")
+        md_dir.mkdir(parents=True, exist_ok=True)
+        final = mix_pct.iloc[-1]
+        summary_lines = [
+            "# P0 Diagnostics",
+            f"Final epoch loss proportions: L_cls {final['L_cls']:.2%}, L_recon {final['L_recon']:.2%}, KL {final['KL']:.2%}.",
+        ]
+        if final['L_cls'] < max(final['L_recon'], final['KL']):
+            summary_lines.append("Classification loss appears smaller than reconstruction or KL components.")
+        else:
+            summary_lines.append("Classification loss is not overshadowed by reconstruction or KL components.")
+        (md_dir / "P0_summary.md").write_text("\n".join(summary_lines) + "\n")
 
         # Save final weights
         if save_weights_path:
@@ -1704,6 +1804,8 @@ class SUAVE(nn.Module, ResetMixin):
             
         auc_scores: list of float
             List of AUC scores for each task.
+        auprc_scores: list of float
+            List of AUPRC scores for each task.
         """
         X = self._check_tensor(X).to(DEVICE)
         Y = self._check_tensor(Y).to(DEVICE)
@@ -1713,8 +1815,8 @@ class SUAVE(nn.Module, ResetMixin):
             recon, mu, logvar, z, task_outputs = self(X, deterministic=deterministic)
 
             
-            total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores = self.compute_loss(
-                X, recon, mu, logvar, z, task_outputs, Y, 
+            total_loss, recon_loss, kl_loss, task_loss, per_task_losses, auc_scores, auprc_scores = self.compute_loss(
+                X, recon, mu, logvar, z, task_outputs, Y,
                 beta=self.beta, gamma_task=self.gamma_task, alpha=self.alphas
             )
 
@@ -1724,6 +1826,7 @@ class SUAVE(nn.Module, ResetMixin):
                 kl_loss.item() / len(X),
                 task_loss.item(),
                 auc_scores,
+                auprc_scores,
                 )
     
     def eval_recon_loss_with_pred(self, X, recon, mu, logvar):

@@ -255,7 +255,7 @@ def run_task(generator, name):
                 "f1_macro": float(f1_macro),
             }
         )
-    _, recon_loss, _, _, _ = model.eval_loss(Xte, y_test)
+    _, recon_loss, _, _, _, _ = model.eval_loss(Xte, y_test)
     for t, auc in enumerate(suave_auc, start=1):
         bench = pd.concat(
             [bench, pd.DataFrame({"model": ["SUAVE"], "task": [f"y{t}"], "auc": [auc]})],
