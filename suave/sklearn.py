@@ -21,13 +21,26 @@ class SuaveClassifier:
         List specifying the number of classes for each prediction task.
     latent_dim:
         Dimensionality of the latent space for each SUAVE model (default: 8).
+    **model_kwargs:
+        Additional keyword arguments forwarded to :class:`SUAVE`. This can be
+        used to enable :math:`\beta`-VAE (via ``beta``) or InfoVAE
+        (``info_config``) behaviour.
     """
 
-    def __init__(self, input_dim: int, task_classes: List[int], latent_dim: int = 8, **_: object):
+    def __init__(self, input_dim: int, task_classes: List[int], latent_dim: int = 8, **model_kwargs: object):
         self.input_dim = input_dim
         self.task_classes = task_classes
         self.latent_dim = latent_dim
-        self.models = [SUAVE(input_dim=input_dim, latent_dim=latent_dim, num_classes=c) for c in task_classes]
+        self.model_kwargs = model_kwargs
+        self.models = [
+            SUAVE(
+                input_dim=input_dim,
+                latent_dim=latent_dim,
+                num_classes=c,
+                **model_kwargs,
+            )
+            for c in task_classes
+        ]
 
     def fit(self, X: np.ndarray, Y: np.ndarray, epochs: int = 20, **_: object) -> "SuaveClassifier":
         for model, y in zip(self.models, Y.T):
