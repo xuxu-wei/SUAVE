@@ -13,6 +13,7 @@ from suave.eval.tstr import tstr_auc
 
 def test_generation_calibration_tstr():
     rng = np.random.default_rng(0)
+    torch.manual_seed(0)
     X = rng.normal(size=(200, 4))
     y = (X[:, 0] + 0.1 * rng.normal(size=200) > 0).astype(int)
 

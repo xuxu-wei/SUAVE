@@ -1,4 +1,6 @@
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import numpy as np
@@ -21,6 +23,7 @@ from sklearn.metrics import (
 import json
 from pathlib import Path
 
+from suave.api import TabVAEClassifier
 from suave.sklearn import SuaveClassifier
 import optuna
 import torch
@@ -259,6 +262,27 @@ def run_task(generator, name):
     for t, auc in enumerate(suave_auc, start=1):
         bench = pd.concat(
             [bench, pd.DataFrame({"model": ["SUAVE"], "task": [f"y{t}"], "auc": [auc]})],
+            ignore_index=True,
+        )
+
+    # Benchmark TabVAE on each task separately
+    for t, num_classes in enumerate(task_classes, start=1):
+        y_tr = y_train[:, t - 1]
+        y_te = y_test[:, t - 1]
+        tabvae = TabVAEClassifier(
+            input_dim=Xtr.shape[1], latent_dim=8, num_classes=num_classes
+        )
+        tabvae.fit(Xtr, y_tr, epochs=50)
+        proba = tabvae.predict_proba(Xte)
+        if num_classes > 2:
+            auc = roc_auc_score(y_te, proba, multi_class="ovr", average="macro")
+        else:
+            auc = roc_auc_score(y_te, proba[:, 1])
+        bench = pd.concat(
+            [
+                bench,
+                pd.DataFrame({"model": ["TabVAE"], "task": [f"y{t}"], "auc": [auc]}),
+            ],
             ignore_index=True,
         )
     return bench, recon_loss, metrics, int(rs)
