@@ -1,4 +1,4 @@
-"""Minimal CLI for training the TabVAE model."""
+"""Minimal CLI for training the SUAVE model."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ import argparse
 import yaml
 import numpy as np
 
-from ..api import TabVAEClassifier
+from ..api import SUAVE
 from ..utils.seed import set_seed
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train TabVAE")
+    parser = argparse.ArgumentParser(description="Train SUAVE")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
     args = parser.parse_args()
 
@@ -24,7 +24,7 @@ def main() -> None:
     X = np.random.randn(100, input_dim)
     y = (X[:, 0] > 0).astype(int)
 
-    model = TabVAEClassifier(input_dim=input_dim)
+    model = SUAVE(input_dim=input_dim)
     model.fit(X, y, epochs=10)
     print("Training finished")
 

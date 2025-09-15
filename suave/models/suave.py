@@ -1,13 +1,13 @@
-"""SUAVE TabVAE model.
+"""SUAVE model.
 
-This module implements a tabular VAE with an attached classifier where the
-latent variable ``z`` acts as a single information hub.  By routing prediction,
-missing-free sample synthesis and latent-factor interpretation through ``z`` we
-provide a unified interface for downstream clinical workflows.  The design
-follows a *probability first* philosophy: mixed data types, missingness and
-class imbalance are handled with explicit likelihood terms rather than ad-hoc
-preprocessing.  The latent-variable view offers compact and interpretable
-representations that are especially useful in clinical research.
+This module implements a variational autoencoder with an attached classifier
+where the latent variable ``z`` acts as a single information hub.  By routing
+prediction, missing-free sample synthesis and latent-factor interpretation
+through ``z`` we provide a unified interface for downstream clinical workflows.
+The design follows a *probability first* philosophy: mixed data types,
+missingness and class imbalance are handled with explicit likelihood terms
+rather than ad-hoc preprocessing.  The latent-variable view offers compact and
+interpretable representations that are especially useful in clinical research.
 
 Only continuous variables are implemented here; categorical/count support can be
 added in a backwards compatible fashion.
@@ -116,7 +116,7 @@ class Classifier(nn.Module):
         return self.net(h)
 
 
-class TabVAEClassifier(nn.Module):
+class SUAVE(nn.Module):
     """Unified model for prediction, generation and interpretation.
 
     The model exposes a single latent representation ``z`` which serves as the
@@ -125,8 +125,7 @@ class TabVAEClassifier(nn.Module):
     to enable missing-free synthetic data generation, and ``z`` can be probed for
     correlations with clinical covariates.
 
-    This class is exported from :mod:`suave` as ``SUAVE`` and supersedes the
-    legacy implementation now available via ``suave_old_version``.
+    This class is exported from :mod:`suave` as ``SUAVE``.
 
     Parameters
     ----------
@@ -194,7 +193,7 @@ class TabVAEClassifier(nn.Module):
     # ---------------------------------------------------------------- training
     def fit(
         self, X: np.ndarray, y: np.ndarray, epochs: int = 20, lr: float = 3e-4
-    ) -> "TabVAEClassifier":
+    ) -> "SUAVE":
         """Train the model using full-batch optimisation.
 
         The routine is intentionally simple for testability.  Missing values in
@@ -342,5 +341,5 @@ class TabVAEClassifier(nn.Module):
         return float(loss), float(nll), float(kl), float(ce), 0.0, 0.0
 
 
-__all__ = ["TabVAEClassifier"]
+__all__ = ["SUAVE"]
 

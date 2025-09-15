@@ -1,5 +1,5 @@
 """Training utilities for SUAVE models."""
 
-from .train_tabvae import train_tabvae
+from .train_suave import train_suave
 
-__all__ = ["train_tabvae"]
+__all__ = ["train_suave"]

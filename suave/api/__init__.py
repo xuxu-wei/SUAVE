@@ -1,5 +1,5 @@
-"""Public facing API for the TabVAE model (exported as ``SUAVE``)."""
+"""Public facing API for the SUAVE model."""
 
-from .model import TabVAEClassifier
+from .model import SUAVE
 
-__all__ = ["TabVAEClassifier"]
+__all__ = ["SUAVE"]
