@@ -22,7 +22,10 @@
 3. **实现 TabVAE+Classifier（Mode 0）**，训练与评测脚手架（见 §3–§6）。
 4. **回归测试**：确保 `pytest -q` 全绿；新增单测覆盖生成无缺失、校准、TSTR 最小工作示例。
 5. **Benchmark 监控**：每次代码修改后运行 `pytest tests/test_benchmarks.py -s`，记录分类性能变化。
+   - Benchmark 允许运行 40 分钟，若超过 45 分钟应终止测试。
+   - 内部评估需安装 `autogluon` 以运行 benchmark；用户使用时则无此强制依赖。
 6. **清理与文档**：补 `README`/`docs/` 与示例配置；在CI中加入基本单测。
+7. **参数回归检查**：修改 TabVAE/SUAVE 损失函数等核心逻辑后，务必复核模型类与测试用例的默认参数设置，避免性能意外下降。
 
 ------
 
