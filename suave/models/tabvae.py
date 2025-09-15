@@ -1,9 +1,10 @@
 """Tabular VAE with a classification head (Mode 0 generation).
 
 The implementation follows the high level blueprint described in ``AGENTS.md``.
-It supports continuous inputs with optional missing values and exposes a small
-API used throughout the tests.  The focus is on clarity rather than raw
-performance and only a subset of the full project features are implemented.
+It currently supports **continuous** inputs with optional missing values and
+exposes a compact API used throughout the tests.  The focus is on clarity rather
+than raw performance and only a subset of the full project features (e.g.
+categorical embeddings) are implemented.
 """
 
 from __future__ import annotations
@@ -89,12 +90,12 @@ class Decoder(nn.Module):
 
 
 class Classifier(nn.Module):
-    """Predictor operating on the latent representation ``z``."""
+    """Predictor operating on the latent representation and encoder features."""
 
-    def __init__(self, latent_dim: int, num_classes: int, dropout: float) -> None:
+    def __init__(self, in_dim: int, num_classes: int, dropout: float) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(latent_dim, 128),
+            nn.Linear(in_dim, 128),
             nn.BatchNorm1d(128),
             nn.SiLU(),
             nn.Dropout(dropout),
@@ -105,8 +106,8 @@ class Classifier(nn.Module):
             nn.Linear(64, num_classes),
         )
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return self.net(z)
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return self.net(h)
 
 
 class TabVAEClassifier(nn.Module):
@@ -145,7 +146,8 @@ class TabVAEClassifier(nn.Module):
 
         self.encoder = Encoder(input_dim, latent_dim, dropout)
         self.decoder = Decoder(latent_dim, input_dim, dropout)
-        self.classifier = Classifier(latent_dim, num_classes, dropout)
+        # Classifier consumes latent code concatenated with last encoder layer
+        self.classifier = Classifier(latent_dim + 128, num_classes, dropout)
 
         self.beta_schedule = beta_schedule or AnnealSchedule(0.0, 0.7, 15)
         self.lambda_schedule = lambda_schedule or AnnealSchedule(0.5, 1.0, 15)
@@ -170,7 +172,7 @@ class TabVAEClassifier(nn.Module):
         mu, log_var, h = self.encoder(x, m)
         z = self._reparameterize(mu, log_var)
         recon_mu, recon_log_sigma = self.decoder(z)
-        logits = self.classifier(z)
+        logits = self.classifier(torch.cat([z, h], dim=-1))
         return z, recon_mu, recon_log_sigma, mu, log_var, logits
 
     # ---------------------------------------------------------------- training
