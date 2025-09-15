@@ -1,166 +1,298 @@
-Purpose：本文件为自动化编码代理（如 CODEX 代理）提供可执行的改造蓝图与验收标准。鉴于当前仓库不包含 MIMIC/eICU 原始数据、且已有 pytest tests/test_benchmarks.py -s 可用于分类性能观测，一切改动需先通过 P0 性能守门，确保分类性能不降、并优先查明“性能异常低”的根因。
+# AGENTS.md — SUAVE 重构蓝图（Codex-Ready）
 
-0) Operating Guardrails（硬性约束）
+## 0) 任务目标（一体三用，Mode 0）
 
-P0 性能守门：任何改动前后均需运行：
-  pytest tests/test_benchmarks.py -s
-  将 AUROC/AUPRC/ACC/F1 等关键指标写入 reports/baselines/current.json（改动前的“基线”）与 reports/baselines/candidate.json（改动后），其中基线记录 hard 难度的 y1/y2/y3 三个任务。若候选较基线任一核心指标下降超过 3 个百分点且无标记 ALLOW_REGRESSION=1 环境变量，则 PR 失败。
+- **目标**：以**表格VAE + 分类头**替换/统一现有实现，在**同一潜空间**内完成
+  1. **院内/28天死亡预测**（判别+校准），
+  2. **合成数据生成**（**Mode 0**：生成样本**无缺失**，用于TSTR），
+  3. **潜变量可解释性**（与临床特征相关性热图）。
+- **关键约束**：
+  - **保留主要对外API功能**与**现有benchmark测试**可用性（如 `pytest tests/test_benchmarks.py -s` 能跑通）。
+  - **缺失掩码只用于 Encoder 输入与重构损失的 mask**；**不训练/输出 mask 头**；生成样本**不含缺失**。
+  - 优先保证**训练稳定性**、**可重复性**、**外部验证流程**与**校准评估**落地。
 
-外部验证纯净性（为后续论文准备）：eICU 仅用于外部评估；任何训练/预训练/调参阶段不得使用 eICU（除非特意开展“无监督域适配”附录实验并在 eICU 内再留独立 holdout）。
+------
 
-可复现：固定随机种子（默认 20201021）；保存配置、版本、数据切分与评估输出；所有区间指标使用 bootstrap 95% CI（B=1000，后续可调）。
+## 1) 开工须知（Agent 执行顺序）
 
-缺失与数值稳定：重构/似然仅对观测项计损（partial loss）；所有方差/率参数经 softplus；全局 eps=1e-8。
+1. **扫描测试以锁定公共API**
+   - 解析 `tests/`（尤其 `tests/test_benchmarks.py`）找出**被导入的模块/类/函数名**与**调用签名**。
+   - 建立“**适配层**”：若新实现的签名不同，提供**同名包装**以免破坏测试。
+2. **按本蓝图落库**（见 §2 目录结构与模块职责），**不改动**测试中显式导入路径；必要时在原路径下保留 shim。
+3. **实现 TabVAE+Classifier（Mode 0）**，训练与评测脚手架（见 §3–§6）。
+4. **回归测试**：确保 `pytest -q` 全绿；新增单测覆盖生成无缺失、校准、TSTR 最小工作示例。
+5. **清理与文档**：补 `README`/`docs/` 与示例配置；在CI中加入基本单测。
 
-P0 — 分类性能诊断与稳定（先于一切改造）
+------
 
-目标：找出并修复导致 SUAVE 分类性能异常低的根因，在不引入外部数据前提下，通过现有基准测试稳定提升/守住性能。
+## 2) 目录结构与模块职责（建议）
 
-P0.1 即刻基线捕获
+> 若现有仓库结构不同，请新增以下模块并用**适配层**对齐测试导入。
 
-运行：pytest tests/test_benchmarks.py -s
-把逐折/逐种子指标写入：
-  reports/baselines/current.json（首次运行即为“基线”）
-  reports/figures/P0_learning_curves.png（训练/验证 loss、AUROC/AUPRC 随 epoch 变化）
-  在 reports/md/P0_summary.md 生成可读总结（数据集名、样本量、阳性率、当前指标、种子方差）。
+```
+suave/
+  api/
+    __init__.py
+    model.py                # 适配层：保留旧API名称/签名，内部调用新实现
+  models/
+    __init__.py
+    tabvae.py               # TabVAE 主模型（Encoder/Decoder/Classifier/forward）
+  modules/
+    losses.py               # 重构NLL（混合数据类型）；KL退火；分类CE/加权/focal
+    calibration.py          # Temperature scaling + ECE + reliability plot utils
+  data/
+    schema.py               # 变量模式(连续/二元/多类/计数)与缺失掩码组织；标准化/嵌入
+    preprocessing.py        # 训练/评估一致的预处理与DataModule
+  trainers/
+    train_tabvae.py         # 训练循环/early-stop/日志；保存/加载
+  eval/
+    metrics.py              # AUROC/AUPRC/Brier/NLL/ECE
+    tstr.py                 # TSTR vs TRTR 管线（简化版）
+    interpret.py            # 潜变量与临床特征相关性（Spearman/BH-FDR）
+  cli/
+    train.py                # CLI 入口（fit / evaluate / generate）
+    generate.py
+  utils/
+    seed.py                 # 可重复性设置
+    io.py                   # 模型/配置/标准化器保存与加载
+configs/
+  tabvae_default.yaml       # 超参与数据schema示例（无时序）
+tests/
+  test_tabvae_minimal.py    # 新增：无缺失生成、校准、TSTR 冒烟测试
+```
 
-P0.2 故障树（最可能根因 → 探针 → 修复）
+------
 
-逐条执行与记录；每完成一条，重新跑基准并追加到 P0_summary.md。
+## 3) 模型规格（TabVAE+Classifier，Mode 0）
 
-A. 任务损失被重构/KL“淹没”
-  探针：逐 epoch 打印/记录三类损失占比：L_cls : L_recon : beta*KL；把 beta_kl、lambda_recon 暂时设低（如 beta_kl=0.1, lambda_recon=0.5）。
-  修复：
-    启用 KL 退火（线性/循环；10–30 epoch 拉满）；
-    引入 free bits（每潜维 ≥ 0.5 nat）；
-    将早期训练的 lambda_cls 设为 2.0、随后余弦退火到 1.0。
+### 3.1 输入与Schema
 
-B. 损失函数/激活不匹配
-  探针：检查分类头是否 BCEWithLogitsLoss + 未手动 sigmoid；多标签 vs 单标签设置是否一致；正例比例与 pos_weight 是否传入。
-  修复：统一为 BCEWithLogitsLoss(pos_weight=...)；若已做 sigmoid，改用 BCELoss 或移除 sigmoid。对严重不平衡，考虑 FocalLoss(γ=2.0)（作为对照试验）。
+- **变量类型**：
+  - 连续：标准化（Robust/StandardScaler）
+  - 二元：{0,1}
+  - 多类：用**Embedding**（避免高维 one-hot）
+  - 计数（可选）：Poisson/NB
+- **缺失处理**：
+  - 训练：保留**缺失指示器 mask**，与特征拼接给 Encoder；
+  - 重构损失：对缺失位置**mask掉**；
+  - **不训练任何 mask 输出头**。
+- **拼接**：连续 + 二元 + 多类嵌入 → 向量 `x`；另有 `m`（同维mask）。
 
-C. 评价与阈值问题
-  探针：AUPRC 是否基于真实阳性率计算；阈值 0.5 是否合理。
-  修复：报告 ROC/AUPRC 为主；阈值型指标（F1/精召）在验证集上调阈，并在报告中注明。
+### 3.2 Encoder（MLP）
 
-D. 数据切分/泄漏
-  探针：确认基准测试中 train/val/test 是否 按标签分层、不交叉患者；任何标准化/缺失填补是否在训练集拟合、在验证/测试集仅变换。
-  修复：将 StandardScaler/Imputer 放入 Pipeline 并仅在训练集 fit；保证随机种子与分层。
+- 结构：MLP 256→256→128（ReLU/SiLU + BatchNorm + Dropout 0.3）；
+- 输出：`mu(x, m), log_sigma(x, m)` → 采样 `z ~ N(mu, diag(sigma^2))`；
+- 推荐潜维 **K=32**（网格扫 16/32/64）。
 
-E. 优化/正则超参
-  探针：LR 是否过高/过低（观测训练损失震荡或停滞）；Dropout/Weight decay 是否过强。
-  修复：
-    开启 OneCycleLR（max_lr=1e-3 起步）；
-    Dropout 先降到 p=0.1–0.2；
-    Weight decay 1e-5 起步；
-    批大小 128–256；混合精度开启但监控数值稳定。
+### 3.3 Decoder（MLP，多头）
 
-F. 梯度/连通性
-  探针：在分类头与编码器关键层注册 backward hook，验证 grad_norm>0；检查是否梯度在 KL 或重构分支被“截断”。
-  修复：确保分类头取自 潜空间 z（或其线性投影）而非重构路径的中间层；必要时在 z 上加一层 LayerNorm。
+- 共享层后**按变量类型分头**：
+  - 连续：Gaussian（`mu, log_sigma`）或 Huber 回归（可选）
+  - 二元：Bernoulli（`logit`）
+  - 多类：Categorical（`logits`）
+  - 计数：Poisson / NB（可选）
+- **Mode 0 生成**：仅从 `z` 解码**值**，**不产生缺失**。
 
-G. 训练时增强泄漏到验证
-  探针：确认任何扰动/掩码增强只用于训练，不作用于验证/测试。
-  修复：把增强封装在 train=True 的分支中。
+### 3.4 分类头（Predictor）
 
-H. 类别不平衡采样
-  探针：统计阳性率，观测小批中阳性是否长期稀缺。
-  修复：WeightedRandomSampler 或 BalancedBatchSampler；与 pos_weight 二选一或联合，观察稳定性。
+- 输入：`[z, encoder_last]` 或 `z`；
+- 结构：MLP 128→64（Dropout 0.3） → `p(y=1)`；
+- **温度缩放**：验证集拟合 `T`（冻结参数），推理用 `logits/T`。
 
-I. 随机标签实验（泄漏自检）
-  探针：将训练标签随机打乱；若 AUROC 明显高于 0.5，则高度可疑（泄漏或评估缺陷）。
-  修复：逐条排查特征工程与评估流程，直到随机标签 AUROC≈0.5。
+### 3.5 损失与训练
 
-P0.3 最低验收线（P0 Gate）
-  重新运行基准测试，任一核心指标不低于当前基线的 -3pp；
-  生成对比报告：reports/md/P0_summary.md（含改动项、学习曲线、损失占比、最终指标与 CI）。
-  通过后，方可进入后续 Epics（A–G）。
+- **ELBO**：
+  - 重构NLL = 各变量类型的 log-likelihood 求和；**按mask屏蔽缺失项**；
+  - KL：对 `q(z|x)` 与 `N(0, I)`；**KL退火**（前10–20 epoch线性从0→β=0.7）；
+  - 可选：对重构项按**变量标准差逆**加权。
+- **分类损失**：`CE(y, p)`（可加 `pos_weight` 或 focal γ=2）。
+- **总损失**：`L = (NLL + β·KL) + λ·CE`（推荐 λ 从 0.5→1.0 退火）。
+- 训练细节：AdamW(lr=3e-4, wd=1e-4), batch=256, epoch=100, early-stop(patience=10), grad-clip=1.0。
 
-后续 Epics（在 P0 通过后依次推进）
-  以下与此前规划保持一致，但全程受 P0 性能守门 约束；每个 Epic 完成后必须再次运行 pytest tests/test_benchmarks.py -s 并与 reports/baselines/current.json 对比; 每个Epic完成后必须检查下一个Epic，并完善下一个Epic的技术方案。
+------
 
-  Epic A — 异质似然解码器 + 自动 Schema（Heterogeneous Likelihoods）
-    目标：为每列变量选择匹配的分布（Gaussian/LogNormal/Bernoulli/Categorical/Poisson/NegBin/ZINB/Beta/Ordinal），重构用 NLL、生成用采样；自动推断类型并允许 metadata.yaml 覆盖。
-    新增模块：suave/schema/auto_schema.py、suave/models/hetero_decoder.py、suave/losses/hetero_nll.py。
-    训练：partial NLL（仅观测项）、softplus 保证参数正值；
-    生成：新增 model.sample(n, cond=None, seed=42)。
-    验收：单测覆盖类型识别/数值稳定/采样出表；不得降低 P0 指标。
+## 4) 生成（Generation）API — 仅 Mode 0
 
-  Epic B — 半监督（M2 + 一致性/伪标签；仅用 MIMIC 内部未标注）
-    接口：semisup 配置块；unlabeled_ratio=2.0、pseudo_thresh=0.9、lambda_cons=0.5 起步。
-    实现：有标签优化 ELBO+CE；无标签优化 E_{q(y|x)}[ELBO]-α·H[q(y|x)] + 一致性。
-    验收：不触碰 eICU；P0 指标不降，且建议报告稳定性（多种子平均±SD）。
+- **生成要求**：输出**无缺失**表格样本，列名/类型与训练前处理一致；可返回 `pandas.DataFrame`。
 
-  Epic C — 条件生成（类/站点条件，便于 TSTR）
-    解码输入拼接 [z, cond_embed] 或类条件先验 p(z|y)；
-    cond={"y":0/1, "site":"mimic"}；
-    单测：不同 cond 生成样本的分布差异（KS）显著。
+- **API 约定**（适配旧接口）：
 
-  Epic D — 域鲁棒（可选，作为附录）
-    DANN/MMD/HSIC 放在 z 上；如用 eICU 无标签，必须另留 eICU holdout；标注为“UA 附录”。
-    验收：附录实验不影响主文外部验证纯净性。
+  ```python
+  model.generate(n_samples: int, conditional: Optional[Dict[str, Any]] = None, seed: Optional[int] = None) -> DataFrame
+  ```
 
-  Epic E — 评估套件（校准/TSTR/外部/隐私）
-    校准：temperature_scale()、calibration_report()；
-    TSTR/TRTR：统一管线与 CLI；
-    外部：分中心/亚群森林图；
-    隐私：最近邻重合率、成员推断基线；
-    验收：生成 reports/figures/ 与 reports/tables/ 资产；P0 指标不降。
+  - `conditional=None`：从标准正态或**后验聚合先验**采样 `z`；
+  - 若传入 `conditional`（如 `{label: 1}`），采用**类条件**（CVAE小改动，若保持纯VAE则忽略并记录warning）。
 
-  Epic F — 可解释与潜表型
-    latent_report()：潜变量—临床特征相关/回归（FDR 校正）、UMAP、聚类稳定性（NMI/ARI）。
-    验收：报告生成且不影响 P0。
+- **确保**：`assert not df.isna().any().any()`；必要时对超出物理学意义范围的变量进行**后处理裁剪**（由 `schema` 提供上下限）。
 
-  Epic G — 文档/测试/打包
-    扩充 README.md 示例；新增/完善单测（覆盖率≥80%）；CHANGELOG.md 记录变更。
+------
 
-工程与接口规范（更新版）
-  训练日志：保存到 reports/diagnostics/（csv）；至少含 epoch, L_total, L_cls, L_recon, KL, auroc, auprc。
-  随机性：所有 DataLoader/NumPy/PyTorch 种子统一自 config.seed。
-  评估：默认 bootstrap B=1000 输出均值与 95% CI。
-  命令：
-    # 基线对比（P0 必做）
-    pytest tests/test_benchmarks.py -s
-    # 生成与校准示例（在相关 Epic 完成后）
-    python -m suave.cli.tstr --synthetic syn.parquet --real real.parquet
-    python -m suave.cli.calibrate --split val --method temperature
+## 5) 评测与外部验证
 
-  数值稳定：所有对数/方差参数用 softplus 与 clamp(min=1e-6)；严禁在概率上取 log(0)。
-  缺失：训练时 NLL 仅对观测项；编码器可拼接缺失掩码。
+### 5.1 分类与校准
 
-性能守门实现细节（代理须创建）
-  脚本：tools/compare_baselines.py
-    输入：reports/baselines/current.json 与 reports/baselines/candidate.json
-    规则：若 (AUROC,AUPRC) 任一下降 > 0.03，则返回非零退出码。
-  Pytest 插桩：在 tests/test_benchmarks.py 末尾追加写盘逻辑（不改变现有断言），并记录 hard 难度的三项任务指标：
-    若 reports/baselines/current.json 不存在，保存当前结果为 current.json；
-    若存在，保存为 candidate.json 并调用 tools/compare_baselines.py。
-  CI 友好：允许通过环境变量 ALLOW_REGRESSION=1 暂时放行（需在 PR 描述里说明原因）。
+- 指标：**AUROC、AUPRC、Brier、NLL、ECE（10–20分箱）**；
+- 报告**温度缩放**前后 ECE/NLL 改善；提供**可靠性图**绘制工具（存 PNG）。
 
-  配置起点（保持不变动你现有接口的同时，利于 P0 排查）
-    training:
-      seed: 20201021
-      batch_size: 256
-      lr: 1e-3
-      weight_decay: 1e-5
-      max_epochs: 150
-      onecycle: true
-    model:
-      latent_dim: 32
-      beta_kl: 0.5         # 开启 KL 退火；free_bits=0.5 nat/dim
-      lambda_recon: 1.0
-      lambda_cls: 1.0
-    eval:
-      bootstraps: 1000
-      metrics: [auroc, auprc, brier]
+### 5.2 TSTR（合成训练→真实测试） vs TRTR
 
-验收清单（每个 PR 必填勾选项）
-  已运行 pytest tests/test_benchmarks.py -s 并更新 reports/baselines/*.json；
-  与基线比较未触发性能回退门槛（或已说明并设置 ALLOW_REGRESSION=1）；
-  若修改了损失/优化/评估逻辑，提供 reports/figures/P0_learning_curves.png 与 P0_summary.md；
-  新增/修改代码有单测；
-  文档（README/CHANGELOG）已更新相关用法或变更。
+- `eval/tstr.py`：
+  - 训练：LogReg / XGBoost / MLP（三者至少一类）
+  - 测试：真实 held-out 测试集
+  - 报告：AUROC/AUPRC 置信区间与 Δ（TSTR − TRTR）
+  - **断言**：TSTR 训练数据**无缺失**，其统计分布与真实训练集**基本匹配**（KS/MMD 报告）。
 
-Maintainers’ Notes
-  本文件优先级：P0 > 其他 Epics。只有当 P0 守门通过后，代理才可继续实现异质似然、半监督等功能。
-  若现有目录结构与文中建议路径不一致，代理应在 reports/repo_map.md 中说明适配方案，但不得删改 P0 守门机制。
+### 5.3 潜变量解释
+
+- `eval/interpret.py`：
+  - 相关性：Spearman / 点二列 / MI，**BH-FDR** 多重校正；
+  - 输出：相关性矩阵与**热图**（PNG/CSV）；
+  - 可选：UMAP/t-SNE 对 `z` 可视化（着色 `y` 与关键临床特征）。
+
+------
+
+## 6) 对外API与适配层（必须保留/兼容）
+
+> 智能体需**先读取测试**以确定**真实API**；以下为**功能级**对齐清单（名称以现有测试为准）：
+
+- **模型构造**：`Model(**config)` 或 `get_model(config)`
+- **训练**：`fit(X_train, y_train, X_val=None, y_val=None, **kwargs)`
+- **推理**：`predict_proba(X) -> np.ndarray`，`predict(X, threshold=0.5)`
+- **生成**：`generate(n_samples, conditional=None)`（**无缺失**）
+- **潜变量**：`latent(X) -> np.ndarray`
+- **持久化**：`save(path)` / `load(path)`（包含标准化器/温度缩放参数）
+- **基线/评估入口**：若测试中有 `run_benchmarks()` / `evaluate()` 等，需保持原路径与签名；内部调用新实现。
+
+> 若旧实现存在 `suave.api.SUAVEModel` 之类对外类，请保留同名类，内部持有 `TabVAE` 实例并**完全转发**。
+
+------
+
+## 7) 新增/调整测试（在不破坏既有测试前提下）
+
+1. `tests/test_tabvae_minimal.py`（新增）
+   - **生成无缺失**：训练极小数据后 `df_gen = model.generate(256)`，断言 `df_gen.isna().sum().sum()==0`。
+   - **校准**：温度缩放前后 ECE 下降或 NLL 改善（容忍小幅波动，断言“非劣”）。
+   - **TSTR冒烟**：用 `generate` 合成训练集 vs TRTR 对比，断言流程可跑、指标可产出。
+2. 确保 `pytest tests/test_benchmarks.py -s` **不需改动**即可通过。若其导入路径与签名发生冲突，**仅在实现端加适配层**，**不得改测试**。
+
+------
+
+## 8) 训练与复现实用脚本（CLI）
+
+- `cli/train.py`
+  - 接受 `--config configs/tabvae_default.yaml`；
+  - 关键参数：latent_dim、β退火、λ退火、class_weight、early_stop；
+  - 保存：`artifacts/` 下 `model.pt`、`scaler.pkl`、`tempscaler.pkl`、`config.yaml`、`metrics.json`。
+- `cli/generate.py`
+  - 载入模型，输出 `generated.csv`；**断言无缺失**；打印基本统计。
+
+------
+
+## 9) 配置样例（`configs/tabvae_default.yaml` 摘要）
+
+```yaml
+model:
+  type: TabVAEClassifier
+  latent_dim: 32
+  encoder: [256, 256, 128]
+  decoder: [256, 256, 128]
+  clf_head: [128, 64]
+  dropout: 0.3
+  beta_anneal: {start: 0.0, end: 0.7, epochs: 15}
+  lambda_anneal: {start: 0.5, end: 1.0, epochs: 15}
+  loss:
+    recon_weighting: "inv_std"   # or "uniform"
+    focal: {use: false, gamma: 2.0}
+train:
+  optimizer: {name: adamw, lr: 3e-4, weight_decay: 1e-4}
+  batch_size: 256
+  max_epochs: 100
+  early_stop: {patience: 10, metric: "val_auprc", mode: "max"}
+data:
+  schema: "configs/schema_example.yaml"   # 定义每列类型、上下限、类别词典
+  target: "in_hospital_mortality"         # 或 28d_mortality
+  imputation: "simple"                    # 训练时仍保留缺失指示器
+eval:
+  calibration: {ece_bins: 15, temperature_scaling: true}
+  tstr: {estimators: ["logreg", "xgboost"]}
+```
+
+------
+
+## 10) 代码风格与性能预算
+
+- **风格**：PEP8 + type hints；模块/函数含docstring；关键数学处写公式；
+- **日志**：CSV/JSON日志最简实现，TensorBoard 可选；
+- **随机性**：统一 `utils/seed.py` 设置 `numpy/torch/random`；
+- **性能**：单卡/CPU均可训；单元测试在10分钟内完成；生成端内存友好（分批）。
+
+------
+
+## 11) 迁移与兼容（必做）
+
+- **保留旧路径/名称**：在旧模块下保留**同名类/函数**，内部仅 `from suave.models.tabvae import TabVAEClassifier as _Impl` 并转发。
+- **数据前处理对齐**：若旧代码有标准化/编码器，务必在 `io.py` 一并持久化，`load()` 时恢复**完全一致**的前处理状态。
+- **弃用标记**：对确需移除的内部函数，加 `@deprecated` 注解并在下个版本删除；但**不得破坏测试**。
+
+------
+
+## 12) 完成判定（Acceptance）
+
+- 所有现有测试 **不修改** 的前提下通过（含 `tests/test_benchmarks.py -s`）。
+- 新增测试通过（无缺失生成、校准、TSTR冒烟）。
+- `generate(n)` 返回**无缺失**样本（Mode 0）。
+- `predict_proba`/`predict`、`fit`、`save/load`、`latent` 等**主要API**可用。
+- 产出 `metrics.json` 含：AUROC/AUPRC/Brier/NLL/ECE（校准前后）。
+
+------
+
+## 13) 风险与回退
+
+- **KL塌缩** → 开启 KL 退火 / free-bits；
+- **重构项主导** → 重构权重归一化；
+- **类不平衡** → `pos_weight` 或 focal；
+- **生成值异常** → 按 `schema` 裁剪；
+- **外检性能低/过拟合** → 温度缩放 + 仅阈值再校准（不fine-tune）；
+- **接口不匹配** → 以**适配层**优先，**不改测试**。
+
+------
+
+## 14) 提交与CI
+
+- 提交信息规范：`feat(models): add TabVAEClassifier (mode-0 generation)`
+- 开一个最小CI：`pytest -q` + flake8（或 ruff）+ mypy（非阻塞）。
+
+------
+
+### 附：关键函数伪代码（供实现对照）
+
+```python
+# forward(x, mask):
+# x: concatenated numeric/binary/embeddings; mask: 1=observed, 0=missing
+mu, log_sigma = encoder(torch.cat([x, mask], dim=-1))
+z = reparameterize(mu, log_sigma)
+
+# decoder outputs per variable type
+recon_params = decoder(z)  # dict: {col_name: params}
+nll = 0.0
+for col in columns:
+    lp = log_likelihood(recon_params[col], x[col], var_type[col])
+    nll += (-lp * mask[col]).sum() / mask[col].sum().clamp_min(1.0)
+
+kl = kl_normal(mu, log_sigma)  # batch-wise mean
+logits = clf_head(torch.cat([z, encoder_last], dim=-1))
+ce = weighted_ce(logits, y)
+
+loss = (nll + beta*kl) + lambda_*ce
+# generate(n):
+z = torch.randn(n, latent_dim, device=device)
+recon_params = decoder(z)
+x_gen = sample_from_params(recon_params, var_types, schema)
+assert not has_nan(x_gen)
+return to_dataframe(x_gen, schema)
+```
+
+------
+
+**到此为止，Codex 请按本蓝图逐步实施、加适配层确保测试不变、提交可运行代码与最小文档。**
