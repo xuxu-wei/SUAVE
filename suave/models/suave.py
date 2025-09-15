@@ -29,7 +29,6 @@ from ..modules.losses import (
     kl_divergence,
     linear_anneal,
     maximum_mean_discrepancy,
-
 )
 
 
