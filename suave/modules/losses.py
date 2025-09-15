@@ -93,6 +93,33 @@ def kl_divergence(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     return -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
 
 
+def kl_divergence_between_normals(
+    mu_q: torch.Tensor,
+    logvar_q: torch.Tensor,
+    mu_p: torch.Tensor,
+    logvar_p: torch.Tensor,
+) -> torch.Tensor:
+    """KL divergence ``KL(q || p)`` for diagonal Gaussians.
+
+    Parameters
+    ----------
+    mu_q, logvar_q:
+        Mean and log-variance of the approximate posterior ``q(z|x, y)``.
+    mu_p, logvar_p:
+        Mean and log-variance of the conditional prior ``p(z|y)``.
+    """
+
+    var_q = logvar_q.exp()
+    var_p = logvar_p.exp()
+    kl = 0.5 * (
+        (var_q / var_p)
+        + ((mu_q - mu_p) ** 2) / var_p
+        - 1
+        + (logvar_p - logvar_q)
+    )
+    return kl.sum(dim=1).mean()
+
+
 def linear_anneal(step: int, schedule: "AnnealSchedule") -> float:
     """Linearly anneal ``schedule.start`` to ``schedule.end`` over ``schedule.epochs``."""
 
