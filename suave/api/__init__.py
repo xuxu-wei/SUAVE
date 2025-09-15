@@ -1,4 +1,4 @@
-"""Public facing API for the TabVAE model."""
+"""Public facing API for the TabVAE model (exported as ``SUAVE``)."""
 
 from .model import TabVAEClassifier
 

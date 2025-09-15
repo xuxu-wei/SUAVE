@@ -1,10 +1,16 @@
-"""Tabular VAE with a classification head (Mode 0 generation).
+"""SUAVE TabVAE model.
 
-The implementation follows the high level blueprint described in ``AGENTS.md``.
-It currently supports **continuous** inputs with optional missing values and
-exposes a compact API used throughout the tests.  The focus is on clarity rather
-than raw performance and only a subset of the full project features (e.g.
-categorical embeddings) are implemented.
+This module implements a tabular VAE with an attached classifier where the
+latent variable ``z`` acts as a single information hub.  By routing prediction,
+missing-free sample synthesis and latent-factor interpretation through ``z`` we
+provide a unified interface for downstream clinical workflows.  The design
+follows a *probability first* philosophy: mixed data types, missingness and
+class imbalance are handled with explicit likelihood terms rather than ad-hoc
+preprocessing.  The latent-variable view offers compact and interpretable
+representations that are especially useful in clinical research.
+
+Only continuous variables are implemented here; categorical/count support can be
+added in a backwards compatible fashion.
 """
 
 from __future__ import annotations
@@ -111,7 +117,16 @@ class Classifier(nn.Module):
 
 
 class TabVAEClassifier(nn.Module):
-    """Tabular VAE with an attached classifier.
+    """Unified model for prediction, generation and interpretation.
+
+    The model exposes a single latent representation ``z`` which serves as the
+    meeting point for all three tasks.  A classifier operates on ``z`` (and the
+    last encoder layer) to provide predictions, the decoder reconstructs inputs
+    to enable missing-free synthetic data generation, and ``z`` can be probed for
+    correlations with clinical covariates.
+
+    This class is exported from :mod:`suave` as ``SUAVE`` and supersedes the
+    legacy implementation now available via ``suave_old_version``.
 
     Parameters
     ----------

@@ -1,5 +1,7 @@
+# ruff: noqa
 import os, sys, json
 import inspect
+import warnings
 from pathlib import Path
 from tqdm import tqdm
 from tqdm.notebook import tqdm_notebook
@@ -555,26 +557,26 @@ class MultiTaskPredictor(nn.Module, ResetMixin):
         return outputs
 
 
-class SUAVE(nn.Module, ResetMixin):
-    """
-    Supervised and Unified Analysis of Variational Embeddings (SUAVE).
+class suave_old_version(nn.Module, ResetMixin):
+    """Deprecated SUAVE implementation.
 
-    This model combines a Variational Autoencoder (VAE) for dimensionality reduction
-    with a Multi-Task Predictor for performing parallel predictive tasks.
+    This legacy model combines a Variational Autoencoder (VAE) for dimensionality
+    reduction with a Multi-Task Predictor.  It is retained for backward
+    compatibility and will be removed in a future release.
 
     Parameters
     ----------
     input_dim : int
         Dimension of the input data.
-        
+
     task_classes : list of int
         A list containing the number of classes for each task. For binary tasks, use 2.
-        
+
     task_strategy : str, optional, default='parallel'
         Strategy for modeling tasks:
         - "parallel" or "p": Tasks are modeled independently.
         - "sequential" or "s": Each task depends on the previous task's output.
-        
+
     layer_strategy : str, optional, default='linear'
         Strategy for scaling hidden layer dimensions in both the VAE and Multi-Task Predictor:
         - "constant" or "c": All hidden layers have the same width.
@@ -728,7 +730,12 @@ class SUAVE(nn.Module, ResetMixin):
                  lr_scheduler_patience=None,
                  use_batch_norm=True, 
                  ):
-        super(SUAVE, self).__init__()
+        super(suave_old_version, self).__init__()
+        warnings.warn(
+            "suave_old_version is deprecated and will be removed in a future release. "
+            "Use TabVAEClassifier (exposed as SUAVE) instead.",
+            DeprecationWarning,
+        )
         self.vae = VAE(input_dim, depth=vae_depth, hidden_dim=vae_hidden_dim, strategy=layer_strategy, # VAE strcture
                        dropout_rate=vae_dropout_rate, latent_dim=latent_dim, use_batch_norm=use_batch_norm # normalization
                        )
@@ -973,7 +980,7 @@ class SUAVE(nn.Module, ResetMixin):
             plot_path=None,
             save_weights_path=None):
         """
-        Train the SUAVE model on provided data.
+        Train the legacy SUAVE model on provided data.
 
         Parameters
         ----------
@@ -1030,8 +1037,8 @@ class SUAVE(nn.Module, ResetMixin):
 
         Returns
         -------
-        self : SUAVE
-            The fitted SUAVE model instance.
+        self : suave_old_version
+            The fitted model instance.
 
         Notes
         -----

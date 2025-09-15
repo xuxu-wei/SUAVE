@@ -1,8 +1,8 @@
-"""Compatibility layer exposing the :class:`TabVAEClassifier`.
+"""Compatibility layer exposing :class:`TabVAEClassifier` as ``SUAVE``.
 
-The intent of this module is to keep the external API stable while
-internally delegating to the new implementation located in
-:mod:`suave.models.tabvae`.
+The project now uses the TabVAE-based classifier as the primary model.  The
+previous architecture is retained as :func:`suave_old_version` for legacy
+purposes and will be dropped in a future release.
 """
 
 from __future__ import annotations
