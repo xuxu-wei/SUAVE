@@ -32,4 +32,7 @@ def test_generation_calibration_tstr():
     assert ece_after <= ece_before + 0.05
 
     auc = tstr_auc(model, X, y, X, y)
-    assert 0.0 <= auc <= 1.0
+    auc_svm = tstr_auc(model, X, y, X, y, estimator="svm")
+    auc_knn = tstr_auc(model, X, y, X, y, estimator="knn")
+    for score in [auc, auc_svm, auc_knn]:
+        assert 0.0 <= score <= 1.0
