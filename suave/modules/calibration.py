@@ -65,3 +65,39 @@ def expected_calibration_error(probs: np.ndarray, labels: np.ndarray, n_bins: in
         conf = probs[mask].mean()
         ece += np.abs(acc - conf) * (mask.sum() / len(probs))
     return float(ece)
+
+
+def calibration_curve(
+    probs: np.ndarray, labels: np.ndarray, n_bins: int = 10
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return data necessary for plotting a calibration curve.
+
+    Parameters
+    ----------
+    probs:
+        Predicted probabilities for the positive class.
+    labels:
+        Ground truth binary labels.
+    n_bins:
+        Number of equal-width bins over ``[0, 1]``.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray]
+        Bin centers, empirical accuracy per bin and mean predicted probability
+        per bin.  Bins with no samples receive ``nan`` values.
+    """
+
+    probs = np.asarray(probs)
+    labels = np.asarray(labels)
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    inds = np.digitize(probs, bins) - 1
+    bin_centers = (bins[:-1] + bins[1:]) / 2.0
+    acc = np.full(n_bins, np.nan)
+    conf = np.full(n_bins, np.nan)
+    for i in range(n_bins):
+        mask = inds == i
+        if np.any(mask):
+            acc[i] = labels[mask].mean()
+            conf[i] = probs[mask].mean()
+    return bin_centers, acc, conf

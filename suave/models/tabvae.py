@@ -131,7 +131,7 @@ class TabVAEClassifier(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        latent_dim: int = 32,
+        latent_dim: int = 8,
         num_classes: int = 2,
         dropout: float = 0.3,
         beta_schedule: AnnealSchedule | None = None,
@@ -153,6 +153,8 @@ class TabVAEClassifier(nn.Module):
         self.lambda_schedule = lambda_schedule or AnnealSchedule(0.5, 1.0, 15)
 
         self.to(self.device)
+        self.class_means: torch.Tensor | None = None
+        self.class_priors: torch.Tensor | None = None
 
     # ------------------------------------------------------------------ utils
     @staticmethod
@@ -207,6 +209,20 @@ class TabVAEClassifier(nn.Module):
             loss.backward()
             nn.utils.clip_grad_norm_(self.parameters(), 1.0)
             opt.step()
+        with torch.no_grad():
+            z, _, _, _, _, _ = self.forward(X_t, mask)
+            means = []
+            priors = []
+            for c in range(self.num_classes):
+                m_c = y_t == c
+                if m_c.any():
+                    means.append(z[m_c].mean(dim=0))
+                    priors.append(m_c.float().mean())
+                else:  # pragma: no cover
+                    means.append(torch.zeros(self.latent_dim, device=self.device))
+                    priors.append(torch.tensor(0.0, device=self.device))
+            self.class_means = torch.stack(means)
+            self.class_priors = torch.stack(priors)
         return self
 
     # --------------------------------------------------------------- inference
@@ -226,24 +242,68 @@ class TabVAEClassifier(nn.Module):
     def predict(self, X: np.ndarray) -> np.ndarray:
         return self.predict_proba(X).argmax(axis=1)
 
+    def latent(self, X: np.ndarray) -> np.ndarray:
+        """Return latent representation for ``X``."""
+        self.eval()
+        with torch.no_grad():
+            X_t = torch.as_tensor(X, dtype=torch.float32, device=self.device)
+            mask = torch.isfinite(X_t).float()
+            X_t = torch.nan_to_num(X_t, nan=0.0)
+            z, _, _, _, _, _ = self.forward(X_t, mask)
+        return z.cpu().numpy()
+
     # --------------------------------------------------------------- generation
     def generate(
         self,
         n_samples: int,
-        conditional: Optional[dict[str, float]] = None,
+        conditional: Optional[dict[str, np.ndarray | int | float]] = None,
         seed: Optional[int] = None,
     ) -> pd.DataFrame:
-        """Generate ``n_samples`` synthetic rows (mode 0: no missing values)."""
+        """Generate ``n_samples`` synthetic rows.
+
+        Parameters
+        ----------
+        n_samples:
+            Number of rows to generate.
+        conditional:
+            Optional dictionary specifying desired labels. Currently only the
+            key ``"y"`` is recognised.  The value can be a scalar or an array of
+            length ``n_samples``.
+        seed:
+            Random seed for reproducibility.
+        """
+
+        if self.class_means is None or self.class_priors is None:
+            raise RuntimeError("Model must be fitted before generation")
 
         rng = np.random.default_rng(seed)
+        if conditional and "y" in conditional:
+            y_val = conditional["y"]
+            if np.isscalar(y_val):
+                from typing import cast
+
+                labels = np.full(n_samples, int(cast(float, y_val)))
+            else:
+                labels = np.asarray(y_val).astype(int)
+                if labels.size != n_samples:
+                    labels = np.resize(labels, n_samples)
+        else:
+            probs = self.class_priors.cpu().numpy()
+            labels = rng.choice(
+                len(probs), size=n_samples, p=probs / probs.sum()
+            )
+
+        labels_t = torch.as_tensor(labels, device=self.class_means.device)
+        means = self.class_means[labels_t]
         z = torch.from_numpy(rng.standard_normal((n_samples, self.latent_dim))).float()
-        z = z.to(self.device)
+        z = z.to(self.device) + means
         with torch.no_grad():
             mu, log_sigma = self.decoder(z)
             sigma = torch.exp(log_sigma)
             x = mu + sigma * torch.randn_like(mu)
         cols = [f"x{i}" for i in range(self.input_dim)]
         df = pd.DataFrame(x.cpu().numpy(), columns=cols)
+        df["y"] = labels
         assert not df.isna().any().any()
         return df
 
