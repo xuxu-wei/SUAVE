@@ -1,6 +1,15 @@
+"""Tabular VAE with a classification head (Mode 0 generation).
+
+The implementation follows the high level blueprint described in ``AGENTS.md``.
+It supports continuous inputs with optional missing values and exposes a small
+API used throughout the tests.  The focus is on clarity rather than raw
+performance and only a subset of the full project features are implemented.
+"""
+
 from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -8,58 +17,124 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..modules.losses import gaussian_nll, kl_divergence, linear_anneal
+
+
+@dataclass
+class AnnealSchedule:
+    """Linear weight schedule used for KL and classification terms."""
+
+    start: float
+    end: float
+    epochs: int
+
 
 class Encoder(nn.Module):
-    """Simple MLP encoder producing mean and log-variance."""
+    """MLP encoder producing ``mu`` and ``log_var``.
 
-    def __init__(self, input_dim: int, latent_dim: int) -> None:
+    The encoder consumes the concatenation of the observed values ``x`` and a
+    binary mask ``m`` that indicates which entries are present (1=observed).
+    Architecture: ``(2*D) -> 256 -> 256 -> 128`` with SiLU activations,
+    batch normalisation and dropout.
+    """
+
+    def __init__(self, input_dim: int, latent_dim: int, dropout: float) -> None:
         super().__init__()
-        self.fc = nn.Linear(input_dim, latent_dim)
-        self.mu = nn.Linear(latent_dim, latent_dim)
-        self.logvar = nn.Linear(latent_dim, latent_dim)
+        in_dim = input_dim * 2
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 256),
+            nn.BatchNorm1d(256),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+        )
+        self.mu = nn.Linear(128, latent_dim)
+        self.log_var = nn.Linear(128, latent_dim)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        h = torch.relu(self.fc(x))
-        return self.mu(h), self.logvar(h)
+    def forward(self, x: torch.Tensor, m: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        h = self.net(torch.cat([x, m], dim=-1))
+        return self.mu(h), self.log_var(h), h
 
 
 class Decoder(nn.Module):
-    """Simple MLP decoder reconstructing the input."""
+    """Shared decoder with a Gaussian head for continuous variables."""
 
-    def __init__(self, latent_dim: int, output_dim: int) -> None:
+    def __init__(self, latent_dim: int, output_dim: int, dropout: float) -> None:
         super().__init__()
-        self.fc = nn.Linear(latent_dim, latent_dim)
-        self.out = nn.Linear(latent_dim, output_dim)
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 256),
+            nn.BatchNorm1d(256),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+        )
+        self.mu = nn.Linear(128, output_dim)
+        self.log_sigma = nn.Linear(128, output_dim)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        h = torch.relu(self.fc(z))
-        return self.out(h)
+    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = self.net(z)
+        return self.mu(h), self.log_sigma(h)
 
 
 class Classifier(nn.Module):
-    """Linear classifier on top of latent variables."""
+    """Predictor operating on the latent representation ``z``."""
 
-    def __init__(self, latent_dim: int, num_classes: int) -> None:
+    def __init__(self, latent_dim: int, num_classes: int, dropout: float) -> None:
         super().__init__()
-        self.fc = nn.Linear(latent_dim, num_classes)
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, num_classes),
+        )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return self.fc(z)
+        return self.net(z)
 
 
 class TabVAEClassifier(nn.Module):
-    """A lightweight VAE with an attached classification head.
+    """Tabular VAE with an attached classifier.
 
-    The implementation is intentionally small to serve as a stand-in for the
-    full model described in the project blueprint. It supports basic fitting,
-    prediction and data generation functionality required by the tests.
+    Parameters
+    ----------
+    input_dim:
+        Number of input features.
+    latent_dim:
+        Dimensionality of the latent space (default: 32).
+    num_classes:
+        Number of target classes (default: 2).
+    dropout:
+        Dropout rate for all MLPs (default: 0.3).
+    beta_schedule, lambda_schedule:
+        Linear schedules controlling the weight of the KL and classification
+        terms during optimisation.
     """
 
     def __init__(
         self,
         input_dim: int,
-        latent_dim: int = 8,
+        latent_dim: int = 32,
         num_classes: int = 2,
+        dropout: float = 0.3,
+        beta_schedule: AnnealSchedule | None = None,
+        lambda_schedule: AnnealSchedule | None = None,
         device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
@@ -68,53 +143,78 @@ class TabVAEClassifier(nn.Module):
         self.num_classes = num_classes
         self.device = device or torch.device("cpu")
 
-        self.encoder = Encoder(input_dim, latent_dim)
-        self.decoder = Decoder(latent_dim, input_dim)
-        self.classifier = Classifier(latent_dim, num_classes)
+        self.encoder = Encoder(input_dim, latent_dim, dropout)
+        self.decoder = Decoder(latent_dim, input_dim, dropout)
+        self.classifier = Classifier(latent_dim, num_classes, dropout)
+
+        self.beta_schedule = beta_schedule or AnnealSchedule(0.0, 0.7, 15)
+        self.lambda_schedule = lambda_schedule or AnnealSchedule(0.5, 1.0, 15)
+
         self.to(self.device)
 
-    # ------------------------------ core utils -----------------------------
-    def _reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        std = torch.exp(0.5 * logvar)
+    # ------------------------------------------------------------------ utils
+    @staticmethod
+    def _reparameterize(mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+        std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        mu, logvar = self.encoder(x)
-        z = self._reparameterize(mu, logvar)
-        x_hat = self.decoder(z)
+    # ----------------------------------------------------------------- forward
+    def forward(
+        self, x: torch.Tensor, m: Optional[torch.Tensor] = None
+    ) -> Tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+    ]:
+        if m is None:
+            m = torch.ones_like(x)
+        mu, log_var, h = self.encoder(x, m)
+        z = self._reparameterize(mu, log_var)
+        recon_mu, recon_log_sigma = self.decoder(z)
         logits = self.classifier(z)
-        return x_hat, mu, logvar, logits
+        return z, recon_mu, recon_log_sigma, mu, log_var, logits
 
-    # ------------------------------ public API -----------------------------
-    def fit(self, X: np.ndarray, y: np.ndarray, epochs: int = 20, lr: float = 1e-3) -> "TabVAEClassifier":
-        """Train the model on ``X`` and ``y``.
+    # ---------------------------------------------------------------- training
+    def fit(
+        self, X: np.ndarray, y: np.ndarray, epochs: int = 20, lr: float = 3e-4
+    ) -> "TabVAEClassifier":
+        """Train the model using full-batch optimisation.
 
-        The training routine is deliberately simple and operates on the full
-        dataset without mini-batching to keep the runtime short for tests.
+        The routine is intentionally simple for testability.  Missing values in
+        ``X`` are indicated by ``NaN`` and are ignored in the reconstruction
+        loss while still influencing the encoder through the mask.
         """
 
         self.train()
         X_t = torch.as_tensor(X, dtype=torch.float32, device=self.device)
         y_t = torch.as_tensor(y, dtype=torch.long, device=self.device)
-        opt = torch.optim.Adam(self.parameters(), lr=lr)
-        for _ in range(epochs):
+        mask = torch.isfinite(X_t).float()
+        X_t = torch.nan_to_num(X_t, nan=0.0)
+
+        opt = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=1e-4)
+        for epoch in range(epochs):
             opt.zero_grad()
-            x_hat, mu, logvar, logits = self.forward(X_t)
-            recon = F.mse_loss(x_hat, X_t)
-            kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+            z, recon_mu, recon_log_sigma, mu, log_var, logits = self.forward(
+                X_t, mask
+            )
+            nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask)
+            kl = kl_divergence(mu, log_var)
             ce = F.cross_entropy(logits, y_t)
-            loss = recon + kl + ce
+            beta = linear_anneal(epoch, self.beta_schedule)
+            lam = linear_anneal(epoch, self.lambda_schedule)
+            loss = (nll + beta * kl) + lam * ce
             loss.backward()
+            nn.utils.clip_grad_norm_(self.parameters(), 1.0)
             opt.step()
         return self
 
+    # --------------------------------------------------------------- inference
     def predict_logits(self, X: np.ndarray) -> torch.Tensor:
         self.eval()
         with torch.no_grad():
             X_t = torch.as_tensor(X, dtype=torch.float32, device=self.device)
-            mu, _ = self.encoder(X_t)
-            logits = self.classifier(mu)
+            mask = torch.isfinite(X_t).float()
+            X_t = torch.nan_to_num(X_t, nan=0.0)
+            z, _, _, _, _, logits = self.forward(X_t, mask)
         return logits.cpu()
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
@@ -122,31 +222,50 @@ class TabVAEClassifier(nn.Module):
         return torch.softmax(logits, dim=-1).numpy()
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        probs = self.predict_proba(X)
-        return probs.argmax(axis=1)
+        return self.predict_proba(X).argmax(axis=1)
 
-    def generate(self, n_samples: int, conditional: Optional[dict[str, float]] = None, seed: Optional[int] = None) -> pd.DataFrame:
-        """Generate ``n_samples`` synthetic rows.
+    # --------------------------------------------------------------- generation
+    def generate(
+        self,
+        n_samples: int,
+        conditional: Optional[dict[str, float]] = None,
+        seed: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Generate ``n_samples`` synthetic rows (mode 0: no missing values)."""
 
-        Generation ignores ``conditional`` as this lightweight implementation
-        does not support conditional sampling.
-        """
         rng = np.random.default_rng(seed)
         z = torch.from_numpy(rng.standard_normal((n_samples, self.latent_dim))).float()
+        z = z.to(self.device)
         with torch.no_grad():
-            x_hat = self.decoder(z.to(self.device)).cpu().numpy()
+            mu, log_sigma = self.decoder(z)
+            sigma = torch.exp(log_sigma)
+            x = mu + sigma * torch.randn_like(mu)
         cols = [f"x{i}" for i in range(self.input_dim)]
-        return pd.DataFrame(x_hat, columns=cols)
+        df = pd.DataFrame(x.cpu().numpy(), columns=cols)
+        assert not df.isna().any().any()
+        return df
 
-    def eval_loss(self, X: np.ndarray, y: np.ndarray) -> tuple[float, float, float, float, float, float]:
-        """Evaluate reconstruction and classification losses on the data."""
+    # ------------------------------------------------------------------ metrics
+    def eval_loss(
+        self, X: np.ndarray, y: np.ndarray
+    ) -> Tuple[float, float, float, float, float, float]:
+        """Return loss components on the provided data."""
+
         self.eval()
         X_t = torch.as_tensor(X, dtype=torch.float32, device=self.device)
         y_t = torch.as_tensor(y, dtype=torch.long, device=self.device)
+        mask = torch.isfinite(X_t).float()
+        X_t = torch.nan_to_num(X_t, nan=0.0)
         with torch.no_grad():
-            x_hat, mu, logvar, logits = self.forward(X_t)
-            recon = F.mse_loss(x_hat, X_t).item()
-            kl = (-0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).mean()).item()
+            z, recon_mu, recon_log_sigma, mu, log_var, logits = self.forward(
+                X_t, mask
+            )
+            nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask).item()
+            kl = kl_divergence(mu, log_var).item()
             ce = F.cross_entropy(logits, y_t).item()
-            loss = recon + kl + ce
-        return float(loss), float(recon), float(kl), float(ce), 0.0, 0.0
+            loss = nll + kl + ce
+        return float(loss), float(nll), float(kl), float(ce), 0.0, 0.0
+
+
+__all__ = ["TabVAEClassifier"]
+

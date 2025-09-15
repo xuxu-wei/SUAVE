@@ -1,12 +1,12 @@
 """Reusable building blocks such as losses and calibration utilities."""
 
-from .losses import kl_divergence, reconstruction_nll, kl_anneal_weight
+from .losses import gaussian_nll, kl_divergence, linear_anneal
 from .calibration import TemperatureScaler, expected_calibration_error
 
 __all__ = [
+    "gaussian_nll",
     "kl_divergence",
-    "reconstruction_nll",
-    "kl_anneal_weight",
+    "linear_anneal",
     "TemperatureScaler",
     "expected_calibration_error",
 ]
