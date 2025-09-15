@@ -8,7 +8,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, label_binarize
-from sklearn.impute import SimpleImputer
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+from sklearn.impute import IterativeImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
@@ -126,6 +127,59 @@ def generate_hard():
     return X, Y, [2, 4, 2]
 
 
+def _generate_hard_missing(level: str):
+    """Hard dataset with varying missingness patterns."""
+    n = 3000
+    cont_norm = rng.normal(size=(n, 10))
+    cont_log = rng.lognormal(mean=0.0, sigma=1.0, size=(n, 5)) * 10
+    cont_uni = rng.uniform(-5, 5, size=(n, 5))
+    cont_exp = rng.exponential(scale=1.0, size=(n, 5))
+    cont = np.hstack([cont_norm, cont_log, cont_uni, cont_exp])  # 25
+    pois = rng.poisson(lam=3, size=(n, 5))
+    bino = rng.binomial(n=10, p=0.3, size=(n, 5))
+    cat = rng.integers(0, 4, size=(n, 5))
+    base = np.hstack([cont, pois, bino, cat])  # 40
+    d1 = base[:, 0] * base[:, 1]
+    d2 = np.sin(base[:, 2])
+    d3 = np.log(np.abs(base[:, 3]) + 1)
+    d4 = (base[:, 4] > base[:, 5]).astype(float)
+    d5 = base[:, 6] ** 2
+    derived = np.column_stack([d1, d2, d3, d4, d5])
+    noise = rng.normal(size=(n, 5))
+    X_full = np.hstack([base, derived, noise])
+    s1 = (
+        base[:, 0] * base[:, 1]
+        + np.sin(base[:, 2])
+        - np.log(np.abs(base[:, 3]) + 1)
+        + base[:, 4] ** 2
+    )
+    t1 = np.quantile(s1, 0.9)
+    y1 = (s1 > t1).astype(int)
+    s2 = base[:, 5] * base[:, 6] - np.sin(base[:, 7]) + np.log1p(base[:, 8] ** 2) - base[:, 9]
+    bins = np.quantile(s2, [0, 0.25, 0.5, 0.75, 1])
+    y2 = np.digitize(s2, bins[1:-1])
+    y3 = ((cont_norm[:, 0] > 0) ^ (cont_uni[:, 0] > 0)).astype(int)
+    Y = np.column_stack([y1, y2, y3])
+
+    if level == "light":
+        base_mcar, derived_mcar = 0.1, 0.3
+    else:
+        base_mcar, derived_mcar = 0.4, 0.8
+    base_miss = _insert_missing(base, mcar=base_mcar, mnar_indices=[0, 1], y=y1)
+    derived_miss = _insert_missing(derived, mcar=derived_mcar)
+    noise_miss = _insert_missing(noise, mcar=base_mcar)
+    X = np.hstack([base_miss, derived_miss, noise_miss])
+    return X, Y, [2, 4, 2]
+
+
+def generate_hard_missing_light():
+    return _generate_hard_missing("light")
+
+
+def generate_hard_missing_heavy():
+    return _generate_hard_missing("heavy")
+
+
 def _model_factory(name):
     if name == "Linear":
         clf = LogisticRegression(max_iter=1000, random_state=20201021)
@@ -138,7 +192,7 @@ def _model_factory(name):
     else:
         raise ValueError(name)
     scaler = StandardScaler() if name in ["SVM", "KNN"] else "passthrough"
-    return Pipeline([("imputer", SimpleImputer()), ("scaler", scaler), ("clf", clf)])
+    return Pipeline([("imputer", IterativeImputer()), ("scaler", scaler), ("clf", clf)])
 
 
 def benchmark_models(X_train, X_test, y_train, y_test, task_classes):
@@ -218,7 +272,7 @@ def run_task(generator, name):
     else:
         raise ValueError("Failed to generate split with all classes present")
     bench = benchmark_models(X_train, X_test, y_train, y_test, task_classes)
-    imputer = SimpleImputer()
+    imputer = IterativeImputer()
     scaler = StandardScaler()
     Xtr = scaler.fit_transform(imputer.fit_transform(X_train))
     Xte = scaler.transform(imputer.transform(X_test))
@@ -289,7 +343,13 @@ def run_task(generator, name):
 
 
 def test_benchmarks():
-    tasks = [(generate_simple, "simple"), (generate_medium, "medium"), (generate_hard, "hard")]
+    tasks = [
+        (generate_simple, "simple"),
+        (generate_medium, "medium"),
+        (generate_hard, "hard"),
+        (generate_hard_missing_light, "hard_missing_light"),
+        (generate_hard_missing_heavy, "hard_missing_heavy"),
+    ]
     recon_rows = []
     tables = []
     seeds = {}

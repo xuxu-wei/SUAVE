@@ -22,7 +22,8 @@
 3. **实现 TabVAE+Classifier（Mode 0）**，训练与评测脚手架（见 §3–§6）。
 4. **回归测试**：确保 `pytest -q` 全绿；新增单测覆盖生成无缺失、校准、TSTR 最小工作示例。
 5. **Benchmark 监控**：每次代码修改后运行 `pytest tests/test_benchmarks.py -s`，记录分类性能变化。
-6. **清理与文档**：补 `README`/`docs/` 与示例配置；在CI中加入基本单测。
+6. **AutoGluon 安装**：执行基准测试前请确保通过 `pip install autogluon` 安装 AutoGluon；用户侧可选安装。
+7. **清理与文档**：补 `README`/`docs/` 与示例配置；在CI中加入基本单测。
 
 ------
 
