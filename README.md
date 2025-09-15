@@ -1,10 +1,16 @@
 [![Static Badge](https://img.shields.io/badge/%E5%88%87%E6%8D%A2-%E4%B8%AD%E6%96%87%E7%89%88%E8%AF%B4%E6%98%8E%E6%96%87%E6%A1%A3-1082C3?style=flat)](使用说明-中文版.md)
 
-# SUAVE: Tabular VAE with a Classifier
+# SUAVE
 
-SUAVE re-imagines tabular modelling as a single latent variable problem.  A
-variational autoencoder learns a latent representation ``z`` that serves as the
-information hub for three workflows:
+SUAVE is an integrated approach to clinical tabular modelling built around a
+single low-dimensional latent variable ``z``. A multi-distribution decoder
+accommodates mixed feature types, reconstruction is aware of missing values and
+sample generation can be class conditioned (enabling an optional CVAE variant).
+The model includes a deployment-friendly calibration link and explicit hooks for
+interpretability so that the same ``z`` supports reconstruction, synthesis and
+downstream tasks.
+
+``z`` acts as the information hub for three workflows:
 
 1. **Prediction** – a classifier consumes ``z`` (and encoder features) to output
    calibrated probabilities.
@@ -16,9 +22,6 @@ information hub for three workflows:
 This probability-first design natively handles heterogeneous variables,
 missingness and class imbalance, providing a compact and interpretable approach
 that is particularly suited to clinical research.
-
-The previous implementation is available as ``suave_old_version`` but will be
-removed in a future release.
 
 ## Installation
 

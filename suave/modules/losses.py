@@ -1,4 +1,4 @@
-"""Loss utilities for TabVAE models."""
+"""Loss utilities for SUAVE models."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import torch
 
 
 if TYPE_CHECKING:  # pragma: no cover - only for type hints
-    from ..models.tabvae import AnnealSchedule
+    from ..models.suave import AnnealSchedule
 
 def gaussian_nll(
     mu: torch.Tensor, log_sigma: torch.Tensor, x: torch.Tensor, mask: torch.Tensor

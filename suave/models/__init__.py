@@ -1,5 +1,5 @@
 """Model definitions for SUAVE."""
 
-from .tabvae import TabVAEClassifier
+from .suave import SUAVE
 
-__all__ = ["TabVAEClassifier"]
+__all__ = ["SUAVE"]

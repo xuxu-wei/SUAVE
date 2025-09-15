@@ -1,12 +1,7 @@
-"""Compatibility layer exposing :class:`TabVAEClassifier` as ``SUAVE``.
-
-The project now uses the TabVAE-based classifier as the primary model.  The
-previous architecture is retained as :func:`suave_old_version` for legacy
-purposes and will be dropped in a future release.
-"""
+"""Public API for the SUAVE model."""
 
 from __future__ import annotations
 
-from ..models.tabvae import TabVAEClassifier
+from ..models.suave import SUAVE
 
-__all__ = ["TabVAEClassifier"]
+__all__ = ["SUAVE"]

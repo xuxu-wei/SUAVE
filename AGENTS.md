@@ -19,13 +19,13 @@
    - 解析 `tests/`（尤其 `tests/test_benchmarks.py`）找出**被导入的模块/类/函数名**与**调用签名**。
    - 建立“**适配层**”：若新实现的签名不同，提供**同名包装**以免破坏测试。
 2. **按本蓝图落库**（见 §2 目录结构与模块职责），**不改动**测试中显式导入路径；必要时在原路径下保留 shim。
-3. **实现 TabVAE+Classifier（Mode 0）**，训练与评测脚手架（见 §3–§6）。
+3. **实现 SUAVE+Classifier（Mode 0）**，训练与评测脚手架（见 §3–§6）。
 4. **回归测试**：确保 `pytest -q` 全绿；新增单测覆盖生成无缺失、校准、TSTR 最小工作示例。
 5. **Benchmark 监控**：每次代码修改后运行 `pytest tests/test_benchmarks.py -s`，记录分类性能变化。
    - Benchmark 允许运行 40 分钟，若超过 45 分钟应终止测试。
    - 内部评估需安装 `autogluon` 以运行 benchmark；用户使用时则无此强制依赖。
 6. **清理与文档**：补 `README`/`docs/` 与示例配置；在CI中加入基本单测。
-7. **参数回归检查**：修改 TabVAE/SUAVE 损失函数等核心逻辑后，务必复核模型类与测试用例的默认参数设置，避免性能意外下降。
+7. **参数回归检查**：修改 SUAVE/SUAVE 损失函数等核心逻辑后，务必复核模型类与测试用例的默认参数设置，避免性能意外下降。
 
 ------
 
@@ -40,7 +40,7 @@ suave/
     model.py                # 适配层：保留旧API名称/签名，内部调用新实现
   models/
     __init__.py
-    tabvae.py               # TabVAE 主模型（Encoder/Decoder/Classifier/forward）
+    suave.py               # SUAVE 主模型（Encoder/Decoder/Classifier/forward）
   modules/
     losses.py               # 重构NLL（混合数据类型）；KL退火；分类CE/加权/focal
     calibration.py          # Temperature scaling + ECE + reliability plot utils
@@ -48,7 +48,7 @@ suave/
     schema.py               # 变量模式(连续/二元/多类/计数)与缺失掩码组织；标准化/嵌入
     preprocessing.py        # 训练/评估一致的预处理与DataModule
   trainers/
-    train_tabvae.py         # 训练循环/early-stop/日志；保存/加载
+    train_suave.py         # 训练循环/early-stop/日志；保存/加载
   eval/
     metrics.py              # AUROC/AUPRC/Brier/NLL/ECE
     tstr.py                 # TSTR vs TRTR 管线（简化版）
@@ -60,14 +60,14 @@ suave/
     seed.py                 # 可重复性设置
     io.py                   # 模型/配置/标准化器保存与加载
 configs/
-  tabvae_default.yaml       # 超参与数据schema示例（无时序）
+  suave_default.yaml       # 超参与数据schema示例（无时序）
 tests/
-  test_tabvae_minimal.py    # 新增：无缺失生成、校准、TSTR 冒烟测试
+  test_suave_minimal.py    # 新增：无缺失生成、校准、TSTR 冒烟测试
 ```
 
 ------
 
-## 3) 模型规格（TabVAE+Classifier，Mode 0）
+## 3) 模型规格（SUAVE+Classifier，Mode 0）
 
 ### 3.1 输入与Schema
 
@@ -168,13 +168,13 @@ tests/
 - **持久化**：`save(path)` / `load(path)`（包含标准化器/温度缩放参数）
 - **基线/评估入口**：若测试中有 `run_benchmarks()` / `evaluate()` 等，需保持原路径与签名；内部调用新实现。
 
-> 若旧实现存在 `suave.api.SUAVEModel` 之类对外类，请保留同名类，内部持有 `TabVAE` 实例并**完全转发**。
+> 若旧实现存在 `suave.api.SUAVEModel` 之类对外类，请保留同名类，内部持有 `SUAVE` 实例并**完全转发**。
 
 ------
 
 ## 7) 新增/调整测试（在不破坏既有测试前提下）
 
-1. `tests/test_tabvae_minimal.py`（新增）
+1. `tests/test_suave_minimal.py`（新增）
    - **生成无缺失**：训练极小数据后 `df_gen = model.generate(256)`，断言 `df_gen.isna().sum().sum()==0`。
    - **校准**：温度缩放前后 ECE 下降或 NLL 改善（容忍小幅波动，断言“非劣”）。
    - **TSTR冒烟**：用 `generate` 合成训练集 vs TRTR 对比，断言流程可跑、指标可产出。
@@ -185,7 +185,7 @@ tests/
 ## 8) 训练与复现实用脚本（CLI）
 
 - `cli/train.py`
-  - 接受 `--config configs/tabvae_default.yaml`；
+  - 接受 `--config configs/suave_default.yaml`；
   - 关键参数：latent_dim、β退火、λ退火、class_weight、early_stop；
   - 保存：`artifacts/` 下 `model.pt`、`scaler.pkl`、`tempscaler.pkl`、`config.yaml`、`metrics.json`。
 - `cli/generate.py`
@@ -193,11 +193,11 @@ tests/
 
 ------
 
-## 9) 配置样例（`configs/tabvae_default.yaml` 摘要）
+## 9) 配置样例（`configs/suave_default.yaml` 摘要）
 
 ```yaml
 model:
-  type: TabVAEClassifier
+  type: SUAVEClassifier
   latent_dim: 32
   encoder: [256, 256, 128]
   decoder: [256, 256, 128]
@@ -235,7 +235,7 @@ eval:
 
 ## 11) 迁移与兼容（必做）
 
-- **保留旧路径/名称**：在旧模块下保留**同名类/函数**，内部仅 `from suave.models.tabvae import TabVAEClassifier as _Impl` 并转发。
+- **保留旧路径/名称**：在旧模块下保留**同名类/函数**，内部仅 `from suave.models.suave import SUAVEClassifier as _Impl` 并转发。
 - **数据前处理对齐**：若旧代码有标准化/编码器，务必在 `io.py` 一并持久化，`load()` 时恢复**完全一致**的前处理状态。
 - **弃用标记**：对确需移除的内部函数，加 `@deprecated` 注解并在下个版本删除；但**不得破坏测试**。
 
@@ -264,7 +264,7 @@ eval:
 
 ## 14) 提交与CI
 
-- 提交信息规范：`feat(models): add TabVAEClassifier (mode-0 generation)`
+- 提交信息规范：`feat(models): add SUAVEClassifier (mode-0 generation)`
 - 开一个最小CI：`pytest -q` + flake8（或 ruff）+ mypy（非阻塞）。
 
 ------

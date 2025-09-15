@@ -6,7 +6,7 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from suave.api import TabVAEClassifier
+from suave.api import SUAVE
 from suave.modules.calibration import (
     TemperatureScaler,
     calibration_curve,
@@ -22,7 +22,7 @@ def test_generation_calibration_tstr():
     X = rng.normal(size=(200, 4))
     y = (X[:, 0] + 0.1 * rng.normal(size=200) > 0).astype(int)
 
-    model = TabVAEClassifier(input_dim=4, latent_dim=2)
+    model = SUAVE(input_dim=4, latent_dim=2)
     model.fit(X, y, epochs=30)
 
     df = model.generate(50, seed=1)

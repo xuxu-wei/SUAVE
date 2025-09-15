@@ -1,5 +1,5 @@
 model:
-  type: TabVAEClassifier
+  type: SUAVE
   latent_dim: 32
   encoder: [256, 256, 128]
   decoder: [256, 256, 128]
