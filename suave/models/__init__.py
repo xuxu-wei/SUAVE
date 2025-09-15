@@ -1,5 +1,5 @@
 """Model definitions for SUAVE."""
 
-from .suave import SUAVE
+from .suave import AnnealSchedule, InfoVAEConfig, SUAVE
 
-__all__ = ["SUAVE"]
+__all__ = ["SUAVE", "AnnealSchedule", "InfoVAEConfig"]

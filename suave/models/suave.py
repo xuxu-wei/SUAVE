@@ -24,7 +24,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..modules.losses import gaussian_nll, kl_divergence, linear_anneal
+from ..modules.losses import (
+    gaussian_nll,
+    kl_divergence,
+    linear_anneal,
+    maximum_mean_discrepancy,
+)
 
 
 @dataclass
@@ -34,6 +39,49 @@ class AnnealSchedule:
     start: float
     end: float
     epochs: int
+
+
+@dataclass
+class InfoVAEConfig:
+    """Configuration for the InfoVAE objective.
+
+    Parameters
+    ----------
+    alpha:
+        Balances the mutual information term in InfoVAE. ``alpha=0`` recovers
+        the vanilla (or :math:`\beta`-) VAE objective.
+    lambda_:
+        Coefficient for the MMD penalty enforcing ``q(z)`` close to the prior.
+    kernel:
+        Kernel used for the MMD computation. Only ``"rbf"`` is currently
+        implemented which matches the original InfoVAE paper.
+    kernel_bandwidth:
+        Bandwidth of the RBF kernel; larger values encourage smoother matching
+        between the aggregated posterior and the prior.
+    """
+
+    alpha: float = 0.0
+    lambda_: float = 1.0
+    kernel: str = "rbf"
+    kernel_bandwidth: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.alpha <= 1.0:
+            raise ValueError("alpha must be in the interval [0, 1]")
+        if self.lambda_ <= 0:
+            raise ValueError("lambda_ must be positive")
+        if self.kernel != "rbf":
+            raise NotImplementedError("Only the RBF kernel is implemented")
+        if self.kernel_bandwidth <= 0:
+            raise ValueError("kernel_bandwidth must be positive")
+
+    @property
+    def kl_weight(self) -> float:
+        return 1.0 - self.alpha
+
+    @property
+    def mmd_weight(self) -> float:
+        return self.alpha + self.lambda_ - 1.0
 
 
 class Encoder(nn.Module):
@@ -141,6 +189,17 @@ class SUAVE(nn.Module):
     beta_schedule, lambda_schedule:
         Linear schedules controlling the weight of the KL and classification
         terms during optimisation.
+    beta:
+        Global multiplier for the KL term. Setting ``beta > 1`` recovers a
+        :math:`\beta`-VAE style objective while ``beta = 1`` corresponds to the
+        default VAE. ``beta`` is combined with ``beta_schedule`` to allow for
+        KL annealing.
+    info_config:
+        Optional configuration enabling the InfoVAE objective. When provided,
+        the KL term is scaled by ``(1 - alpha)`` and an additional MMD penalty
+        ``(alpha + lambda - 1) * MMD(q(z), p(z))`` is added. Passing
+        ``InfoVAEConfig(alpha=0, lambda_=1)`` therefore falls back to the
+        standard VAE formulation.
     """
 
     def __init__(
@@ -151,6 +210,8 @@ class SUAVE(nn.Module):
         dropout: float = 0.3,
         beta_schedule: AnnealSchedule | None = None,
         lambda_schedule: AnnealSchedule | None = None,
+        beta: float = 1.0,
+        info_config: InfoVAEConfig | None = None,
         device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
@@ -166,8 +227,23 @@ class SUAVE(nn.Module):
 
         self.beta_schedule = beta_schedule or AnnealSchedule(0.0, 0.7, 15)
         self.lambda_schedule = lambda_schedule or AnnealSchedule(0.5, 1.0, 15)
+        if beta <= 0:
+            raise ValueError("beta must be positive")
+        self.beta = beta
+        self.info_config = info_config
 
         self.to(self.device)
+
+        # Book-keeping for evaluation: updated during training.
+        self._last_epoch = 0
+        initial_beta = self.beta * linear_anneal(0, self.beta_schedule)
+        if self.info_config is not None:
+            initial_beta *= self.info_config.kl_weight
+        self._current_beta = float(initial_beta)
+        self._current_lambda = float(linear_anneal(0, self.lambda_schedule))
+        self._current_mmd = (
+            float(self.info_config.mmd_weight) if self.info_config else 0.0
+        )
 
     # ------------------------------------------------------------------ utils
     @staticmethod
@@ -220,12 +296,31 @@ class SUAVE(nn.Module):
             nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask)
             kl = kl_divergence(mu, log_var)
             ce = F.cross_entropy(logits, y_t)
-            beta = linear_anneal(epoch, self.beta_schedule)
+            beta = self.beta * linear_anneal(epoch, self.beta_schedule)
             lam = linear_anneal(epoch, self.lambda_schedule)
-            loss = (nll + beta * kl) + lam * ce
+            if self.info_config is not None:
+                kl_weight = beta * self.info_config.kl_weight
+                info_weight = self.info_config.mmd_weight
+                prior_samples = torch.randn_like(z)
+                mmd = maximum_mean_discrepancy(
+                    z,
+                    prior_samples,
+                    kernel=self.info_config.kernel,
+                    bandwidth=self.info_config.kernel_bandwidth,
+                )
+                info_penalty = info_weight * mmd
+            else:
+                kl_weight = beta
+                info_weight = 0.0
+                info_penalty = kl.new_tensor(0.0)
+            loss = (nll + kl_weight * kl) + lam * ce + info_penalty
             loss.backward()
             nn.utils.clip_grad_norm_(self.parameters(), 1.0)
             opt.step()
+            self._last_epoch = epoch
+            self._current_beta = float(kl_weight)
+            self._current_lambda = float(lam)
+            self._current_mmd = float(info_weight)
         return self
 
     # --------------------------------------------------------------- inference
@@ -334,12 +429,34 @@ class SUAVE(nn.Module):
             z, recon_mu, recon_log_sigma, mu, log_var, logits = self.forward(
                 X_t, mask
             )
-            nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask).item()
-            kl = kl_divergence(mu, log_var).item()
-            ce = F.cross_entropy(logits, y_t).item()
-            loss = nll + kl + ce
-        return float(loss), float(nll), float(kl), float(ce), 0.0, 0.0
+            nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask)
+            kl = kl_divergence(mu, log_var)
+            ce = F.cross_entropy(logits, y_t)
+            kl_weight = kl.new_tensor(self._current_beta)
+            lam = ce.new_tensor(self._current_lambda)
+            if self.info_config is not None:
+                info_weight = self._current_mmd
+                prior_samples = torch.randn_like(z)
+                mmd = maximum_mean_discrepancy(
+                    z,
+                    prior_samples,
+                    kernel=self.info_config.kernel,
+                    bandwidth=self.info_config.kernel_bandwidth,
+                )
+                info_penalty = ce.new_tensor(info_weight) * mmd
+            else:
+                info_weight = 0.0
+                info_penalty = ce.new_tensor(0.0)
+            loss = (nll + kl_weight * kl) + lam * ce + info_penalty
+        return (
+            float(loss.item()),
+            float(nll.item()),
+            float(kl.item()),
+            float(ce.item()),
+            float(info_penalty.item()),
+            float(info_weight),
+        )
 
 
-__all__ = ["SUAVE"]
+__all__ = ["SUAVE", "AnnealSchedule", "InfoVAEConfig"]
 
