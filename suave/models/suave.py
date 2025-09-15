@@ -118,12 +118,24 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Shared decoder with a Gaussian head for continuous variables."""
+    """Shared decoder with Gaussian heads for continuous variables.
 
-    def __init__(self, latent_dim: int, output_dim: int, dropout: float) -> None:
+    The decoder can be conditioned on class information by concatenating a
+    one-hot encoding to the latent variable ``z``.  When ``conditional_dim`` is
+    zero the module reduces to the unconditional decoder used previously.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int,
+        output_dim: int,
+        dropout: float,
+        conditional_dim: int = 0,
+    ) -> None:
         super().__init__()
+        in_dim = latent_dim + conditional_dim
         self.net = nn.Sequential(
-            nn.Linear(latent_dim, 256),
+            nn.Linear(in_dim, 256),
             nn.BatchNorm1d(256),
             nn.SiLU(),
             nn.Dropout(dropout),
@@ -138,7 +150,11 @@ class Decoder(nn.Module):
         self.mu = nn.Linear(128, output_dim)
         self.log_sigma = nn.Linear(128, output_dim)
 
-    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, z: torch.Tensor, y_cond: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if y_cond is not None:
+            z = torch.cat([z, y_cond], dim=-1)
         h = self.net(z)
         return self.mu(h), self.log_sigma(h)
 
@@ -221,9 +237,16 @@ class SUAVE(nn.Module):
         self.device = device or torch.device("cpu")
 
         self.encoder = Encoder(input_dim, latent_dim, dropout)
-        self.decoder = Decoder(latent_dim, input_dim, dropout)
+        self.decoder = Decoder(latent_dim, input_dim, dropout, num_classes)
         # Classifier consumes latent code concatenated with last encoder layer
         self.classifier = Classifier(latent_dim + 128, num_classes, dropout)
+
+        # class-conditional prior parameters p(z | y)
+        self.prior_mu = nn.Linear(num_classes, latent_dim, bias=False)
+        self.prior_log_var = nn.Linear(num_classes, latent_dim)
+        nn.init.zeros_(self.prior_mu.weight)
+        nn.init.zeros_(self.prior_log_var.weight)
+        nn.init.zeros_(self.prior_log_var.bias)
 
         self.beta_schedule = beta_schedule or AnnealSchedule(0.0, 0.7, 15)
         self.lambda_schedule = lambda_schedule or AnnealSchedule(0.5, 1.0, 15)
@@ -254,17 +277,49 @@ class SUAVE(nn.Module):
 
     # ----------------------------------------------------------------- forward
     def forward(
-        self, x: torch.Tensor, m: Optional[torch.Tensor] = None
+        self,
+        x: torch.Tensor,
+        m: Optional[torch.Tensor] = None,
+        y: Optional[torch.Tensor] = None,
     ) -> Tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
     ]:
         if m is None:
             m = torch.ones_like(x)
         mu, log_var, h = self.encoder(x, m)
         z = self._reparameterize(mu, log_var)
-        recon_mu, recon_log_sigma = self.decoder(z)
+        y_onehot = None
+        prior_mu = None
+        prior_log_var = None
+        if y is not None:
+            y_onehot = F.one_hot(y, num_classes=self.num_classes).float()
+            prior_mu = self.prior_mu(y_onehot)
+            prior_log_var = self.prior_log_var(y_onehot)
+        else:
+            y_onehot = torch.zeros(
+                x.size(0), self.num_classes, device=x.device, dtype=torch.float32
+            )
+        recon_mu, recon_log_sigma = self.decoder(z, y_onehot)
         logits = self.classifier(torch.cat([z, h], dim=-1))
-        return z, recon_mu, recon_log_sigma, mu, log_var, logits
+        return (
+            z,
+            recon_mu,
+            recon_log_sigma,
+            mu,
+            log_var,
+            logits,
+            y_onehot,
+            prior_mu,
+            prior_log_var,
+        )
 
     # ---------------------------------------------------------------- training
     def fit(
@@ -287,14 +342,32 @@ class SUAVE(nn.Module):
         self.X_train = X
         self.y_train = y
 
+        counts = np.bincount(y, minlength=self.num_classes)
+        self.label_distribution = (counts / counts.sum()).astype(float)
+
         opt = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=1e-4)
         for epoch in range(epochs):
             opt.zero_grad()
-            z, recon_mu, recon_log_sigma, mu, log_var, logits = self.forward(
-                X_t, mask
+            (
+                z,
+                recon_mu,
+                recon_log_sigma,
+                mu,
+                log_var,
+                logits,
+                _,
+                prior_mu,
+                prior_log_var,
+            ) = self.forward(
+                X_t, mask, y_t
             )
             nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask)
-            kl = kl_divergence(mu, log_var)
+            if prior_mu is not None and prior_log_var is not None:
+                kl = kl_divergence_between_normals(
+                    mu, log_var, prior_mu, prior_log_var
+                )
+            else:
+                kl = kl_divergence(mu, log_var)
             ce = F.cross_entropy(logits, y_t)
             beta = self.beta * linear_anneal(epoch, self.beta_schedule)
             lam = linear_anneal(epoch, self.lambda_schedule)
@@ -330,7 +403,7 @@ class SUAVE(nn.Module):
             X_t = torch.as_tensor(X, dtype=torch.float32, device=self.device)
             mask = torch.isfinite(X_t).float()
             X_t = torch.nan_to_num(X_t, nan=0.0)
-            z, _, _, _, _, logits = self.forward(X_t, mask)
+            _, _, _, _, _, logits, _, _, _ = self.forward(X_t, mask)
         return logits.cpu()
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
@@ -364,8 +437,6 @@ class SUAVE(nn.Module):
         rng = np.random.default_rng(seed)
 
         if conditional and "y" in conditional:
-            if not hasattr(self, "X_train"):
-                raise RuntimeError("Model must be fitted before conditional generation")
             y_cond = conditional["y"]
             if np.ndim(y_cond) == 0:
                 y_vec = np.full(n_samples, int(y_cond))
@@ -373,29 +444,26 @@ class SUAVE(nn.Module):
                 y_vec = np.asarray(y_cond, dtype=int)
                 if len(y_vec) != n_samples:
                     raise ValueError("Length of conditional labels must match n_samples")
-            idxs = []
-            for lbl in y_vec:
-                candidates = np.where(self.y_train == lbl)[0]
-                if len(candidates) == 0:
-                    raise ValueError(f"No training samples with label {lbl}")
-                idxs.append(rng.choice(candidates))
-            X_sel = self.X_train[idxs]
-            X_t = torch.as_tensor(X_sel, dtype=torch.float32, device=self.device)
-            mask = torch.isfinite(X_t).float()
-            X_t = torch.nan_to_num(X_t, nan=0.0)
-            with torch.no_grad():
-                mu, log_var, _ = self.encoder(X_t, mask)
-                z = self._reparameterize(mu, log_var)
-                mu_x, log_sigma = self.decoder(z)
-                sigma = torch.exp(log_sigma)
-                x = mu_x + sigma * torch.randn_like(mu_x)
         else:
-            z = torch.from_numpy(rng.standard_normal((n_samples, self.latent_dim))).float()
-            z = z.to(self.device)
-            with torch.no_grad():
-                mu, log_sigma = self.decoder(z)
-                sigma = torch.exp(log_sigma)
-                x = mu + sigma * torch.randn_like(mu)
+            if hasattr(self, "label_distribution"):
+                probs = self.label_distribution
+            elif hasattr(self, "y_train"):
+                counts = np.bincount(self.y_train, minlength=self.num_classes)
+                probs = counts / counts.sum()
+            else:
+                probs = np.full(self.num_classes, 1.0 / self.num_classes)
+            y_vec = rng.choice(self.num_classes, size=n_samples, p=probs)
+
+        y_tensor = torch.as_tensor(y_vec, dtype=torch.long, device=self.device)
+        y_onehot = F.one_hot(y_tensor, num_classes=self.num_classes).float()
+
+        with torch.no_grad():
+            prior_mu = self.prior_mu(y_onehot)
+            prior_log_var = self.prior_log_var(y_onehot)
+            z = self._reparameterize(prior_mu, prior_log_var)
+            mu_x, log_sigma = self.decoder(z, y_onehot)
+            sigma = torch.exp(log_sigma)
+            x = mu_x + sigma * torch.randn_like(mu_x)
 
         cols = [f"x{i}" for i in range(self.input_dim)]
         df = pd.DataFrame(x.cpu().numpy(), columns=cols)
@@ -426,8 +494,18 @@ class SUAVE(nn.Module):
         mask = torch.isfinite(X_t).float()
         X_t = torch.nan_to_num(X_t, nan=0.0)
         with torch.no_grad():
-            z, recon_mu, recon_log_sigma, mu, log_var, logits = self.forward(
-                X_t, mask
+            (
+                _,
+                recon_mu,
+                recon_log_sigma,
+                mu,
+                log_var,
+                logits,
+                _,
+                prior_mu,
+                prior_log_var,
+            ) = self.forward(
+                X_t, mask, y_t
             )
             nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask)
             kl = kl_divergence(mu, log_var)
@@ -456,6 +534,7 @@ class SUAVE(nn.Module):
             float(info_penalty.item()),
             float(info_weight),
         )
+
 
 
 __all__ = ["SUAVE", "AnnealSchedule", "InfoVAEConfig"]
