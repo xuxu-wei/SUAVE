@@ -3,6 +3,8 @@ import numpy as np
 import random
 import torch
 
+from .seed import set_seed
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def is_interactive_environment():
@@ -87,17 +89,10 @@ def generate_hidden_dims(hidden_dim, latent_dim, depth, strategy="constant", ord
     for i in range(len(dims)-2):
         yield dims[i], dims[i + 1]
 
-def set_random_seed(seed):
-    """
-    Set random seed for reproducibility across numpy, random, and PyTorch.
-    """
-    random.seed(seed)  # Python 的随机数生成器
-    np.random.seed(seed)  # NumPy 的随机数生成器
-    torch.manual_seed(seed)  # PyTorch 的随机数生成器（CPU）
-    torch.cuda.manual_seed(seed)  # PyTorch 的随机数生成器（当前 GPU）
-    torch.cuda.manual_seed_all(seed)  # PyTorch 的随机数生成器（所有 GPU）
-    torch.backends.cudnn.deterministic = True  # 保证每次卷积的结果一致
-    torch.backends.cudnn.benchmark = False  # 禁用自动优化
+def set_random_seed(seed: int) -> None:
+    """Backward compatible alias for :func:`set_seed`."""
+
+    set_seed(seed)
 
 def to_numpy(x):
     """

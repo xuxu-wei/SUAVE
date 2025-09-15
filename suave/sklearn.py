@@ -1,3 +1,4 @@
+# ruff: noqa
 """
 Scikit-learn compatible wrapper for SUAVE.
 
@@ -10,17 +11,18 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.metrics import mean_squared_error, roc_auc_score
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 import torch.nn.functional as F
+import warnings
 
 from .utils import *
-from .suave import SUAVE
+from .suave import suave_old_version
 
-class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
-    """
-    Scikit-learn compatible wrapper for SUAVE.
 
-    SUAVE integrates a Variational Autoencoder (VAE) for dimensionality reduction
-    with a Multi-Task Predictor to handle multiple parallel predictive tasks.
-    This wrapper facilitates seamless integration with scikit-learn pipelines and workflows.
+class SuaveClassifier(suave_old_version, BaseEstimator, ClassifierMixin, TransformerMixin):
+    """Deprecated scikit-learn wrapper for the legacy model.
+
+    This class remains for backward compatibility and will be removed in a
+    future release.  New projects should use :class:`SUAVE`
+    (:class:`~suave.models.tabvae.TabVAEClassifier`).
 
     Parameters
     ----------
@@ -134,6 +136,14 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
     - The `transform` method maps input data into the latent space, which can be used for dimensionality reduction.
     - The `predict` and `predict_proba` methods support multi-task binary and multi-class classification.
     """
+
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "SuaveClassifier is deprecated and will be removed in a future release. "
+            "Use SUAVE (TabVAEClassifier) instead.",
+            DeprecationWarning,
+        )
+        super().__init__(*args, **kwargs)
 
     
     def fit(self, X, y, *args, **kwargs):
@@ -399,4 +409,4 @@ class SuaveClassifier(SUAVE, BaseEstimator, ClassifierMixin, TransformerMixin):
         """
         return [f"latent_{i}" for i in range(self.vae.encoder.latent_mu.out_features)]
 
-SuaveClassifier.fit.__doc__ = SUAVE.fit.__doc__
+SuaveClassifier.fit.__doc__ = suave_old_version.fit.__doc__
