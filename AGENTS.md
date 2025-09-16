@@ -6,6 +6,13 @@
 - 保持对现有 **`SUAVE` 主类**与 README 快速开始示例的**完全兼容**（`from suave import SUAVE` / `fit/predict_proba/generate/latent` 等）。
 - 所有**具体开发任务**由“任务 Prompt”下发；本文件只定义**角色、约束、质量门槛、回归守护与提交规范**。
 - 任何改动不得破坏 `tests/` 下的基准用例（尤其是分类性能监控用例）。
+- **环境初始化提示**：启动任务前请按照 AutoGluon 官网推荐命令安装全量 AutoGluon 依赖：
+
+  ```bash
+  pip install -U pip
+  pip install -U setuptools wheel
+  pip install autogluon --extra-index-url https://download.pytorch.org/whl/cpu
+  ```
 
 ------
 
