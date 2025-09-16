@@ -251,7 +251,7 @@ def _update_current(candidate: Dict[str, object], current_path: Path) -> None:
 
 def parse_args(argv: Iterable[str] | None = None) -> BenchmarkConfig:
     parser = argparse.ArgumentParser(description="Run SUAVE hard benchmark")
-    parser.add_argument("--epochs", type=int, default=30, help="Training epochs for SUAVE models")
+    parser.add_argument("--epochs", type=int, default=100, help="Training epochs for SUAVE models")
     parser.add_argument("--latent-dim", type=int, default=8, help="Latent dimension for SUAVE models")
     parser.add_argument(
         "--batch-size",

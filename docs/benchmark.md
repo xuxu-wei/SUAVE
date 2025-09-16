@@ -9,8 +9,9 @@ tasks as well as the new missingness variants. Results are stored in
 
 ```bash
 python tools/benchmark.py \
-    --epochs 20 \
+    --epochs 100 \
     --latent-dim 8 \
+    --batch-size 128 \
     --autogluon-time-limit 120
 ```
 
@@ -19,6 +20,11 @@ Optional arguments:
 - `--max-train-samples`: limit the number of training rows for each task.
 - `--output`: override the location of `candidate.json`.
 - `--current`: override the location of `current.json`.
+
+Keep the defaults (`epochs=100`, `batch_size=128`, no `--max-train-samples`) for
+regression-guard runs so that SUAVE trains to its intended performance ceiling.
+The lightweight smoke test in `tests/test_benchmarks_smoke.py` is only meant for
+quick wiring checks and must not replace the full benchmark during evaluation.
 
 During the first run the script attempts to import
 `autogluon.tabular.TabularPredictor`. If the package is missing the script
