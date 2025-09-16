@@ -25,6 +25,7 @@ from pathlib import Path
 
 from suave.api import SUAVE
 from suave.sklearn import SuaveClassifier
+from suave.models.suave import AnnealSchedule
 import torch
 
 # Suppress Optuna's output to keep benchmark tables clean
@@ -180,8 +181,131 @@ def benchmark_models(X_train, X_test, y_train, y_test, task_classes):
 
 
 def optimize_suave_params(X_train, y_train, task_classes):
-    """Placeholder hyperparameter search returning fixed defaults."""
-    return {"latent_dim": 8}
+    """Tune :class:`SuaveClassifier` hyperparameters with Optuna.
+
+    Parameters
+    ----------
+    X_train:
+        Preprocessed training features (imputed and scaled).
+    y_train:
+        Training labels for all tasks. The array shape is ``(n_samples, n_tasks)``
+        with integer encoded targets.
+    task_classes:
+        Number of classes for each prediction task.
+
+    Returns
+    -------
+    dict
+        Keyword arguments forwarded to :class:`SuaveClassifier` in the main
+        benchmark routine.
+    """
+
+    try:
+        import optuna
+        from optuna.trial import TrialState
+    except Exception:  # pragma: no cover - Optuna is an optional dependency
+        return {"latent_dim": 8}
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    def _split_has_classes(y: np.ndarray, require_full: bool) -> bool:
+        for idx, n_classes in enumerate(task_classes):
+            unique = np.unique(y[:, idx])
+            if len(unique) < min(n_classes, 2):
+                return False
+            if require_full and n_classes > 2 and len(unique) < n_classes:
+                return False
+        return True
+
+    rng_split = np.random.default_rng(20201021)
+    split = None
+    for require_full in (True, False):
+        for _ in range(50):
+            rs = int(rng_split.integers(0, 1_000_000))
+            candidate = train_test_split(
+                X_train, y_train, test_size=0.2, random_state=rs
+            )
+            X_tr, X_val, y_tr, y_val = candidate
+            if _split_has_classes(y_tr, True) and _split_has_classes(y_val, require_full):
+                split = candidate
+                break
+        if split is not None:
+            break
+    if split is None:
+        split = train_test_split(X_train, y_train, test_size=0.2, random_state=2023)
+    X_tr, X_val, y_tr, y_val = split
+
+    input_dim = X_train.shape[1]
+
+    def objective(trial: optuna.trial.Trial) -> float:
+        latent_dim = trial.suggest_int("latent_dim", 4, 32, step=4)
+        dropout = trial.suggest_float("dropout", 0.1, 0.5)
+        beta = trial.suggest_float("beta", 0.5, 2.0, log=True)
+        beta_start = trial.suggest_float("beta_start", 0.0, 0.4)
+        beta_end = trial.suggest_float("beta_end", beta_start + 0.1, 1.5)
+        beta_epochs = trial.suggest_int("beta_epochs", 5, 30)
+        lambda_start = trial.suggest_float("lambda_start", 0.3, 0.7)
+        lambda_end = trial.suggest_float("lambda_end", lambda_start + 0.05, 1.2)
+        lambda_epochs = trial.suggest_int("lambda_epochs", 5, 30)
+
+        beta_schedule = AnnealSchedule(beta_start, beta_end, beta_epochs)
+        lambda_schedule = AnnealSchedule(lambda_start, lambda_end, lambda_epochs)
+
+        seed = 20201021 + trial.number
+        np.random.seed(seed % (2**32))
+        torch.manual_seed(seed)
+
+        model = SuaveClassifier(
+            input_dim=input_dim,
+            task_classes=task_classes,
+            latent_dim=latent_dim,
+            dropout=dropout,
+            beta=beta,
+            beta_schedule=beta_schedule,
+            lambda_schedule=lambda_schedule,
+        )
+
+        model.fit(X_tr, y_tr, epochs=15)
+
+        try:
+            aucs = model.score(X_val, y_val)
+        except ValueError as exc:
+            raise optuna.TrialPruned(str(exc)) from exc
+
+        score = float(np.mean(aucs))
+        if not np.isfinite(score):
+            raise optuna.TrialPruned("Non-finite score")
+        return score
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=20201021),
+    )
+
+    study.optimize(objective, n_trials=12, timeout=180)
+
+    completed = [t for t in study.trials if t.state == TrialState.COMPLETE]
+    if not completed:
+        return {"latent_dim": 8}
+
+    best = study.best_trial
+    params = best.params
+    tuned = {
+        "latent_dim": int(params["latent_dim"]),
+        "dropout": float(params["dropout"]),
+        "beta": float(params["beta"]),
+        "beta_schedule": AnnealSchedule(
+            float(params["beta_start"]),
+            float(params["beta_end"]),
+            int(params["beta_epochs"]),
+        ),
+        "lambda_schedule": AnnealSchedule(
+            float(params["lambda_start"]),
+            float(params["lambda_end"]),
+            int(params["lambda_epochs"]),
+        ),
+    }
+    return tuned
 
 
 def run_task(generator, name):
