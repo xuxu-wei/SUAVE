@@ -23,6 +23,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
 
 from ..modules.losses import (
     gaussian_nll,
@@ -324,20 +325,48 @@ class SUAVE(nn.Module):
 
     # ---------------------------------------------------------------- training
     def fit(
-        self, X: np.ndarray, y: np.ndarray, epochs: int = 20, lr: float = 3e-4
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        epochs: int = 20,
+        lr: float = 3e-4,
+        batch_size: Optional[int] = None,
     ) -> "SUAVE":
-        """Train the model using full-batch optimisation.
+        """Train the model using (optional) mini-batch optimisation.
 
-        The routine is intentionally simple for testability.  Missing values in
-        ``X`` are indicated by ``NaN`` and are ignored in the reconstruction
-        loss while still influencing the encoder through the mask.
+        Parameters
+        ----------
+        X:
+            Training features where missing values are encoded as ``NaN``.
+        y:
+            Target labels encoded as integers ``[0, num_classes)``.
+        epochs:
+            Number of optimisation epochs (default: 20).
+        lr:
+            Learning rate for the AdamW optimiser.
+        batch_size:
+            Optional mini-batch size. When ``None`` (default) the method falls
+            back to full-batch training, preserving the previous behaviour.
         """
 
+        if batch_size is not None and batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer or None")
+
         self.train()
-        X_t = torch.as_tensor(X, dtype=torch.float32, device=self.device)
-        y_t = torch.as_tensor(y, dtype=torch.long, device=self.device)
+        X_t = torch.as_tensor(X, dtype=torch.float32)
+        y_t = torch.as_tensor(y, dtype=torch.long)
         mask = torch.isfinite(X_t).float()
         X_t = torch.nan_to_num(X_t, nan=0.0)
+
+        dataset = TensorDataset(X_t, mask, y_t)
+        if len(dataset) == 0:  # pragma: no cover - defensive
+            raise ValueError("Training data must contain at least one sample")
+        effective_batch = batch_size or len(dataset)
+        loader = DataLoader(
+            dataset,
+            batch_size=effective_batch,
+            shuffle=effective_batch < len(dataset),
+        )
 
         # retain training data for conditional generation
         self.X_train = X
@@ -348,53 +377,65 @@ class SUAVE(nn.Module):
 
         opt = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=1e-4)
         for epoch in range(epochs):
-            opt.zero_grad()
-            (
-                z,
-                recon_mu,
-                recon_log_sigma,
-                mu,
-                log_var,
-                logits,
-                _,
-                prior_mu,
-                prior_log_var,
-            ) = self.forward(
-                X_t, mask, y_t
-            )
-            nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask)
-            if prior_mu is not None and prior_log_var is not None:
-                kl = kl_divergence_between_normals(
-                    mu, log_var, prior_mu, prior_log_var
-                )
-            else:
-                kl = kl_divergence(mu, log_var)
-            ce = F.cross_entropy(logits, y_t)
-            beta = self.beta * linear_anneal(epoch, self.beta_schedule)
-            lam = linear_anneal(epoch, self.lambda_schedule)
-            if self.info_config is not None:
-                kl_weight = beta * self.info_config.kl_weight
-                info_weight = self.info_config.mmd_weight
-                prior_samples = torch.randn_like(z)
-                mmd = maximum_mean_discrepancy(
+            last_kl_weight = float(self._current_beta)
+            last_lambda = float(self._current_lambda)
+            last_mmd_weight = float(self._current_mmd)
+            for batch_X, batch_mask, batch_y in loader:
+                batch_X = batch_X.to(self.device)
+                batch_mask = batch_mask.to(self.device)
+                batch_y = batch_y.to(self.device)
+
+                opt.zero_grad(set_to_none=True)
+                (
                     z,
-                    prior_samples,
-                    kernel=self.info_config.kernel,
-                    bandwidth=self.info_config.kernel_bandwidth,
-                )
-                info_penalty = info_weight * mmd
-            else:
-                kl_weight = beta
-                info_weight = 0.0
-                info_penalty = kl.new_tensor(0.0)
-            loss = (nll + kl_weight * kl) + lam * ce + info_penalty
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.parameters(), 1.0)
-            opt.step()
+                    recon_mu,
+                    recon_log_sigma,
+                    mu,
+                    log_var,
+                    logits,
+                    _,
+                    prior_mu,
+                    prior_log_var,
+                ) = self.forward(batch_X, batch_mask, batch_y)
+
+                nll = gaussian_nll(recon_mu, recon_log_sigma, batch_X, batch_mask)
+                if prior_mu is not None and prior_log_var is not None:
+                    kl = kl_divergence_between_normals(
+                        mu, log_var, prior_mu, prior_log_var
+                    )
+                else:
+                    kl = kl_divergence(mu, log_var)
+                ce = F.cross_entropy(logits, batch_y)
+                beta = self.beta * linear_anneal(epoch, self.beta_schedule)
+                lam = linear_anneal(epoch, self.lambda_schedule)
+                if self.info_config is not None:
+                    kl_weight = beta * self.info_config.kl_weight
+                    info_weight = self.info_config.mmd_weight
+                    prior_samples = torch.randn_like(z)
+                    mmd = maximum_mean_discrepancy(
+                        z,
+                        prior_samples,
+                        kernel=self.info_config.kernel,
+                        bandwidth=self.info_config.kernel_bandwidth,
+                    )
+                    info_penalty = info_weight * mmd
+                else:
+                    kl_weight = beta
+                    info_weight = 0.0
+                    info_penalty = kl.new_tensor(0.0)
+                loss = (nll + kl_weight * kl) + lam * ce + info_penalty
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+                opt.step()
+
+                last_kl_weight = float(kl_weight)
+                last_lambda = float(lam)
+                last_mmd_weight = float(info_weight)
+
             self._last_epoch = epoch
-            self._current_beta = float(kl_weight)
-            self._current_lambda = float(lam)
-            self._current_mmd = float(info_weight)
+            self._current_beta = last_kl_weight
+            self._current_lambda = last_lambda
+            self._current_mmd = last_mmd_weight
         return self
 
     # --------------------------------------------------------------- inference
