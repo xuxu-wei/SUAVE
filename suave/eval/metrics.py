@@ -15,9 +15,11 @@ from sklearn.metrics import (
 
 def classification_metrics(y_true: np.ndarray, proba: np.ndarray) -> Dict[str, float]:
     """Return a dictionary of common classification metrics."""
+    classes = np.unique(y_true)
+    pos_label = classes[-1]
     return {
         "auroc": roc_auc_score(y_true, proba),
-        "auprc": average_precision_score(y_true, proba),
+        "auprc": average_precision_score(y_true, proba, pos_label=pos_label),
         "brier": brier_score_loss(y_true, proba),
         "nll": log_loss(y_true, proba),
     }

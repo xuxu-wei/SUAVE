@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import numpy as np
+from functools import partial
+
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.neighbors import KNeighborsClassifier
@@ -15,6 +17,32 @@ try:  # optional dependency
     from xgboost import XGBClassifier
 except Exception:  # pragma: no cover - optional
     XGBClassifier = None
+
+
+def _select_binary_scores(
+    y_true: np.ndarray,
+    proba: np.ndarray,
+    class_order: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return scores aligned with the positive class for binary problems."""
+
+    if proba.ndim == 1 or proba.shape[1] == 1:
+        return proba.squeeze()
+
+    classes = np.unique(y_true)
+    if classes.size < 2:
+        return proba.squeeze()
+
+    order = np.asarray(class_order) if class_order is not None else classes
+    if order.ndim != 1:
+        order = order.ravel()
+    if order.shape[0] != proba.shape[1]:
+        order = classes if classes.size == proba.shape[1] else np.arange(proba.shape[1])
+
+    pos_label = classes[-1]
+    matches = np.flatnonzero(order == pos_label)
+    idx = int(matches[0]) if matches.size else proba.shape[1] - 1
+    return proba[:, idx]
 
 
 def tstr_auc(
@@ -75,17 +103,16 @@ def tstr_auc(
 
     clf.fit(Xtr, y_gen)
 
+    class_order = getattr(clf, "classes_", None)
     if hasattr(clf, "predict_proba"):
         proba = clf.predict_proba(Xte)
-        if proba.ndim == 2 and proba.shape[1] > 1:
-            scores = proba[:, 1]
-        else:
-            scores = proba.squeeze()
+        scores = _select_binary_scores(y_test, proba, class_order)
     else:
         scores = clf.decision_function(Xte)
         if scores.ndim != 1:
             exp_s = np.exp(scores)
-            scores = exp_s[:, 1] / exp_s.sum(axis=1)
+            norm = exp_s / exp_s.sum(axis=1, keepdims=True)
+            scores = _select_binary_scores(y_test, norm, class_order)
 
     return float(roc_auc_score(y_test, scores))
 
@@ -102,16 +129,16 @@ def _estimator_factory(name: str):
     raise ValueError(name)
 
 
-def _predict_scores(clf, X: np.ndarray) -> np.ndarray:
+def _predict_scores(clf, X: np.ndarray, y_true: np.ndarray) -> np.ndarray:
+    class_order = getattr(clf, "classes_", None)
     if hasattr(clf, "predict_proba"):
         proba = clf.predict_proba(X)
-        if proba.ndim == 2 and proba.shape[1] > 1:
-            return proba[:, 1]
-        return proba.squeeze()
+        return _select_binary_scores(y_true, proba, class_order)
     scores = clf.decision_function(X)
     if scores.ndim != 1:
         exp_s = np.exp(scores)
-        return exp_s[:, 1] / exp_s.sum(axis=1)
+        norm = exp_s / exp_s.sum(axis=1, keepdims=True)
+        return _select_binary_scores(y_true, norm, class_order)
     return scores
 
 
@@ -172,18 +199,33 @@ def tstr_vs_trtr(
     est_tstr.fit(X_syn, y_syn)
     est_trtr.fit(X_train, y_train)
 
-    scores_tstr = _predict_scores(est_tstr, X_test)
-    scores_trtr = _predict_scores(est_trtr, X_test)
+    scores_tstr = _predict_scores(est_tstr, X_test, y_test)
+    scores_trtr = _predict_scores(est_trtr, X_test, y_test)
+
+    classes = np.unique(y_test)
+    pos_label = classes[-1]
 
     auc_tstr = roc_auc_score(y_test, scores_tstr)
     auc_trtr = roc_auc_score(y_test, scores_trtr)
-    pr_tstr = average_precision_score(y_test, scores_tstr)
-    pr_trtr = average_precision_score(y_test, scores_trtr)
+    pr_tstr = average_precision_score(y_test, scores_tstr, pos_label=pos_label)
+    pr_trtr = average_precision_score(y_test, scores_trtr, pos_label=pos_label)
 
     ci_auc_tstr = _bootstrap_ci(y_test, scores_tstr, roc_auc_score, n_boot, seed)
     ci_auc_trtr = _bootstrap_ci(y_test, scores_trtr, roc_auc_score, n_boot, seed)
-    ci_pr_tstr = _bootstrap_ci(y_test, scores_tstr, average_precision_score, n_boot, seed)
-    ci_pr_trtr = _bootstrap_ci(y_test, scores_trtr, average_precision_score, n_boot, seed)
+    ci_pr_tstr = _bootstrap_ci(
+        y_test,
+        scores_tstr,
+        partial(average_precision_score, pos_label=pos_label),
+        n_boot,
+        seed,
+    )
+    ci_pr_trtr = _bootstrap_ci(
+        y_test,
+        scores_trtr,
+        partial(average_precision_score, pos_label=pos_label),
+        n_boot,
+        seed,
+    )
 
     diagnostics = _data_diagnostics(X_train, X_syn)
 

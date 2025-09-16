@@ -90,9 +90,20 @@ def _compute_task_metrics(
         metrics["acc_top1"] = float(accuracy_score(y_true, pred))
         metrics["f1_macro"] = float(f1_score(y_true, pred, average="macro"))
     else:
-        metrics["auroc_macro"] = float(roc_auc_score(y_true, proba[:, 1]))
+        classes = np.unique(y_true)
+        pos_label = classes[-1]
+        if proba.ndim == 1 or proba.shape[1] == 1:
+            scores = proba.squeeze()
+        else:
+            class_order = classes if classes.size == proba.shape[1] else np.arange(proba.shape[1])
+            matches = np.flatnonzero(class_order == pos_label)
+            pos_idx = int(matches[0]) if matches.size else proba.shape[1] - 1
+            scores = proba[:, pos_idx]
+        metrics["auroc_macro"] = float(roc_auc_score(y_true, scores))
         metrics["auroc_micro"] = metrics["auroc_macro"]
-        metrics["auprc_macro"] = float(average_precision_score(y_true, proba[:, 1]))
+        metrics["auprc_macro"] = float(
+            average_precision_score(y_true, scores, pos_label=pos_label)
+        )
         metrics["auprc_micro"] = metrics["auprc_macro"]
         metrics["acc_top1"] = float(accuracy_score(y_true, pred))
         metrics["f1_macro"] = float(f1_score(y_true, pred))

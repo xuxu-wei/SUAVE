@@ -50,11 +50,20 @@ def compute_task_metrics(
             "f1_macro": float(f1_score(y_true, pred, average="macro")),
         }
     else:
+        classes = np.unique(y_true)
+        pos_label = classes[-1]
+        if proba.ndim == 1 or proba.shape[1] == 1:
+            scores = proba.squeeze()
+        else:
+            class_order = classes if classes.size == proba.shape[1] else np.arange(proba.shape[1])
+            matches = np.flatnonzero(class_order == pos_label)
+            pos_idx = int(matches[0]) if matches.size else proba.shape[1] - 1
+            scores = proba[:, pos_idx]
         metrics = {
-            "auroc_macro": float(roc_auc_score(y_true, proba[:, 1])),
-            "auroc_micro": float(roc_auc_score(y_true, proba[:, 1])),
-            "auprc_macro": float(average_precision_score(y_true, proba[:, 1])),
-            "auprc_micro": float(average_precision_score(y_true, proba[:, 1])),
+            "auroc_macro": float(roc_auc_score(y_true, scores)),
+            "auroc_micro": float(roc_auc_score(y_true, scores)),
+            "auprc_macro": float(average_precision_score(y_true, scores, pos_label=pos_label)),
+            "auprc_micro": float(average_precision_score(y_true, scores, pos_label=pos_label)),
             "acc_top1": float(accuracy_score(y_true, pred)),
             "f1_macro": float(f1_score(y_true, pred)),
         }

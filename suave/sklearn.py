@@ -63,12 +63,21 @@ class SuaveClassifier:
 
     def score(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
         probas = self.predict_proba(X)
-        scores = []
+        auc_scores = []
         for idx, (c, proba) in enumerate(zip(self.task_classes, probas)):
             y = Y[:, idx]
             if c > 2:
                 auc = roc_auc_score(y, proba, multi_class="ovr", average="macro")
             else:
-                auc = roc_auc_score(y, proba[:, 1])
-            scores.append(auc)
-        return np.asarray(scores)
+                classes = np.unique(y)
+                if proba.ndim == 1 or proba.shape[1] == 1:
+                    pos_scores = proba.squeeze()
+                else:
+                    pos_label = classes[-1]
+                    class_order = classes if classes.size == proba.shape[1] else np.arange(proba.shape[1])
+                    matches = np.flatnonzero(class_order == pos_label)
+                    pos_idx = int(matches[0]) if matches.size else proba.shape[1] - 1
+                    pos_scores = proba[:, pos_idx]
+                auc = roc_auc_score(y, pos_scores)
+            auc_scores.append(auc)
+        return np.asarray(auc_scores)

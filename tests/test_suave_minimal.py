@@ -15,6 +15,7 @@ from suave.modules.calibration import (
 )
 from suave.eval.tstr import tstr_auc, tstr_vs_trtr
 from suave.eval.interpret import latent_feature_correlation, latent_projection
+from tests.utils.benchmarking import compute_task_metrics
 
 
 def test_generation_calibration_tstr():
@@ -22,6 +23,7 @@ def test_generation_calibration_tstr():
     torch.manual_seed(0)
     X = rng.normal(size=(200, 4))
     y = (X[:, 0] + 0.1 * rng.normal(size=200) > 0).astype(int)
+    classes = np.unique(y)
 
     model = SUAVE(input_dim=4, latent_dim=2)
     model.fit(X, y, epochs=30)
@@ -30,15 +32,18 @@ def test_generation_calibration_tstr():
     assert df.shape == (50, 4)
     assert not df.isna().any().any()
 
-    df_pos = model.generate(10, conditional={"y": np.ones(10)}, seed=2)
+    df_pos = model.generate(10, conditional={"y": np.full(10, classes[-1])}, seed=2)
     assert df_pos.shape == (10, 4)
     assert not df_pos.isna().any().any()
 
     logits = model.predict_logits(X)
-    probs = model.predict_proba(X)[:, 1]
+    proba = model.predict_proba(X)
+    pos_idx = int(np.flatnonzero(classes == classes[-1])[0]) if classes.size > 1 else 0
+    probs = proba[:, pos_idx]
     ece_before = expected_calibration_error(probs, y)
     scaler = TemperatureScaler().fit(logits, torch.as_tensor(y))
-    probs_after = scaler.predict_proba(logits)[:, 1]
+    proba_after = scaler.predict_proba(logits)
+    probs_after = proba_after[:, pos_idx] if proba_after.ndim > 1 else proba_after.squeeze()
     ece_after = expected_calibration_error(probs_after, y)
     assert ece_after <= ece_before + 0.05
 
@@ -111,3 +116,21 @@ def test_suave_fit_invalid_batch_size() -> None:
     model = SUAVE(input_dim=2, latent_dim=2)
     with pytest.raises(ValueError):
         model.fit(X, y, batch_size=0)
+
+
+def test_compute_metrics_with_shifted_labels() -> None:
+    y_true = np.array([1, 2, 1, 2])
+    proba = np.array(
+        [
+            [0.95, 0.05],
+            [0.05, 0.95],
+            [0.9, 0.1],
+            [0.1, 0.9],
+        ]
+    )
+    preds = np.array([1, 2, 1, 2])
+
+    metrics = compute_task_metrics(y_true, proba, preds, num_classes=2)
+
+    assert metrics["auroc_macro"] == pytest.approx(1.0)
+    assert metrics["auprc_macro"] == pytest.approx(1.0)

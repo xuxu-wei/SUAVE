@@ -63,7 +63,16 @@ class SingleTaskSuave:
         proba = self.predict_proba(X)
         if self.num_classes > 2:
             return float(roc_auc_score(y, proba, multi_class="ovr", average="macro"))
-        return float(roc_auc_score(y, proba[:, 1]))
+        classes = np.unique(y)
+        if proba.ndim == 1 or proba.shape[1] == 1:
+            scores = proba.squeeze()
+        else:
+            pos_label = classes[-1]
+            class_order = classes if classes.size == proba.shape[1] else np.arange(proba.shape[1])
+            matches = np.flatnonzero(class_order == pos_label)
+            pos_idx = int(matches[0]) if matches.size else proba.shape[1] - 1
+            scores = proba[:, pos_idx]
+        return float(roc_auc_score(y, scores))
 
 
 class SuaveImputeWrapper:
