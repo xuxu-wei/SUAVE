@@ -27,9 +27,9 @@ import torch.nn.functional as F
 from ..modules.losses import (
     gaussian_nll,
     kl_divergence,
+    kl_divergence_between_normals,
     linear_anneal,
     maximum_mean_discrepancy,
-
 )
 
 
@@ -113,7 +113,9 @@ class Encoder(nn.Module):
         self.mu = nn.Linear(128, latent_dim)
         self.log_var = nn.Linear(128, latent_dim)
 
-    def forward(self, x: torch.Tensor, m: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, m: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         h = self.net(torch.cat([x, m], dim=-1))
         return self.mu(h), self.log_var(h), h
 
@@ -359,14 +361,10 @@ class SUAVE(nn.Module):
                 _,
                 prior_mu,
                 prior_log_var,
-            ) = self.forward(
-                X_t, mask, y_t
-            )
+            ) = self.forward(X_t, mask, y_t)
             nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask)
             if prior_mu is not None and prior_log_var is not None:
-                kl = kl_divergence_between_normals(
-                    mu, log_var, prior_mu, prior_log_var
-                )
+                kl = kl_divergence_between_normals(mu, log_var, prior_mu, prior_log_var)
             else:
                 kl = kl_divergence(mu, log_var)
             ce = F.cross_entropy(logits, y_t)
@@ -444,7 +442,9 @@ class SUAVE(nn.Module):
             else:
                 y_vec = np.asarray(y_cond, dtype=int)
                 if len(y_vec) != n_samples:
-                    raise ValueError("Length of conditional labels must match n_samples")
+                    raise ValueError(
+                        "Length of conditional labels must match n_samples"
+                    )
         else:
             if hasattr(self, "label_distribution"):
                 probs = self.label_distribution
@@ -496,7 +496,7 @@ class SUAVE(nn.Module):
         X_t = torch.nan_to_num(X_t, nan=0.0)
         with torch.no_grad():
             (
-                _,
+                z,
                 recon_mu,
                 recon_log_sigma,
                 mu,
@@ -505,9 +505,7 @@ class SUAVE(nn.Module):
                 _,
                 prior_mu,
                 prior_log_var,
-            ) = self.forward(
-                X_t, mask, y_t
-            )
+            ) = self.forward(X_t, mask, y_t)
             nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask)
             kl = kl_divergence(mu, log_var)
             ce = F.cross_entropy(logits, y_t)
@@ -537,6 +535,4 @@ class SUAVE(nn.Module):
         )
 
 
-
 __all__ = ["SUAVE", "AnnealSchedule", "InfoVAEConfig"]
-
