@@ -53,6 +53,14 @@ z = model.latent(X_test)
 * ``generate(n, conditional=None, seed=None)`` – create synthetic samples.
 * ``latent(X)`` – extract latent representations.
 
+## Evaluation helpers
+
+The ``suave.eval.classification_metrics`` utility reports AUROC, AUPRC, Brier
+score and negative log-likelihood for both binary and multi-class classification
+problems. It accepts either a probability vector for the positive class or a
+full probability matrix with one column per class and transparently selects the
+appropriate reduction strategy (binary vs. one-vs-rest macro averages).
+
 ## License
 
 BSD-3-Clause
