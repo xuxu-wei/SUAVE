@@ -7,9 +7,10 @@
 ## Training and Evaluation Entrypoints
 - `SuaveClassifier.fit`: trains SUAVE models.
 - `SuaveClassifier.score` / `predict_proba`: evaluation utilities used in benchmarks.
-- `tests/test_benchmarks.py`: synthetic data benchmark invoking the above APIs.
+- `tools/benchmark.py`: full hard-task benchmark and regression guard maximizing SUAVE performance across missingness variants.
+- `tests/test_benchmarks_smoke.py`: lightweight smoke-test benchmark verifying the wiring for the above APIs.
 
-## tests/test_benchmarks.py Dependencies
+## Benchmark Dependencies
 - `numpy`, `pandas`
 - `scikit-learn`: `train_test_split`, `Pipeline`, `StandardScaler`, `SimpleImputer`,
   `LogisticRegression`, `SVC`, `KNeighborsClassifier`, `RandomForestClassifier`,
