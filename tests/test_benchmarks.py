@@ -238,15 +238,15 @@ def optimize_suave_params(X_train, y_train, task_classes):
     input_dim = X_train.shape[1]
 
     def objective(trial: optuna.trial.Trial) -> float:
-        latent_dim = trial.suggest_int("latent_dim", 4, 32, step=4)
-        dropout = trial.suggest_float("dropout", 0.1, 0.5)
-        beta = trial.suggest_float("beta", 0.5, 2.0, log=True)
-        beta_start = trial.suggest_float("beta_start", 0.0, 0.4)
-        beta_end = trial.suggest_float("beta_end", beta_start + 0.1, 1.5)
-        beta_epochs = trial.suggest_int("beta_epochs", 5, 30)
-        lambda_start = trial.suggest_float("lambda_start", 0.3, 0.7)
-        lambda_end = trial.suggest_float("lambda_end", lambda_start + 0.05, 1.2)
-        lambda_epochs = trial.suggest_int("lambda_epochs", 5, 30)
+        latent_dim = trial.suggest_int("latent_dim", 4, 64, step=4)
+        dropout = trial.suggest_float("dropout", 0.0, 0.6)
+        beta = trial.suggest_float("beta", 0.1, 4.0, log=True)
+        beta_start = trial.suggest_float("beta_start", 0.0, 0.8)
+        beta_end = trial.suggest_float("beta_end", beta_start + 0.05, 3.0)
+        beta_epochs = trial.suggest_int("beta_epochs", 5, 60)
+        lambda_start = trial.suggest_float("lambda_start", 0.05, 1.0)
+        lambda_end = trial.suggest_float("lambda_end", lambda_start + 0.05, 2.0)
+        lambda_epochs = trial.suggest_int("lambda_epochs", 5, 60)
 
         beta_schedule = AnnealSchedule(beta_start, beta_end, beta_epochs)
         lambda_schedule = AnnealSchedule(lambda_start, lambda_end, lambda_epochs)
@@ -265,7 +265,7 @@ def optimize_suave_params(X_train, y_train, task_classes):
             lambda_schedule=lambda_schedule,
         )
 
-        model.fit(X_tr, y_tr, epochs=15)
+        model.fit(X_tr, y_tr, epochs=6)
 
         try:
             aucs = model.score(X_val, y_val)
@@ -282,7 +282,7 @@ def optimize_suave_params(X_train, y_train, task_classes):
         sampler=optuna.samplers.TPESampler(seed=20201021),
     )
 
-    study.optimize(objective, n_trials=12, timeout=180)
+    study.optimize(objective, n_trials=6, timeout=90)
 
     completed = [t for t in study.trials if t.state == TrialState.COMPLETE]
     if not completed:
@@ -308,7 +308,7 @@ def optimize_suave_params(X_train, y_train, task_classes):
     return tuned
 
 
-def run_task(generator, name):
+def run_task(generator, dataset_name):
     X, Y, task_classes = generator()
     for _ in range(10):
         rs = rng.integers(0, 1_000_000)
@@ -383,23 +383,37 @@ def run_task(generator, name):
             ],
             ignore_index=True,
         )
+    bench["dataset"] = dataset_name
     return bench, recon_loss, metrics, int(rs)
 
 
 def test_benchmarks():
-    tasks = [(generate_simple, "simple")]
+    tasks = [
+        (generate_simple, "simple"),
+        (generate_medium, "medium"),
+        (generate_hard, "hard"),
+    ]
     recon_rows = []
     tables = []
     seeds = {}
     hard_task_metrics = {}
+    all_results = []
     for gen, name in tasks:
         res_df, recon, metrics, seed = run_task(gen, name)
-        table = res_df.pivot(index="model", columns="task", values="auc")
-        tables.append((name, table))
+        tables.append((name, res_df.pivot(index="model", columns="task", values="auc")))
         recon_rows.append({"dataset": name, "recon": recon})
         if name == "hard":
             hard_task_metrics = {f"y{i+1}": m for i, m in enumerate(metrics)}
         seeds[name] = seed
+        all_results.append(res_df)
+
+    combined = pd.concat(all_results, ignore_index=True)
+    dataset_order = [name for _, name in tasks]
+    combined_table = combined.pivot(index="model", columns=["dataset", "task"], values="auc")
+    combined_table = combined_table.loc[
+        :, sorted(combined_table.columns, key=lambda c: (dataset_order.index(c[0]), c[1]))
+    ]
+    print("\nBenchmark AUCs (all difficulties):\n", combined_table.to_markdown())
 
     for name, table in tables:
         print(f"\nBenchmark AUCs ({name}):\n", table.to_markdown())
