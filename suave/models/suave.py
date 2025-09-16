@@ -27,9 +27,9 @@ import torch.nn.functional as F
 from ..modules.losses import (
     gaussian_nll,
     kl_divergence,
+    kl_divergence_between_normals,
     linear_anneal,
     maximum_mean_discrepancy,
-
 )
 
 
@@ -496,7 +496,7 @@ class SUAVE(nn.Module):
         X_t = torch.nan_to_num(X_t, nan=0.0)
         with torch.no_grad():
             (
-                _,
+                z,
                 recon_mu,
                 recon_log_sigma,
                 mu,
@@ -509,7 +509,12 @@ class SUAVE(nn.Module):
                 X_t, mask, y_t
             )
             nll = gaussian_nll(recon_mu, recon_log_sigma, X_t, mask)
-            kl = kl_divergence(mu, log_var)
+            if prior_mu is not None and prior_log_var is not None:
+                kl = kl_divergence_between_normals(
+                    mu, log_var, prior_mu, prior_log_var
+                )
+            else:
+                kl = kl_divergence(mu, log_var)
             ce = F.cross_entropy(logits, y_t)
             kl_weight = kl.new_tensor(self._current_beta)
             lam = ce.new_tensor(self._current_lambda)
