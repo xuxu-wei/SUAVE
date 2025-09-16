@@ -42,8 +42,15 @@ class SingleTaskSuave:
             num_classes=self.num_classes,
         )
 
-    def fit(self, X: np.ndarray, y: np.ndarray, epochs: int = 20) -> "SingleTaskSuave":
-        self.model.fit(X, y, epochs=epochs)
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        epochs: int = 20,
+        *,
+        batch_size: int | None = None,
+    ) -> "SingleTaskSuave":
+        self.model.fit(X, y, epochs=epochs, batch_size=batch_size)
         return self
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
@@ -78,9 +85,16 @@ class SuaveImputeWrapper:
             latent_dim=latent_dim,
         )
 
-    def fit(self, X: np.ndarray, Y: np.ndarray, epochs: int = 20) -> "SuaveImputeWrapper":
+    def fit(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        epochs: int = 20,
+        *,
+        batch_size: int | None = None,
+    ) -> "SuaveImputeWrapper":
         X_imp = self.imputer.fit_transform(X)
-        self.model.fit(X_imp, Y, epochs=epochs)
+        self.model.fit(X_imp, Y, epochs=epochs, batch_size=batch_size)
         return self
 
     def predict_proba(self, X: np.ndarray) -> List[np.ndarray]:

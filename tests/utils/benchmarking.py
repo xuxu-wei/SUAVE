@@ -141,6 +141,7 @@ def run_suave_models(
     variants: Iterable[str] = ("suave", "suave-impute", "suave-single"),
     latent_dim: int = 8,
     epochs: int = 20,
+    batch_size: int | None = None,
     base_seed: int = 0,
 ) -> Dict[str, Dict[str, object]]:
     """Train and evaluate SUAVE-based models."""
@@ -152,7 +153,7 @@ def run_suave_models(
     if "suave" in variant_set:
         _set_seed(base_seed)
         model = create_suave_classifier(input_dim, list(task_classes), latent_dim=latent_dim)
-        model.fit(X_train, y_train, epochs=epochs)
+        model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size)
         probas = model.predict_proba(X_test)
         preds = model.predict(X_test)
         metrics = {
@@ -173,7 +174,7 @@ def run_suave_models(
             latent_dim=latent_dim,
             random_state=base_seed + 1,
         )
-        wrapper.fit(X_train, y_train, epochs=epochs)
+        wrapper.fit(X_train, y_train, epochs=epochs, batch_size=batch_size)
         probas = wrapper.predict_proba(X_test)
         preds = wrapper.predict(X_test)
         metrics = {
@@ -191,7 +192,7 @@ def run_suave_models(
         for idx, num_classes in enumerate(task_classes):
             _set_seed(base_seed + 2 + idx)
             model = SingleTaskSuave(input_dim=input_dim, num_classes=num_classes, latent_dim=latent_dim)
-            model.fit(X_train, y_train[:, idx], epochs=epochs)
+            model.fit(X_train, y_train[:, idx], epochs=epochs, batch_size=batch_size)
             proba = model.predict_proba(X_test)
             pred = model.predict(X_test)
             single_metrics[f"y{idx + 1}"] = compute_task_metrics(

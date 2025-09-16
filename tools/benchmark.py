@@ -38,6 +38,7 @@ SUAVE_VARIANTS = ("suave", "suave-impute", "suave-single")
 class BenchmarkConfig:
     epochs: int
     latent_dim: int
+    batch_size: Optional[int]
     max_train_samples: Optional[int]
     autogluon_time_limit: int
     output: Path
@@ -150,6 +151,7 @@ def _evaluate_task(
         variants=SUAVE_VARIANTS,
         latent_dim=config.latent_dim,
         epochs=config.epochs,
+        batch_size=config.batch_size,
         base_seed=task.seed + split_seed,
     )
     baselines = _group_baseline_results(
@@ -197,6 +199,7 @@ def run_benchmark(config: BenchmarkConfig) -> Dict[str, object]:
     metadata = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "epochs": config.epochs,
+        "batch_size": config.batch_size,
         "latent_dim": config.latent_dim,
         "max_train_samples": config.max_train_samples,
         "autogluon_status": ag_status if ag_status else "available",
@@ -248,8 +251,14 @@ def _update_current(candidate: Dict[str, object], current_path: Path) -> None:
 
 def parse_args(argv: Iterable[str] | None = None) -> BenchmarkConfig:
     parser = argparse.ArgumentParser(description="Run SUAVE hard benchmark")
-    parser.add_argument("--epochs", type=int, default=20, help="Training epochs for SUAVE models")
+    parser.add_argument("--epochs", type=int, default=30, help="Training epochs for SUAVE models")
     parser.add_argument("--latent-dim", type=int, default=8, help="Latent dimension for SUAVE models")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=128,
+        help="Mini-batch size for SUAVE models (use -1 for full batch)",
+    )
     parser.add_argument(
         "--max-train-samples",
         type=int,
@@ -278,6 +287,7 @@ def parse_args(argv: Iterable[str] | None = None) -> BenchmarkConfig:
     return BenchmarkConfig(
         epochs=args.epochs,
         latent_dim=args.latent_dim,
+        batch_size=None if args.batch_size in (-1, 0) else args.batch_size,
         max_train_samples=args.max_train_samples,
         autogluon_time_limit=args.autogluon_time_limit,
         output=args.output,

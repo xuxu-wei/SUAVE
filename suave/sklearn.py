@@ -42,9 +42,17 @@ class SuaveClassifier:
             for c in task_classes
         ]
 
-    def fit(self, X: np.ndarray, Y: np.ndarray, epochs: int = 20, **_: object) -> "SuaveClassifier":
+    def fit(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        epochs: int = 20,
+        *,
+        batch_size: int | None = None,
+        **_: object,
+    ) -> "SuaveClassifier":
         for model, y in zip(self.models, Y.T):
-            model.fit(X, y, epochs=epochs)
+            model.fit(X, y, epochs=epochs, batch_size=batch_size)
         return self
 
     def predict_proba(self, X: np.ndarray) -> List[np.ndarray]:
