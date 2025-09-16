@@ -22,7 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from suave.api import InfoVAEConfig
 from suave.sklearn import SuaveClassifier
-from tests.test_benchmarks import generate_hard
+from tests.utils.benchmark_tasks import generate_hard
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,8 @@ def _set_seed(seed: int) -> None:
 def _prepare_split(
     seed: int, max_attempts: int = 50
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[int], int]:
-    X, Y, task_classes = generate_hard()
+    data = generate_hard(seed=seed)
+    X, Y, task_classes = data.features, data.targets, data.task_classes
     rng = np.random.default_rng(seed)
     for _ in range(max_attempts):
         random_state = int(rng.integers(0, 1_000_000))
