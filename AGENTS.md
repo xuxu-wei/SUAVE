@@ -6,6 +6,13 @@
 - 保持对现有 **`SUAVE` 主类**与 README 快速开始示例的**完全兼容**（`from suave import SUAVE` / `fit/predict_proba/generate/latent` 等）。
 - 所有**具体开发任务**由“任务 Prompt”下发；本文件只定义**角色、约束、质量门槛、回归守护与提交规范**。
 - 任何改动不得破坏 `tests/` 下的基准用例（尤其是分类性能监控用例）。
+- **环境初始化提示**：启动任务前请按照 AutoGluon 官网推荐命令安装全量 AutoGluon 依赖：
+
+  ```bash
+  pip install -U pip
+  pip install -U setuptools wheel
+  pip install autogluon --extra-index-url https://download.pytorch.org/whl/cpu
+  ```
 
 ------
 
@@ -33,7 +40,8 @@
 [Context]
 - 受影响模块：suave/* （尽量列出）
 - 相关API：SUAVE.fit / predict_proba / generate / latent（保持兼容）  # 来自 README 的公开接口
-- 评测基线：tests/test_benchmarks.py （分类指标）                      # 基准用例路径
+- 评测基线：`python tools/benchmark.py --epochs 100 --latent-dim 8 --batch-size 128`（全量 hard + 缺失率任务；需保持默认训练配置以发挥 SUAVE 性能）
+- 冒烟校验：`pytest tests/test_benchmarks_smoke.py -s`（快速检查基准管线接线）
 - 资源/限制：单卡或 CPU 可运行；单测 ≤10 分钟；不得新增重型依赖
 
 [Spec]
@@ -60,10 +68,11 @@
 
 **何时必跑基线**：改动涉及 **模型结构、损失、训练流程** 任一项。
 运行：
-   `pytest tests/test_benchmarks.py -s`
+  ` pytest tests/test_benchmarks.py -s`
    `python tools/compare_baselines.py || echo "REGRESSION>3pp"`
 
 - 若第一次生成 current.json，允许 candidate 覆盖为 current 以建立基线
+- 如需快速接线验证，可额外运行 `pytest tests/test_benchmarks_smoke.py -s`，但不得以其代替全量基准。
 
 **红线（示例，可在任务中覆盖）**
 
@@ -73,7 +82,7 @@
 
 **产物**
 
-- 将“前/后”对比写入 `reports/`（CSV/JSON），并在 PR 说明中贴出图表（ROC/PR/可靠性图）与关键数值。
+- 将“前/后”对比写入 `reports/`（CSV/JSON），并在 PR 说明中给出性能（ROC/PR）变化摘要。
 
 ------
 
