@@ -112,7 +112,6 @@ def _evaluate_autogluon(
                     train_df,
                     time_limit=time_limit,
                     presets="medium_quality_faster_train",
-                    random_state=seed + idx,
                 )
                 proba_df = predictor.predict_proba(test_df)
                 proba = proba_df.to_numpy()
