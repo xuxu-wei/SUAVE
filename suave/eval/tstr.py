@@ -80,7 +80,13 @@ def tstr_auc(
     _validate_multiclass_scores(scores, classes)
 
     if len(classes) > 2:
-        auc = roc_auc_score(y_test, scores, multi_class="ovr", average="macro")
+        auc = roc_auc_score(
+            y_test,
+            scores,
+            multi_class="ovr",
+            average="macro",
+            labels=classes,
+        )
     else:
         auc = roc_auc_score(y_test, scores)
 
@@ -241,8 +247,20 @@ def tstr_vs_trtr(
     _validate_multiclass_scores(scores_trtr, classes_trtr)
 
     if len(classes_tstr) > 2:
-        auc_tstr = roc_auc_score(y_test, scores_tstr, multi_class="ovr", average="macro")
-        auc_trtr = roc_auc_score(y_test, scores_trtr, multi_class="ovr", average="macro")
+        auc_tstr = roc_auc_score(
+            y_test,
+            scores_tstr,
+            multi_class="ovr",
+            average="macro",
+            labels=classes_tstr,
+        )
+        auc_trtr = roc_auc_score(
+            y_test,
+            scores_trtr,
+            multi_class="ovr",
+            average="macro",
+            labels=classes_trtr,
+        )
         y_test_bin_tstr = label_binarize(y_test, classes=classes_tstr)
         y_test_bin_trtr = label_binarize(y_test, classes=classes_trtr)
         pr_tstr = average_precision_score(
@@ -257,7 +275,7 @@ def tstr_vs_trtr(
             roc_auc_score,
             n_boot,
             seed,
-            {"multi_class": "ovr", "average": "macro"},
+            {"multi_class": "ovr", "average": "macro", "labels": classes_tstr},
         )
         ci_auc_trtr = _bootstrap_ci(
             y_test,
@@ -265,7 +283,7 @@ def tstr_vs_trtr(
             roc_auc_score,
             n_boot,
             seed,
-            {"multi_class": "ovr", "average": "macro"},
+            {"multi_class": "ovr", "average": "macro", "labels": classes_trtr},
         )
         ci_pr_tstr = _bootstrap_ci(
             y_test_bin_tstr,
