@@ -2,6 +2,7 @@ import os
 import sys
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
@@ -111,3 +112,51 @@ def test_suave_fit_invalid_batch_size() -> None:
     model = SUAVE(input_dim=2, latent_dim=2)
     with pytest.raises(ValueError):
         model.fit(X, y, batch_size=0)
+
+
+def test_tstr_multiclass_support() -> None:
+    rng = np.random.default_rng(123)
+    X_train = rng.normal(size=(120, 5))
+    y_train = rng.integers(0, 3, size=120)
+    X_test = rng.normal(size=(60, 5))
+    y_test = rng.integers(0, 3, size=60)
+
+    class EchoGenerator:
+        def __init__(self, data: np.ndarray):
+            self._data = np.asarray(data)
+
+        def generate(self, n: int, conditional=None, seed: int | None = None):  # noqa: ANN001
+            if seed is None:
+                idx = np.arange(n) % len(self._data)
+            else:
+                rng_local = np.random.default_rng(seed)
+                idx = rng_local.integers(0, len(self._data), size=n)
+            generated = self._data[idx].copy()
+            return pd.DataFrame(generated)
+
+    model = EchoGenerator(X_train)
+
+    auc = tstr_auc(model, X_train, y_train, X_test, y_test, estimator="logreg")
+    assert 0.0 <= auc <= 1.0
+
+    results = tstr_vs_trtr(
+        model,
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        estimator="rf",
+        n_boot=3,
+        seed=0,
+    )
+    assert set(results.keys()) == {"tstr", "trtr", "delta", "diagnostics"}
+    assert 0.0 <= results["tstr"]["auroc"] <= 1.0
+    assert 0.0 <= results["tstr"]["auprc"] <= 1.0
+
+    def mock_predict_scores(clf, X):  # noqa: ANN001
+        return np.ones(X.shape[0])
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("suave.eval.tstr._predict_scores", mock_predict_scores)
+        with pytest.raises(ValueError, match="Multi-class evaluation requires probability"):
+            tstr_auc(model, X_train, y_train, X_test, y_test, estimator="logreg")
