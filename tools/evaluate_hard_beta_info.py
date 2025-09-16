@@ -95,7 +95,7 @@ def _compute_task_metrics(
         metrics["auprc_macro"] = float(average_precision_score(y_true, proba[:, 1]))
         metrics["auprc_micro"] = metrics["auprc_macro"]
         metrics["acc_top1"] = float(accuracy_score(y_true, pred))
-        metrics["f1_macro"] = float(f1_score(y_true, pred))
+        metrics["f1_macro"] = float(f1_score(y_true, pred, average="macro"))
     return metrics
 
 

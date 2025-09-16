@@ -56,7 +56,7 @@ def compute_task_metrics(
             "auprc_macro": float(average_precision_score(y_true, proba[:, 1])),
             "auprc_micro": float(average_precision_score(y_true, proba[:, 1])),
             "acc_top1": float(accuracy_score(y_true, pred)),
-            "f1_macro": float(f1_score(y_true, pred)),
+            "f1_macro": float(f1_score(y_true, pred, average="macro")),
         }
     return metrics
 
