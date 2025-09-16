@@ -81,8 +81,15 @@ def gaussian_nll(
         Binary mask where ``1`` denotes observed entries.
     """
 
-    var = torch.exp(log_sigma) ** 2
-    log_prob = 0.5 * ((x - mu) ** 2 / var + 2 * log_sigma + math.log(2 * math.pi))
+    # ``log_sigma`` is predicted by the network without explicit constraints.
+    # Depending on the random seed the optimiser can drive it to extreme
+    # values which in turn cause ``var`` to under/overflow.  Clamping keeps the
+    # computation numerically stable without changing the overall objective.
+    log_sigma = torch.clamp(log_sigma, min=-7.0, max=7.0)
+    var = torch.exp(2 * log_sigma)
+    log_prob = 0.5 * (
+        (x - mu) ** 2 / (var + 1e-6) + 2 * log_sigma + math.log(2 * math.pi)
+    )
     nll = (log_prob * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
     return nll.mean()
 

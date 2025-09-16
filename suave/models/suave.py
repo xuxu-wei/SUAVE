@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from ..modules.losses import (
     gaussian_nll,
     kl_divergence,
+    kl_divergence_between_normals,
     linear_anneal,
     maximum_mean_discrepancy,
 )
