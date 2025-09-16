@@ -31,20 +31,38 @@ KEYS = [
     "f1_macro",
 ]
 
+
+def _extract_suave_metrics(payload):
+    tasks = payload.get("tasks", {})
+    data = {}
+    for task_name, entry in tasks.items():
+        models = entry.get("models", {})
+        suave = models.get("suave")
+        if not suave:
+            continue
+        for target, metrics in suave.get("metrics", {}).items():
+            data[(task_name, target)] = metrics
+    return data
+
+current_metrics = _extract_suave_metrics(current)
+candidate_metrics = _extract_suave_metrics(candidate)
+
 regressions = []
-for task, cand_metrics in candidate.get("hard", {}).items():
-    cur_metrics = current.get("hard", {}).get(task, {})
-    for key in KEYS:
-        c_val = cand_metrics.get(key)
-        b_val = cur_metrics.get(key)
+for key, cand_vals in candidate_metrics.items():
+    base_vals = current_metrics.get(key)
+    if not base_vals:
+        continue
+    for metric in KEYS:
+        c_val = cand_vals.get(metric)
+        b_val = base_vals.get(metric)
         if c_val is None or b_val is None:
             continue
         if b_val - c_val > 0.03:
-            regressions.append((task, key, b_val, c_val))
+            regressions.append((key, metric, b_val, c_val))
 
 if regressions:
-    for task, metric, old, new in regressions:
-        print(f"{task} {metric} decreased from {old:.4f} to {new:.4f}")
+    for (task_name, target), metric, old, new in regressions:
+        print(f"{task_name} {target} {metric} decreased from {old:.4f} to {new:.4f}")
     if os.getenv("ALLOW_REGRESSION") == "1":
         print("ALLOW_REGRESSION=1, ignoring regression")
         sys.exit(0)
