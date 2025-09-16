@@ -6,3 +6,6 @@ tqdm
 matplotlib
 tabulate
 optuna
+PyYAML
+scipy
+autogluon
