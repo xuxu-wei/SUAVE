@@ -15,31 +15,63 @@ from . import distributions
 class LikelihoodHead(nn.Module):
     """Base class used by the concrete distribution-specific heads."""
 
-    param_dim: int
+    def __init__(self, y_dim: int, n_components: int) -> None:
+        super().__init__()
+        self.y_dim = int(y_dim)
+        self.n_components = int(n_components)
 
     def forward(
         self,
+        y: Tensor,
+        s: Tensor,
         x: Tensor,
-        params: Tensor,
         norm_stats: Mapping[str, float | Iterable[object]],
         mask: Tensor | None,
     ) -> Dict[str, Tensor]:
         raise NotImplementedError
 
 
-class RealHead(LikelihoodHead):
-    """Gaussian reconstruction head mirroring HI-VAE."""
+def _mask_to_bool(mask: Tensor) -> Tensor:
+    mask_bool = mask
+    if mask_bool.dim() > 1:
+        mask_bool = mask_bool.squeeze(-1)
+    return mask_bool > 0.5
 
-    param_dim = 2
+
+def _apply_observed_linear(
+    layer: nn.Linear, features: Tensor, mask: Tensor | None
+) -> Tensor:
+    if mask is None:
+        return layer(features)
+    mask_bool = _mask_to_bool(mask)
+    output = features.new_zeros(features.size(0), layer.out_features)
+    if mask_bool.any():
+        output[mask_bool] = layer(features[mask_bool])
+    if (~mask_bool).any():
+        with torch.no_grad():
+            output[~mask_bool] = layer(features[~mask_bool])
+    return output
+
+
+class RealHead(LikelihoodHead):
+    """Gaussian reconstruction head mirroring the HI-VAE design."""
+
+    def __init__(self, y_dim: int, n_components: int) -> None:
+        super().__init__(y_dim, n_components)
+        self.mean_layer = nn.Linear(self.y_dim + self.n_components, 1, bias=False)
+        self.var_layer = nn.Linear(self.n_components, 1, bias=False)
 
     def forward(
         self,
+        y: Tensor,
+        s: Tensor,
         x: Tensor,
-        params: Tensor,
         norm_stats: Mapping[str, float | Iterable[object]] | None,
         mask: Tensor | None,
     ) -> Dict[str, Tensor]:
-        mean_raw, var_raw = params.split(1, dim=-1)
+        features = torch.cat([y, s], dim=-1)
+        mean_raw = _apply_observed_linear(self.mean_layer, features, mask)
+        var_raw = _apply_observed_linear(self.var_layer, s, mask)
         var = F.softplus(var_raw) + distributions.EPS
 
         mean_scale = float(norm_stats.get("mean", 0.0)) if norm_stats else 0.0
@@ -54,10 +86,7 @@ class RealHead(LikelihoodHead):
             x_raw, mean, var_scaled, mask_missing
         )
 
-        params_out = {
-            "mean": mean,
-            "var": var_scaled,
-        }
+        params_out = {"mean": mean, "var": var_scaled}
         sample = distributions.sample_gaussian(mean_raw, var)
         sample = sample * std_scale + mean_scale
         return {
@@ -68,54 +97,27 @@ class RealHead(LikelihoodHead):
         }
 
 
-class CatHead(LikelihoodHead):
-    """Categorical head producing logits for the discrete features."""
-
-    def __init__(self, n_classes: int) -> None:
-        super().__init__()
-        if n_classes <= 1:
-            raise ValueError("Categorical features require at least two classes")
-        self.param_dim = n_classes
-
-    def forward(
-        self,
-        x: Tensor,
-        params: Tensor,
-        norm_stats: Mapping[str, float | Iterable[object]] | None,
-        mask: Tensor | None,
-    ) -> Dict[str, Tensor]:
-        logits = params
-        log_px = -distributions.nll_categorical(x, logits, mask)
-        mask_missing = None if mask is None else 1.0 - mask
-        log_px_missing = -distributions.nll_categorical(x, logits, mask_missing)
-        sample_onehot = distributions.sample_categorical(logits)
-        params_out = {
-            "logits": logits,
-            "probs": torch.softmax(logits, dim=-1),
-        }
-        sample_codes = sample_onehot.argmax(dim=-1)
-        return {
-            "log_px": log_px,
-            "log_px_missing": log_px_missing,
-            "params": params_out,
-            "sample": sample_codes,
-        }
-
-
 class PosHead(LikelihoodHead):
     """Log-normal reconstruction head for strictly positive features."""
 
-    param_dim = 2
+    def __init__(self, y_dim: int, n_components: int) -> None:
+        super().__init__(y_dim, n_components)
+        self.mean_layer = nn.Linear(self.y_dim + self.n_components, 1, bias=False)
+        self.var_layer = nn.Linear(self.n_components, 1, bias=False)
 
     def forward(
         self,
+        y: Tensor,
+        s: Tensor,
         x: Tensor,
-        params: Tensor,
         norm_stats: Mapping[str, float | Iterable[object]] | None,
         mask: Tensor | None,
     ) -> Dict[str, Tensor]:
-        mean_raw, var_raw = params.split(1, dim=-1)
+        features = torch.cat([y, s], dim=-1)
+        mean_raw = _apply_observed_linear(self.mean_layer, features, mask)
+        var_raw = _apply_observed_linear(self.var_layer, s, mask)
         var = F.softplus(var_raw) + distributions.EPS
+
         mean_log = float(norm_stats.get("mean_log", 0.0)) if norm_stats else 0.0
         std_log = float(norm_stats.get("std_log", 1.0)) if norm_stats else 1.0
 
@@ -146,16 +148,20 @@ class PosHead(LikelihoodHead):
 class CountHead(LikelihoodHead):
     """Poisson reconstruction head for count-valued features."""
 
-    param_dim = 1
+    def __init__(self, y_dim: int, n_components: int) -> None:
+        super().__init__(y_dim, n_components)
+        self.rate_layer = nn.Linear(self.y_dim + self.n_components, 1, bias=False)
 
     def forward(
         self,
+        y: Tensor,
+        s: Tensor,
         x: Tensor,
-        params: Tensor,
         norm_stats: Mapping[str, float | Iterable[object]] | None,
         mask: Tensor | None,
     ) -> Dict[str, Tensor]:
-        rate_raw = params
+        features = torch.cat([y, s], dim=-1)
+        rate_raw = _apply_observed_linear(self.rate_layer, features, mask)
         rate = F.softplus(rate_raw) + distributions.EPS
         offset = float(norm_stats.get("offset", 0.0)) if norm_stats else 0.0
         counts = torch.exp(x) - offset
@@ -173,25 +179,74 @@ class CountHead(LikelihoodHead):
         }
 
 
-class OrdinalHead(LikelihoodHead):
-    """Cumulative link reconstruction head for ordinal features."""
+class CatHead(LikelihoodHead):
+    """Categorical head producing logits for discrete features."""
 
-    def __init__(self, n_classes: int) -> None:
-        super().__init__()
+    def __init__(self, y_dim: int, n_components: int, n_classes: int) -> None:
+        super().__init__(y_dim, n_components)
         if n_classes <= 1:
-            raise ValueError("Ordinal features require at least two classes")
-        self.n_classes = n_classes
-        self.param_dim = n_classes
+            raise ValueError("Categorical features require at least two classes")
+        self.n_classes = int(n_classes)
+        self.logits_layer = nn.Linear(
+            self.y_dim + self.n_components, self.n_classes - 1, bias=False
+        )
 
     def forward(
         self,
+        y: Tensor,
+        s: Tensor,
         x: Tensor,
-        params: Tensor,
         norm_stats: Mapping[str, float | Iterable[object]] | None,
         mask: Tensor | None,
     ) -> Dict[str, Tensor]:
-        n_thresholds = self.n_classes - 1
-        partition, mean_param = params.split([n_thresholds, 1], dim=-1)
+        features = torch.cat([y, s], dim=-1)
+        partial_logits = _apply_observed_linear(self.logits_layer, features, mask)
+        zeros = torch.zeros(
+            partial_logits.size(0),
+            1,
+            device=partial_logits.device,
+            dtype=partial_logits.dtype,
+        )
+        logits = torch.cat([zeros, partial_logits], dim=-1)
+        log_px = -distributions.nll_categorical(x, logits, mask)
+        mask_missing = None if mask is None else 1.0 - mask
+        log_px_missing = -distributions.nll_categorical(x, logits, mask_missing)
+        sample_onehot = distributions.sample_categorical(logits)
+        params_out = {"logits": logits, "probs": torch.softmax(logits, dim=-1)}
+        sample_codes = sample_onehot.argmax(dim=-1)
+        return {
+            "log_px": log_px,
+            "log_px_missing": log_px_missing,
+            "params": params_out,
+            "sample": sample_codes,
+        }
+
+
+class OrdinalHead(LikelihoodHead):
+    """Cumulative link reconstruction head for ordinal features."""
+
+    def __init__(self, y_dim: int, n_components: int, n_classes: int) -> None:
+        super().__init__(y_dim, n_components)
+        if n_classes <= 1:
+            raise ValueError("Ordinal features require at least two classes")
+        self.n_classes = int(n_classes)
+        self.partition_layer = nn.Linear(
+            self.n_components, self.n_classes - 1, bias=False
+        )
+        self.mean_layer = nn.Linear(self.y_dim + self.n_components, 1, bias=False)
+
+    def forward(
+        self,
+        y: Tensor,
+        s: Tensor,
+        x: Tensor,
+        norm_stats: Mapping[str, float | Iterable[object]] | None,
+        mask: Tensor | None,
+    ) -> Dict[str, Tensor]:
+        partition = _apply_observed_linear(self.partition_layer, s, mask)
+        mean_param = _apply_observed_linear(
+            self.mean_layer, torch.cat([y, s], dim=-1), mask
+        )
         probs, thresholds = distributions.ordinal_probabilities(partition, mean_param)
         thermometer = x
         levels = torch.round(thermometer.sum(dim=-1)).long()
@@ -220,9 +275,14 @@ class Decoder(nn.Module):
         *,
         hidden: Iterable[int] = (256, 128),
         dropout: float = 0.1,
+        n_components: int = 1,
     ) -> None:
         super().__init__()
+        if n_components <= 0:
+            raise ValueError("n_components must be positive")
         self.schema = schema
+        self.n_components = int(n_components)
+
         layers: list[nn.Module] = []
         previous_dim = latent_dim
         for hidden_dim in hidden:
@@ -233,35 +293,47 @@ class Decoder(nn.Module):
             previous_dim = hidden_dim
         self.backbone = nn.Sequential(*layers) if layers else nn.Identity()
 
+        y_dimensions = schema.y_dimensions()
+        total_y_dim = int(sum(y_dimensions.values()))
+        if total_y_dim <= 0:
+            raise ValueError("The latent partition must allocate positive dimensions")
+        self.y_projection = nn.Linear(previous_dim, total_y_dim)
+
         self._feature_types: dict[str, str] = {}
-        self.param_projections = nn.ModuleDict()
+        self._y_slices: dict[str, slice] = {}
         self.heads = nn.ModuleDict()
 
+        start = 0
         for column in schema.feature_names:
             spec = schema[column]
-            if spec.type == "real":
-                head = RealHead()
-            elif spec.type == "cat":
-                assert spec.n_classes is not None
-                head = CatHead(spec.n_classes)
-            elif spec.type == "pos":
-                head = PosHead()
-            elif spec.type == "count":
-                head = CountHead()
-            elif spec.type == "ordinal":
-                assert spec.n_classes is not None
-                head = OrdinalHead(spec.n_classes)
-            else:
-                raise ValueError(
-                    f"Unsupported column type '{spec.type}' for '{column}'"
-                )
+            y_dim = int(y_dimensions[column])
+            end = start + y_dim
+            self._y_slices[column] = slice(start, end)
             self._feature_types[column] = spec.type
-            self.heads[column] = head
-            self.param_projections[column] = nn.Linear(previous_dim, head.param_dim)
+            self.heads[column] = self._build_head(spec, y_dim)
+            start = end
+
+    def _build_head(self, spec, y_dim: int) -> LikelihoodHead:
+        if spec.type == "real":
+            return RealHead(y_dim, self.n_components)
+        if spec.type == "pos":
+            return PosHead(y_dim, self.n_components)
+        if spec.type == "count":
+            return CountHead(y_dim, self.n_components)
+        if spec.type == "cat":
+            if spec.n_classes is None:
+                raise ValueError("Categorical columns must define 'n_classes'")
+            return CatHead(y_dim, self.n_components, spec.n_classes)
+        if spec.type == "ordinal":
+            if spec.n_classes is None:
+                raise ValueError("Ordinal columns must define 'n_classes'")
+            return OrdinalHead(y_dim, self.n_components, spec.n_classes)
+        raise ValueError(f"Unsupported column type '{spec.type}' for '{spec}'")
 
     def forward(
         self,
         latents: Tensor,
+        assignments: Tensor,
         data: Dict[str, Dict[str, Tensor]],
         norm_stats: Mapping[str, Mapping[str, float | Iterable[object]]],
         masks: Dict[str, Dict[str, Tensor]],
@@ -269,6 +341,7 @@ class Decoder(nn.Module):
         """Return reconstruction statistics for every column in the schema."""
 
         hidden = self.backbone(latents)
+        y_full = self.y_projection(hidden)
         per_feature: dict[str, Dict[str, Tensor]] = {}
         log_px_terms: list[Tensor] = []
         log_px_missing_terms: list[Tensor] = []
@@ -290,15 +363,14 @@ class Decoder(nn.Module):
                 x = data["ordinal"][column]
                 mask = masks["ordinal"][column]
             else:
-                # Heads for the unsupported types are placeholders; the forward
-                # pass should never reach this branch in the current release.
                 raise NotImplementedError(
                     f"Column type '{feature_type}' is not enabled in warm-start training"
                 )
-            params = self.param_projections[column](hidden)
+            y_slice = y_full[:, self._y_slices[column]]
             head_output = head(
+                y=y_slice,
+                s=assignments,
                 x=x,
-                params=params,
                 norm_stats=norm_stats.get(column, {}),
                 mask=mask,
             )

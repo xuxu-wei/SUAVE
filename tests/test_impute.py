@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 import torch
 from pandas import CategoricalDtype
+from torch.nn import functional as F
 
 from suave import data as data_utils
 from suave import sampling as sampling_utils
@@ -65,12 +66,19 @@ def _private_reconstruction(model: SUAVE, X: pd.DataFrame) -> pd.DataFrame:
         decoder_state = model._decoder.training
         model._encoder.eval()
         model._decoder.eval()
-        logits_enc, mu_enc, logvar_enc = model._encoder(encoder_inputs)
-        posterior_mean, _, _ = model._mixture_posterior_statistics(
-            logits_enc, mu_enc, logvar_enc
-        )
+        logits_enc, mu_enc, _ = model._encoder(encoder_inputs)
+        posterior_probs = torch.softmax(logits_enc, dim=-1)
+        component_indices = posterior_probs.argmax(dim=-1)
+        assignments = F.one_hot(
+            component_indices, num_classes=model.n_components
+        ).float()
+        selected_mu = model._gather_component_parameters(mu_enc, component_indices)
         decoder_out = model._decoder(
-            posterior_mean, data_tensors, model._norm_stats_per_col, mask_tensors
+            selected_mu,
+            assignments,
+            data_tensors,
+            model._norm_stats_per_col,
+            mask_tensors,
         )
         if encoder_state:
             model._encoder.train()

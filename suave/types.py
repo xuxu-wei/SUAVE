@@ -24,6 +24,7 @@ class ColumnSpec:
 
     type: str
     n_classes: Optional[int] = None
+    y_dim: Optional[int] = None
 
 
 class Schema:
@@ -84,7 +85,16 @@ class Schema:
                 raise ValueError(
                     f"Column '{name}' of type '{column_type}' should not provide 'n_classes'."
                 )
-            self._columns[name] = ColumnSpec(type=column_type, n_classes=n_classes)
+            y_dim = spec_dict.get("y_dim")
+            if y_dim is not None:
+                y_dim = int(y_dim)
+                if y_dim <= 0:
+                    raise ValueError(
+                        f"Column '{name}' must declare a positive 'y_dim' share"
+                    )
+            self._columns[name] = ColumnSpec(
+                type=column_type, n_classes=n_classes, y_dim=y_dim
+            )
 
     # ------------------------------------------------------------------
     # Convenience properties
@@ -141,6 +151,7 @@ class Schema:
             name: {
                 "type": spec.type,
                 **({"n_classes": spec.n_classes} if spec.n_classes else {}),
+                **({"y_dim": spec.y_dim} if spec.y_dim else {}),
             }
             for name, spec in self._columns.items()
         }
@@ -175,3 +186,28 @@ class Schema:
         missing = [column for column in columns if column not in self._columns]
         if missing:
             raise KeyError(f"Columns {missing} missing from schema")
+
+    # ------------------------------------------------------------------
+    # Latent partition helpers
+    # ------------------------------------------------------------------
+    def y_dimensions(self) -> Dict[str, int]:
+        """Return the latent ``y`` allocation for every column."""
+
+        return {
+            name: (spec.y_dim if spec.y_dim is not None else self._default_y_dim(spec))
+            for name, spec in self._columns.items()
+        }
+
+    @staticmethod
+    def _default_y_dim(spec: ColumnSpec) -> int:
+        """Return the fallback ``y`` share used when none is provided."""
+
+        if spec.type in {"real", "pos", "count"}:
+            return 1
+        if spec.type in {"cat", "ordinal"}:
+            if spec.n_classes is None:
+                raise ValueError(
+                    "Categorical and ordinal columns require 'n_classes' to infer y_dim"
+                )
+            return int(spec.n_classes)
+        raise ValueError(f"Unsupported column type '{spec.type}'")
