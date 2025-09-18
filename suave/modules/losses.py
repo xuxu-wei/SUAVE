@@ -82,3 +82,16 @@ def kl_normal_mixture(
         logvar_p - logvar_q + (var_q + diff.pow(2)) / var_p - 1.0
     ).sum(dim=-1)
     return (posterior_probs * component_kl).sum(dim=-1)
+
+
+def kl_normal_vs_normal(
+    mu_q: Tensor, logvar_q: Tensor, mu_p: Tensor, logvar_p: Tensor
+) -> Tensor:
+    """KL divergence between diagonal Gaussians with arbitrary parameters."""
+
+    if mu_q.shape != mu_p.shape or logvar_q.shape != logvar_p.shape:
+        raise ValueError("All tensors must share the same shape")
+    var_q = torch.exp(logvar_q)
+    var_p = torch.exp(logvar_p).clamp_min(1e-6)
+    diff = mu_q - mu_p
+    return 0.5 * (logvar_p - logvar_q + (var_q + diff.pow(2)) / var_p - 1.0).sum(dim=-1)

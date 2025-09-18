@@ -67,6 +67,9 @@ class SUAVE:
         Whether to preserve class balance when creating the validation split.
     random_state:
         Seed controlling deterministic behaviour in helper utilities.
+    gumbel_temperature:
+        Temperature parameter used when sampling mixture assignments through the
+        straight-through Gumbel-Softmax estimator. Default is ``1.0``.
     behaviour:
         Selects the feature set exposed by the estimator. Use ``"suave"`` to
         enable the extended classification stack or ``"hivae"`` to match the
@@ -114,6 +117,7 @@ class SUAVE:
         val_split: float = 0.2,
         stratify: bool = True,
         random_state: int = 0,
+        gumbel_temperature: float = 1.0,
         behaviour: Literal["suave", "hivae"] = "suave",
         tau_start: float = 1.0,
         tau_min: float = 1e-3,
@@ -133,6 +137,9 @@ class SUAVE:
         self.val_split = val_split
         self.stratify = stratify
         self.random_state = random_state
+        if gumbel_temperature <= 0:
+            raise ValueError("gumbel_temperature must be positive")
+        self.gumbel_temperature = float(gumbel_temperature)
         behaviour_normalised = behaviour.lower()
         if behaviour_normalised not in {"suave", "hivae"}:
             raise ValueError("behaviour must be either 'suave' or 'hivae'")
@@ -285,6 +292,19 @@ class SUAVE:
             return tau_min
         return temperature
 
+    def _gumbel_temperature_for_epoch(self, epoch: int) -> float:
+        """Return the annealed Gumbel-Softmax temperature for ``epoch``."""
+
+        if self.behaviour != "hivae" or self._tau_start is None:
+            return 1.0
+        tau_start = float(self._tau_start)
+        tau_min = float(self._tau_min) if self._tau_min is not None else tau_start
+        tau_decay = float(self._tau_decay) if self._tau_decay is not None else 0.0
+        temperature = tau_start - tau_decay * float(epoch)
+        if temperature < tau_min:
+            return tau_min
+        return temperature
+
     # ------------------------------------------------------------------
     # Training utilities
     # ------------------------------------------------------------------
@@ -417,6 +437,7 @@ class SUAVE:
             self.schema,
             hidden=self.hidden_dims,
             dropout=self.dropout,
+            n_components=self.n_components,
         ).to(device)
         if self.behaviour == "suave":
             assert self._classes is not None
@@ -473,44 +494,94 @@ class SUAVE:
                 )
                 component_probs = torch.softmax(component_logits, dim=-1)
                 if use_gumbel:
+                    gumbel_tau = max(float(temperature), 1e-6)
                     posterior_weights = F.gumbel_softmax(
-                        component_logits, tau=temperature, hard=False, dim=-1
+                        component_logits, tau=gumbel_tau, hard=False, dim=-1
                     )
                 else:
                     posterior_weights = component_probs
-                z_samples = self._reparameterize(component_mu, component_logvar)
-                component_log_px: list[Tensor] = []
-                for component_idx in range(self.n_components):
-                    decoder_out = self._decoder(
-                        z_samples[:, component_idx, :],
-                        batch_data,
-                        self._norm_stats_per_col,
-                        batch_masks,
-                    )
-                    recon_sum = losses.sum_reconstruction_terms(decoder_out["log_px"])
-                    component_log_px.append(recon_sum)
-                component_log_px_tensor = torch.stack(component_log_px, dim=-1)
+
                 global_step += 1
                 beta_scale = losses.kl_warmup(global_step, warmup_steps, self.beta)
                 categorical_kl = losses.kl_categorical(
                     component_logits, self._prior_component_logits_tensor()
                 )
-                gaussian_kl = losses.kl_normal_mixture(
-                    component_mu,
-                    component_logvar,
-                    self._prior_component_means_tensor(),
-                    self._prior_component_logvar_tensor(),
-                    posterior_probs,
-                )
-                total_kl = beta_scale * (categorical_kl + gaussian_kl)
-                weighted_recon = (posterior_weights * component_log_px_tensor).sum(
-                    dim=-1
-                )
-                elbo_value = weighted_recon - total_kl
-                loss = -elbo_value.mean()
-                latent_for_classifier = (
-                    posterior_weights.unsqueeze(-1) * z_samples
-                ).sum(dim=1)
+
+                if self.behaviour == "suave":
+                    assignment_tau = max(float(self.gumbel_temperature), 1e-6)
+                    assignments = F.gumbel_softmax(
+                        component_logits, tau=assignment_tau, hard=True
+                    )
+                    component_indices = assignments.argmax(dim=-1)
+                    selected_mu = self._gather_component_parameters(
+                        component_mu, component_indices
+                    )
+                    selected_logvar = self._gather_component_parameters(
+                        component_logvar, component_indices
+                    )
+                    z_sample = self._reparameterize(selected_mu, selected_logvar)
+                    decoder_out = self._decoder(
+                        z_sample,
+                        assignments,
+                        batch_data,
+                        self._norm_stats_per_col,
+                        batch_masks,
+                    )
+                    recon_sum = losses.sum_reconstruction_terms(decoder_out["log_px"])
+                    prior_mu = self._prior_component_mu.index_select(
+                        0, component_indices
+                    )
+                    prior_logvar = self._prior_component_logvar.index_select(
+                        0, component_indices
+                    )
+                    gaussian_kl = losses.kl_normal_vs_normal(
+                        selected_mu, selected_logvar, prior_mu, prior_logvar
+                    )
+                    total_kl = beta_scale * (categorical_kl + gaussian_kl)
+                    elbo_value = recon_sum - total_kl
+                    loss = -elbo_value.mean()
+                    latent_for_classifier = z_sample
+                else:
+                    z_samples = self._reparameterize(component_mu, component_logvar)
+                    component_log_px: list[Tensor] = []
+                    for component_idx in range(self.n_components):
+                        component_assignments = F.one_hot(
+                            torch.full(
+                                (z_samples.size(0),),
+                                component_idx,
+                                device=z_samples.device,
+                                dtype=torch.long,
+                            ),
+                            num_classes=self.n_components,
+                        ).float()
+                        decoder_out = self._decoder(
+                            z_samples[:, component_idx, :],
+                            component_assignments,
+                            batch_data,
+                            self._norm_stats_per_col,
+                            batch_masks,
+                        )
+                        recon_sum = losses.sum_reconstruction_terms(
+                            decoder_out["log_px"]
+                        )
+                        component_log_px.append(recon_sum)
+                    component_log_px_tensor = torch.stack(component_log_px, dim=-1)
+                    gaussian_kl = losses.kl_normal_mixture(
+                        component_mu,
+                        component_logvar,
+                        self._prior_component_mu,
+                        self._prior_component_logvar,
+                        component_probs,
+                    )
+                    total_kl = beta_scale * (categorical_kl + gaussian_kl)
+                    weighted_recon = (posterior_weights * component_log_px_tensor).sum(
+                        dim=-1
+                    )
+                    elbo_value = weighted_recon - total_kl
+                    loss = -elbo_value.mean()
+                    latent_for_classifier = (
+                        posterior_weights.unsqueeze(-1) * z_samples
+                    ).sum(dim=1)
                 if self._classifier is not None and y_train_tensor is not None:
                     logits = self._classifier(latent_for_classifier)
                     batch_targets = y_train_tensor[batch_indices]
@@ -728,6 +799,18 @@ class SUAVE:
         return mu + eps * std
 
     @staticmethod
+    def _gather_component_parameters(params: Tensor, indices: Tensor) -> Tensor:
+        """Select component-specific parameters from ``params`` using ``indices``."""
+
+        if params.dim() != 3:
+            raise ValueError("params must have shape (batch, components, latent)")
+        if indices.dim() != 1:
+            raise ValueError("indices must be a 1D tensor")
+        gather_indices = indices.view(-1, 1, 1).expand(-1, 1, params.size(-1))
+        gathered = params.gather(1, gather_indices)
+        return gathered.squeeze(1)
+
+    @staticmethod
     def _mixture_posterior_statistics(
         logits: Tensor, mu: Tensor, logvar: Tensor, *, temperature: float | None = None
     ) -> tuple[Tensor, Tensor, Tensor]:
@@ -756,27 +839,30 @@ class SUAVE:
         conditional: bool,
         targets: Optional[Iterable[object] | np.ndarray],
         device: torch.device,
-    ) -> Tensor:
-        """Return latent samples from the prior or conditioned on ``targets``."""
+    ) -> tuple[Tensor, Tensor]:
+        """Return latent samples and mixture assignments for decoding."""
 
         if conditional:
             return self._draw_conditional_latents(n_samples, targets, device)
-        latents, _ = sampling_utils.sample_mixture_latents(
-            self._prior_component_logits_tensor().detach(),
-            self._prior_component_means_tensor().detach(),
-            self._prior_component_logvar_tensor().detach(),
+        latents, component_indices = sampling_utils.sample_mixture_latents(
+            self._prior_component_logits.detach(),
+            self._prior_component_mu.detach(),
+            self._prior_component_logvar.detach(),
             n_samples,
             device=device,
         )
-        return latents
+        assignments = F.one_hot(
+            component_indices.to(torch.long), num_classes=self.n_components
+        ).float()
+        return latents, assignments
 
     def _draw_conditional_latents(
         self,
         n_samples: int,
         targets: Optional[Iterable[object] | np.ndarray],
         device: torch.device,
-    ) -> Tensor:
-        """Sample latent variables conditioned on class labels."""
+    ) -> tuple[Tensor, Tensor]:
+        """Sample latent variables and assignments conditioned on class labels."""
 
         if targets is None:
             raise ValueError("Targets must be provided when conditional=True")
@@ -801,6 +887,7 @@ class SUAVE:
             )
 
         latents = torch.zeros((n_samples, self.latent_dim), device=device)
+        assignments = torch.zeros((n_samples, self.n_components), device=device)
         rng = np.random.default_rng()
         for row, raw_label in enumerate(target_array):
             label = raw_label.item() if isinstance(raw_label, np.generic) else raw_label
@@ -830,7 +917,8 @@ class SUAVE:
             )
             latent_sample = self._reparameterize(mu, logvar)
             latents[row] = latent_sample.squeeze(0)
-        return latents
+            assignments[row, component_idx] = 1.0
+        return latents, assignments
 
     def _apply_training_normalization(self, X: pd.DataFrame) -> pd.DataFrame:
         """Apply stored normalisation statistics to ``X``."""
@@ -1079,14 +1167,29 @@ class SUAVE:
             self._encoder.eval()
             self._decoder.eval()
             logits_enc, mu_enc, logvar_enc = self._encoder(encoder_inputs)
-            posterior_mean, _, _ = self._mixture_posterior_statistics(
+            posterior_mean, _, posterior_probs = self._mixture_posterior_statistics(
                 logits_enc,
                 mu_enc,
                 logvar_enc,
                 temperature=self._inference_tau if self.behaviour == "hivae" else None,
             )
+            if self.behaviour == "suave":
+                component_indices = posterior_probs.argmax(dim=-1)
+                assignments = F.one_hot(
+                    component_indices, num_classes=self.n_components
+                ).float()
+                selected_mu = self._gather_component_parameters(
+                    mu_enc, component_indices
+                )
+            else:
+                assignments = posterior_probs
+                selected_mu = posterior_mean
             decoder_out = self._decoder(
-                posterior_mean, data_tensors, self._norm_stats_per_col, mask_tensors
+                selected_mu,
+                assignments,
+                data_tensors,
+                self._norm_stats_per_col,
+                mask_tensors,
             )
             if encoder_state:
                 self._encoder.train()
@@ -1208,19 +1311,29 @@ class SUAVE:
     # ------------------------------------------------------------------
     # Latent utilities and sampling
     # ------------------------------------------------------------------
-    def encode(self, X: pd.DataFrame) -> np.ndarray:
+    def encode(
+        self, X: pd.DataFrame, *, return_components: bool = False
+    ) -> np.ndarray | Dict[str, np.ndarray]:
         """Return posterior means of the latent representation for ``X``.
 
         Parameters
         ----------
         X:
             Input features with shape ``(n_samples, n_features)``.
+        return_components:
+            When ``True``, also return a dictionary containing the sampled
+            component assignments and the component-specific posterior
+            parameters ``mu``/``logvar``.
 
         Returns
         -------
         numpy.ndarray
             Float32 array with shape ``(n_samples, latent_dim)`` containing the
             latent posterior means produced by the trained encoder.
+        dict, optional
+            When ``return_components`` is ``True`` the returned dictionary
+            includes the posterior mean, sampled assignments and
+            component-specific statistics.
 
         Examples
         --------
@@ -1236,13 +1349,27 @@ class SUAVE:
         encoder_inputs = self._prepare_inference_inputs(X).to(device)
         n_samples = encoder_inputs.size(0)
         if n_samples == 0:
-            return np.empty((0, self.latent_dim), dtype=np.float32)
+            empty_mean = np.empty((0, self.latent_dim), dtype=np.float32)
+            if not return_components:
+                return empty_mean
+            empty_assignments = np.empty((0, self.n_components), dtype=np.float32)
+            empty_mu = np.empty((0, self.latent_dim), dtype=np.float32)
+            empty_logvar = np.empty((0, self.latent_dim), dtype=np.float32)
+            return {
+                "mean": empty_mean,
+                "assignments": empty_assignments,
+                "component_mu": empty_mu,
+                "component_logvar": empty_logvar,
+            }
 
         effective_batch = min(self.batch_size, n_samples)
         if effective_batch <= 0:
             effective_batch = n_samples
 
         latent_batches: list[Tensor] = []
+        assignments_batches: list[Tensor] = []
+        selected_mu_batches: list[Tensor] = []
+        selected_logvar_batches: list[Tensor] = []
         was_training = self._encoder.training
         self._encoder.eval()
         with torch.no_grad():
@@ -1259,10 +1386,36 @@ class SUAVE:
                     ),
                 )
                 latent_batches.append(posterior_mean.cpu())
+                if return_components:
+                    posterior_probs = torch.softmax(logits_enc, dim=-1)
+                    component_indices = posterior_probs.argmax(dim=-1)
+                    assignments = F.one_hot(
+                        component_indices, num_classes=self.n_components
+                    ).float()
+                    selected_mu = self._gather_component_parameters(
+                        mu_enc, component_indices
+                    )
+                    selected_logvar = self._gather_component_parameters(
+                        logvar_enc, component_indices
+                    )
+                    assignments_batches.append(assignments.cpu())
+                    selected_mu_batches.append(selected_mu.cpu())
+                    selected_logvar_batches.append(selected_logvar.cpu())
         if was_training:
             self._encoder.train()
 
-        return torch.cat(latent_batches, dim=0).numpy()
+        posterior_mean_np = torch.cat(latent_batches, dim=0).numpy()
+        if not return_components:
+            return posterior_mean_np
+        assignments_np = torch.cat(assignments_batches, dim=0).numpy()
+        mu_np = torch.cat(selected_mu_batches, dim=0).numpy()
+        logvar_np = torch.cat(selected_logvar_batches, dim=0).numpy()
+        return {
+            "mean": posterior_mean_np,
+            "assignments": assignments_np,
+            "component_mu": mu_np,
+            "component_logvar": logvar_np,
+        }
 
     def sample(
         self, n_samples: int, conditional: bool = False, y: Optional[np.ndarray] = None
@@ -1302,7 +1455,7 @@ class SUAVE:
             return pd.DataFrame(columns=list(self.schema.feature_names))
 
         device = self._select_device()
-        latents = self._draw_latent_samples(
+        latents, assignments = self._draw_latent_samples(
             n_samples, conditional=conditional, targets=y, device=device
         )
         data_tensors, mask_tensors = sampling_utils.build_placeholder_batches(
@@ -1312,7 +1465,11 @@ class SUAVE:
         self._decoder.eval()
         with torch.no_grad():
             decoder_out = self._decoder(
-                latents, data_tensors, self._norm_stats_per_col, mask_tensors
+                latents,
+                assignments,
+                data_tensors,
+                self._norm_stats_per_col,
+                mask_tensors,
             )
         if decoder_training_state:
             self._decoder.train()
@@ -1556,6 +1713,7 @@ class SUAVE:
             model.schema,
             hidden=model.hidden_dims,
             dropout=model.dropout,
+            n_components=model.n_components,
         ).to(device)
         if isinstance(decoder_state, OrderedDict):
             model._decoder.load_state_dict(decoder_state)

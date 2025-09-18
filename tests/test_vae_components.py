@@ -4,6 +4,7 @@ import math
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from suave.modules.decoder import CountHead, Decoder, OrdinalHead, PosHead, RealHead
 from suave.modules.distributions import (
@@ -46,17 +47,19 @@ def test_sample_mixture_latents_outputs_assignments():
 
 
 def test_real_head_output_shapes():
-    head = RealHead()
-    x = torch.zeros(2, 1)
-    params = torch.tensor([[0.0, 0.0], [1.0, -1.0]])
-    mask = torch.ones(2, 1)
+    head = RealHead(y_dim=2, n_components=3)
+    batch = 4
+    y = torch.randn(batch, 2)
+    assignments = F.one_hot(torch.tensor([0, 1, 2, 1]), num_classes=3).float()
+    x = torch.zeros(batch, 1)
+    mask = torch.ones(batch, 1)
     stats = {"mean": 2.0, "std": 3.0}
-    output = head(x=x, params=params, norm_stats=stats, mask=mask)
-    assert output["log_px"].shape == (2,)
-    assert output["params"]["mean"].shape == (2, 1)
-    assert output["params"]["var"].shape == (2, 1)
+    output = head(y=y, s=assignments, x=x, norm_stats=stats, mask=mask)
+    assert output["log_px"].shape == (batch,)
+    assert output["params"]["mean"].shape == (batch, 1)
+    assert output["params"]["var"].shape == (batch, 1)
     sample = output["sample"]
-    assert sample.shape == (2, 1)
+    assert sample.shape == (batch, 1)
 
 
 def test_decoder_forward_mixed_types():
@@ -69,8 +72,11 @@ def test_decoder_forward_mixed_types():
             "severity": {"type": "ordinal", "n_classes": 3},
         }
     )
-    decoder = Decoder(latent_dim=2, schema=schema, hidden=(4,), dropout=0.0)
+    decoder = Decoder(
+        latent_dim=2, schema=schema, hidden=(4,), dropout=0.0, n_components=2
+    )
     latents = torch.zeros(3, 2)
+    assignments = F.one_hot(torch.tensor([0, 1, 0]), num_classes=2).float()
     data = {
         "real": {"age": torch.zeros(3, 1)},
         "pos": {"income": torch.zeros(3, 1)},
@@ -100,7 +106,7 @@ def test_decoder_forward_mixed_types():
         "visits": {"offset": 0.0},
         "severity": {"n_classes": 3},
     }
-    output = decoder(latents, data, stats, masks)
+    output = decoder(latents, assignments, data, stats, masks)
     assert set(output["per_feature"]) == {
         "age",
         "gender",
@@ -124,34 +130,38 @@ def test_nll_gaussian_matches_closed_form():
 
 
 def test_pos_head_output_shapes():
-    head = PosHead()
-    x = torch.zeros(2, 1)
-    params = torch.tensor([[0.0, 0.0], [0.5, -0.2]])
-    mask = torch.ones(2, 1)
+    head = PosHead(y_dim=1, n_components=2)
+    batch = 3
+    y = torch.randn(batch, 1)
+    assignments = F.one_hot(torch.tensor([0, 1, 0]), num_classes=2).float()
+    x = torch.zeros(batch, 1)
+    mask = torch.ones(batch, 1)
     stats = {"mean_log": 0.0, "std_log": 1.0}
-    output = head(x=x, params=params, norm_stats=stats, mask=mask)
-    assert output["log_px"].shape == (2,)
+    output = head(y=y, s=assignments, x=x, norm_stats=stats, mask=mask)
+    assert output["log_px"].shape == (batch,)
     assert torch.isfinite(output["log_px"]).all()
-    assert output["sample"].min() >= -1.0
+    assert output["sample"].shape == (batch, 1)
 
 
 def test_count_head_respects_offset():
-    head = CountHead()
-    counts = torch.log(torch.tensor([[2.0], [3.0]]))
-    params = torch.tensor([[0.1], [0.5]])
+    head = CountHead(y_dim=1, n_components=2)
+    x = torch.log(torch.tensor([[2.0], [3.0]]))
+    y = torch.randn(2, 1)
+    assignments = F.one_hot(torch.tensor([0, 1]), num_classes=2).float()
     mask = torch.ones(2, 1)
     stats = {"offset": 0.0}
-    output = head(x=counts, params=params, norm_stats=stats, mask=mask)
+    output = head(y=y, s=assignments, x=x, norm_stats=stats, mask=mask)
     assert output["params"]["rate"].shape == (2, 1)
     assert torch.isfinite(output["log_px"]).all()
 
 
 def test_ordinal_head_shapes():
-    head = OrdinalHead(n_classes=3)
+    head = OrdinalHead(y_dim=1, n_components=2, n_classes=3)
     thermo = torch.tensor([[1.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
-    params = torch.tensor([[0.0, 0.5, 0.2], [0.1, -0.3, -0.1]])
+    y = torch.randn(2, 1)
+    assignments = F.one_hot(torch.tensor([0, 1]), num_classes=2).float()
     mask = torch.ones(2, 1)
-    output = head(x=thermo, params=params, norm_stats={}, mask=mask)
+    output = head(y=y, s=assignments, x=thermo, norm_stats={}, mask=mask)
     assert output["params"]["probs"].shape == (2, 3)
     assert torch.isfinite(output["log_px"]).all()
 

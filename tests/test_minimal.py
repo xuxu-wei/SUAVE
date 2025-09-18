@@ -67,6 +67,24 @@ def test_encode_returns_latent_means():
     assert model._encoder.training == was_training
 
 
+def test_encode_return_components_dict():
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=3)
+    model.fit(X, y, epochs=1)
+    encoded = model.encode(X, return_components=True)
+    assert set(encoded) == {
+        "mean",
+        "assignments",
+        "component_mu",
+        "component_logvar",
+    }
+    n_samples = len(X)
+    assert encoded["mean"].shape == (n_samples, model.latent_dim)
+    assert encoded["assignments"].shape == (n_samples, model.n_components)
+    assert encoded["component_mu"].shape == (n_samples, model.latent_dim)
+    assert encoded["component_logvar"].shape == (n_samples, model.latent_dim)
+
+
 def test_sample_generates_schema_aligned_dataframe():
     X, y, schema = make_dataset()
     model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)
