@@ -67,6 +67,31 @@ def test_encode_returns_latent_means():
     assert model._encoder.training == was_training
 
 
+def test_sample_generates_schema_aligned_dataframe():
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, latent_dim=4, batch_size=2)
+    model.fit(X, y, epochs=1)
+    samples = model.sample(3)
+    assert isinstance(samples, pd.DataFrame)
+    assert list(samples.columns) == list(schema.feature_names)
+    assert len(samples) == 3
+    numeric = samples.select_dtypes(include=[np.number])
+    if not numeric.empty:
+        assert not np.allclose(numeric.to_numpy(), 0.0)
+    assert samples["gender"].dtype == "category"
+
+
+def test_conditional_sampling_validates_labels():
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, latent_dim=4, batch_size=2)
+    model.fit(X, y, epochs=1)
+    requested = np.array([0, 1, 1])
+    samples = model.sample(len(requested), conditional=True, y=requested)
+    assert len(samples) == len(requested)
+    with pytest.raises(ValueError):
+        model.sample(2, conditional=True, y=np.array([2, 2]))
+
+
 def test_hivae_behaviour_disables_classifier():
     X, _, schema = make_dataset()
     model = SUAVE(schema=schema, behaviour="hivae")
