@@ -658,6 +658,7 @@ class SUAVE:
 
         if targets is None:
             raise ValueError("Targets must be provided when conditional=True")
+
         if (
             self._train_component_mu is None
             or self._train_component_logvar is None
