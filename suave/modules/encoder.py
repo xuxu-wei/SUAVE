@@ -38,8 +38,12 @@ class EncoderMLP(nn.Module):
         *,
         hidden: Iterable[int] = (256, 128),
         dropout: float = 0.1,
+        n_components: int = 1,
     ) -> None:
         super().__init__()
+        if n_components <= 0:
+            raise ValueError("n_components must be positive")
+        self.n_components = int(n_components)
         layers: list[nn.Module] = []
         previous_dim = input_dim
         for hidden_dim in hidden:
@@ -49,15 +53,21 @@ class EncoderMLP(nn.Module):
                 layers.append(nn.Dropout(dropout))
             previous_dim = hidden_dim
         self.backbone = nn.Sequential(*layers) if layers else nn.Identity()
-        self.mu_layer = nn.Linear(previous_dim, latent_dim)
-        self.logvar_layer = nn.Linear(previous_dim, latent_dim)
+        projection_dim = latent_dim * self.n_components
+        self.component_logits = nn.Linear(previous_dim, self.n_components)
+        self.mu_layer = nn.Linear(previous_dim, projection_dim)
+        self.logvar_layer = nn.Linear(previous_dim, projection_dim)
 
-    def forward(self, inputs: Tensor) -> tuple[Tensor, Tensor]:
-        """Return the posterior mean and log-variance for ``inputs``."""
+    def forward(self, inputs: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Return mixture logits alongside per-component Gaussian parameters."""
 
         hidden = self.backbone(inputs)
+        logits = self.component_logits(hidden)
         mu = self.mu_layer(hidden)
         logvar = self.logvar_layer(hidden)
         min_val, max_val = self.LOGVAR_RANGE
         logvar = torch.clamp(logvar, min=min_val, max=max_val)
-        return mu, logvar
+        batch_size = inputs.size(0)
+        mu = mu.view(batch_size, self.n_components, -1)
+        logvar = logvar.view(batch_size, self.n_components, -1)
+        return logits, mu, logvar
