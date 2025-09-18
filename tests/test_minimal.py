@@ -40,7 +40,7 @@ def test_fit_logs(caplog, epochs):
     X, y, schema = make_dataset()
     model = SUAVE(schema=schema)
     model.fit(X, y, epochs=epochs)
-    assert any("Epoch" in record.message for record in caplog.records)
+    assert any("Fit complete" in record.message for record in caplog.records)
 
 
 def test_predict_proba_shape():

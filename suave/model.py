@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import json
 import logging
-import time
+import math
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import torch
+from torch import Tensor
+from torch.optim import Adam
+from tqdm.auto import tqdm
 
 from . import data as data_utils
 from .modules.calibrate import TemperatureScaler
+from .modules.decoder import Decoder
+from .modules.encoder import EncoderMLP
+from .modules import losses
 from .sampling import sample as sampling_stub
 from .types import Schema
 
@@ -20,7 +27,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class SUAVE:
-    """Minimal SUAVE model stub.
+    """HI-VAE inspired model for mixed tabular data.
 
     Parameters
     ----------
@@ -38,6 +45,10 @@ class SUAVE:
         Dropout probability applied inside neural modules. Default is ``0.1``.
     learning_rate:
         Optimiser learning rate. Default is ``1e-3``.
+    batch_size:
+        Mini-batch size used inside :meth:`fit`. Default is ``128``.
+    kl_warmup_epochs:
+        Number of epochs over which to linearly anneal the KL term.
     val_split:
         Validation split ratio used inside :meth:`fit`. Default is ``0.2``.
     stratify:
@@ -69,6 +80,8 @@ class SUAVE:
         hidden_dims: Iterable[int] = (256, 128),
         dropout: float = 0.1,
         learning_rate: float = 1e-3,
+        batch_size: int = 128,
+        kl_warmup_epochs: int = 10,
         val_split: float = 0.2,
         stratify: bool = True,
         random_state: int = 0,
@@ -79,6 +92,8 @@ class SUAVE:
         self.hidden_dims = tuple(hidden_dims)
         self.dropout = dropout
         self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.kl_warmup_epochs = kl_warmup_epochs
         self.val_split = val_split
         self.stratify = stratify
         self.random_state = random_state
@@ -86,8 +101,12 @@ class SUAVE:
         self._is_fitted = False
         self._is_calibrated = False
         self._classes: np.ndarray | None = None
-        self._normalization_stats: dict[str, dict[str, float | list[str]]] = {}
+        self._norm_stats_per_col: dict[str, dict[str, float | list[str]]] = {}
         self._temperature_scaler = TemperatureScaler()
+        self._device: torch.device | None = None
+        self._encoder: EncoderMLP | None = None
+        self._decoder: Decoder | None = None
+        self._feature_layout: dict[str, dict[str, int]] = {"real": {}, "cat": {}}
 
     # ------------------------------------------------------------------
     # Training utilities
@@ -99,8 +118,10 @@ class SUAVE:
         *,
         schema: Optional[Schema] = None,
         epochs: int = 1,
+        batch_size: Optional[int] = None,
+        kl_warmup_epochs: Optional[int] = None,
     ) -> "SUAVE":
-        """Train the minimal SUAVE model.
+        """Optimise the HI-VAE encoder/decoder using the ELBO objective.
 
         Parameters
         ----------
@@ -111,8 +132,11 @@ class SUAVE:
         schema:
             Optional schema overriding the instance-level schema.
         epochs:
-            Number of placeholder epochs to simulate. Each epoch logs a short
-            message and sleeps for a few milliseconds.
+            Number of optimisation epochs for the ELBO objective.
+        batch_size:
+            Overrides the batch size specified during initialisation.
+        kl_warmup_epochs:
+            Overrides the KL warm-up epochs specified during initialisation.
 
         Returns
         -------
@@ -130,6 +154,18 @@ class SUAVE:
             self.schema = schema
         if self.schema is None:
             raise ValueError("A schema must be provided to fit the model")
+        self.schema.require_columns(X.columns)
+        unsupported = [
+            column
+            for column in self.schema.feature_names
+            if self.schema[column].type not in {"real", "cat"}
+        ]
+        if unsupported:
+            joined = ", ".join(unsupported)
+            raise ValueError(
+                f"Columns {joined} use unsupported feature types. "
+                "Enable positive/count/ordinal heads in a future release."
+            )
 
         LOGGER.info("Starting fit: n_samples=%s, n_features=%s", len(X), X.shape[1])
         X_train, X_val, y_train, y_val = data_utils.split_train_val(
@@ -142,8 +178,8 @@ class SUAVE:
             "Missing mask summary: %s missing values", int(missing_mask.sum().sum())
         )
 
-        X_train, stats = data_utils.standardize(X_train, self.schema)
-        self._normalization_stats = stats
+        X_train_std, stats = data_utils.standardize(X_train, self.schema)
+        self._norm_stats_per_col = stats
         _ = data_utils.standardize(X_val, self.schema)
 
         y_train_array = np.asarray(y_train)
@@ -151,13 +187,177 @@ class SUAVE:
         if self._classes.size == 0:
             raise ValueError("Training targets must contain at least one class")
 
-        for epoch in range(epochs):
-            LOGGER.info("Epoch %s/%s - placeholder training step", epoch + 1, epochs)
-            time.sleep(0.01)
+        batch_size = batch_size or self.batch_size
+        kl_warmup_epochs = kl_warmup_epochs or self.kl_warmup_epochs
+        encoder_inputs, data_tensors, mask_tensors = self._prepare_training_tensors(
+            X_train_std, missing_mask
+        )
+
+        device = self._select_device()
+        encoder_inputs = encoder_inputs.to(device)
+        for feature_type in data_tensors:
+            for column, tensor in data_tensors[feature_type].items():
+                data_tensors[feature_type][column] = tensor.to(device)
+                mask_tensors[feature_type][column] = mask_tensors[feature_type][
+                    column
+                ].to(device)
+
+        torch.manual_seed(self.random_state)
+        self._encoder = EncoderMLP(
+            encoder_inputs.size(-1),
+            self.latent_dim,
+            hidden=self.hidden_dims,
+            dropout=self.dropout,
+        ).to(device)
+        self._decoder = Decoder(
+            self.latent_dim,
+            self.schema,
+            hidden=self.hidden_dims,
+            dropout=self.dropout,
+        ).to(device)
+        parameters = list(self._encoder.parameters()) + list(self._decoder.parameters())
+        optimizer = Adam(parameters, lr=self.learning_rate)
+
+        n_samples = encoder_inputs.size(0)
+        effective_batch = min(batch_size, n_samples)
+        n_batches = max(1, math.ceil(n_samples / effective_batch))
+        warmup_steps = max(1, kl_warmup_epochs * n_batches)
+        global_step = 0
+
+        progress = tqdm(range(epochs), desc="Training", leave=False)
+        for epoch in progress:
+            permutation = torch.randperm(n_samples, device=device)
+            epoch_loss = 0.0
+            for start in range(0, n_samples, effective_batch):
+                batch_indices = permutation[start : start + effective_batch]
+                batch_input = encoder_inputs[batch_indices]
+                batch_data = {
+                    key: {
+                        column: tensor[batch_indices]
+                        for column, tensor in tensors.items()
+                    }
+                    for key, tensors in data_tensors.items()
+                }
+                batch_masks = {
+                    key: {
+                        column: tensor[batch_indices]
+                        for column, tensor in tensors.items()
+                    }
+                    for key, tensors in mask_tensors.items()
+                }
+
+                mu_z, logvar_z = self._encoder(batch_input)
+                z = self._reparameterize(mu_z, logvar_z)
+                decoder_out = self._decoder(
+                    z, batch_data, self._norm_stats_per_col, batch_masks
+                )
+                recon_terms = decoder_out["log_px"]
+                global_step += 1
+                beta_scale = losses.kl_warmup(global_step, warmup_steps, self.beta)
+                kl = losses.kl_normal(mu_z, logvar_z) * beta_scale
+                elbo_value = losses.elbo(recon_terms, kl)
+                loss = -elbo_value.mean()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+
+            progress.set_postfix({"loss": epoch_loss / n_batches})
 
         self._is_fitted = True
+        self._is_calibrated = False
         LOGGER.info("Fit complete")
         return self
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _select_device(self) -> torch.device:
+        """Return the computation device, warning if CUDA is unavailable."""
+
+        if self._device is not None:
+            return self._device
+        if torch.cuda.is_available():
+            self._device = torch.device("cuda")
+        else:
+            LOGGER.warning("CUDA not available; falling back to CPU")
+            self._device = torch.device("cpu")
+        return self._device
+
+    def _prepare_training_tensors(
+        self,
+        X: pd.DataFrame,
+        mask: pd.DataFrame,
+    ) -> Tuple[
+        Tensor,
+        Dict[str, Dict[str, Tensor]],
+        Dict[str, Dict[str, Tensor]],
+    ]:
+        """Convert normalised dataframes into tensors for optimisation."""
+
+        n_samples = len(X)
+        value_parts: list[Tensor] = []
+        mask_parts: list[Tensor] = []
+        real_data: Dict[str, Tensor] = {}
+        cat_data: Dict[str, Tensor] = {}
+        real_masks: Dict[str, Tensor] = {}
+        cat_masks: Dict[str, Tensor] = {}
+
+        self._feature_layout = {"real": {}, "cat": {}}
+
+        for column in self.schema.real_features:
+            values = pd.to_numeric(X[column], errors="coerce").to_numpy(
+                dtype=np.float32
+            )
+            values = np.nan_to_num(values, nan=0.0).reshape(n_samples, 1)
+            tensor = torch.from_numpy(values)
+            missing = mask[column].to_numpy().astype(bool)
+            observed = (~missing).astype(np.float32).reshape(n_samples, 1)
+            mask_tensor = torch.from_numpy(observed)
+            real_data[column] = tensor
+            real_masks[column] = mask_tensor
+            value_parts.append(tensor)
+            mask_parts.append(mask_tensor)
+            self._feature_layout["real"][column] = 1
+
+        for column in self.schema.categorical_features:
+            series = X[column].astype("category")
+            codes = series.cat.codes.to_numpy()
+            n_classes = int(self.schema[column].n_classes or series.cat.categories.size)
+            if n_classes <= 0:
+                raise ValueError(f"Categorical column '{column}' must define classes")
+            onehot = np.zeros((n_samples, n_classes), dtype=np.float32)
+            valid = codes >= 0
+            indices = np.where(valid)[0]
+            if indices.size:
+                onehot[indices, codes[indices]] = 1.0
+            tensor = torch.from_numpy(onehot)
+            missing = mask[column].to_numpy().astype(bool)
+            observed = (~missing).astype(np.float32).reshape(n_samples, 1)
+            mask_tensor = torch.from_numpy(observed)
+            cat_data[column] = tensor
+            cat_masks[column] = mask_tensor
+            value_parts.append(tensor)
+            mask_parts.append(mask_tensor)
+            self._feature_layout["cat"][column] = n_classes
+
+        if not value_parts:
+            raise ValueError("No supported features present in the training data")
+
+        encoder_inputs = torch.cat(value_parts + mask_parts, dim=1).float()
+        data_tensors = {"real": real_data, "cat": cat_data}
+        mask_tensors = {"real": real_masks, "cat": cat_masks}
+        return encoder_inputs, data_tensors, mask_tensors
+
+    @staticmethod
+    def _reparameterize(mu: Tensor, logvar: Tensor) -> Tensor:
+        """Sample latent variables using the reparameterisation trick."""
+
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
 
     # ------------------------------------------------------------------
     # Prediction utilities
@@ -248,7 +448,7 @@ class SUAVE:
         state = {
             "schema": self.schema.to_dict() if self.schema else None,
             "classes": self._classes.tolist() if self._classes is not None else None,
-            "normalization": self._normalization_stats,
+            "normalization": self._norm_stats_per_col,
         }
         path.write_text(json.dumps(state))
         return path
@@ -265,7 +465,7 @@ class SUAVE:
         if classes is not None:
             model._classes = np.array(classes)
             model._is_fitted = True
-        model._normalization_stats = data.get("normalization", {})
+        model._norm_stats_per_col = data.get("normalization", {})
         return model
 
     # ------------------------------------------------------------------
