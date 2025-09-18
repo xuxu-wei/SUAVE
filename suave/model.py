@@ -393,9 +393,11 @@ class SUAVE:
         warmup_steps = max(1, kl_warmup_epochs * n_batches)
         global_step = 0
         progress = tqdm(range(epochs), desc="Training", leave=False)
+        final_temperature = self._gumbel_temperature_for_epoch(0)
         for epoch in progress:
             temperature = self._gumbel_temperature_for_epoch(epoch)
             use_gumbel = self.behaviour == "hivae" and self._tau_start is not None
+            final_temperature = temperature
             permutation = torch.randperm(n_samples, device=device)
             epoch_loss = 0.0
             for start in range(0, n_samples, effective_batch):
@@ -472,6 +474,9 @@ class SUAVE:
                 epoch_loss += loss.item()
 
             progress.set_postfix({"loss": epoch_loss / n_batches})
+
+        if self.behaviour == "hivae" and self._tau_start is not None:
+            self._inference_tau = float(final_temperature)
 
         with torch.no_grad():
             encoder_training_state = self._encoder.training
@@ -1312,6 +1317,7 @@ class SUAVE:
             "tau_start": self._tau_start,
             "tau_min": self._tau_min,
             "tau_decay": self._tau_decay,
+            "inference_tau": self._inference_tau,
         }
         classifier_state: dict[str, Any] | None = None
         if self._classifier is not None:
@@ -1410,6 +1416,10 @@ class SUAVE:
                     value = float(value)
                 init_kwargs[key] = value
         model = cls(schema=schema, behaviour=behaviour, **init_kwargs)
+
+        inference_tau = metadata.get("inference_tau")
+        if inference_tau is not None:
+            model._inference_tau = float(inference_tau)
 
         model._norm_stats_per_col = artefacts.get("normalization", {})
         feature_layout = artefacts.get("feature_layout") or model._feature_layout
