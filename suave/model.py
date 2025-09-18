@@ -528,12 +528,10 @@ class SUAVE:
                         batch_masks,
                     )
                     recon_sum = losses.sum_reconstruction_terms(decoder_out["log_px"])
-                    prior_mu = self._prior_component_mu.index_select(
-                        0, component_indices
-                    )
-                    prior_logvar = self._prior_component_logvar.index_select(
-                        0, component_indices
-                    )
+                    prior_means = self._prior_component_means_tensor()
+                    prior_logvars = self._prior_component_logvar_tensor()
+                    prior_mu = prior_means.index_select(0, component_indices)
+                    prior_logvar = prior_logvars.index_select(0, component_indices)
                     gaussian_kl = losses.kl_normal_vs_normal(
                         selected_mu, selected_logvar, prior_mu, prior_logvar
                     )
@@ -569,8 +567,8 @@ class SUAVE:
                     gaussian_kl = losses.kl_normal_mixture(
                         component_mu,
                         component_logvar,
-                        self._prior_component_mu,
-                        self._prior_component_logvar,
+                        self._prior_component_means_tensor(),
+                        self._prior_component_logvar_tensor(),
                         component_probs,
                     )
                     total_kl = beta_scale * (categorical_kl + gaussian_kl)
@@ -845,9 +843,9 @@ class SUAVE:
         if conditional:
             return self._draw_conditional_latents(n_samples, targets, device)
         latents, component_indices = sampling_utils.sample_mixture_latents(
-            self._prior_component_logits.detach(),
-            self._prior_component_mu.detach(),
-            self._prior_component_logvar.detach(),
+            self._prior_component_logits_tensor().detach(),
+            self._prior_component_means_tensor().detach(),
+            self._prior_component_logvar_tensor().detach(),
             n_samples,
             device=device,
         )
