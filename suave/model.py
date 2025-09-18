@@ -7,14 +7,16 @@ import logging
 import math
 import warnings
 from pathlib import Path
-from typing import Dict, Iterable, Literal, Optional, Tuple
+import pickle
+from collections import OrderedDict
+from typing import Any, Dict, Iterable, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from pandas import CategoricalDtype
 import torch
 from torch import Tensor
-from torch.nn import Parameter
+from torch.nn import Module, Parameter
 from torch.distributions import Categorical
 from torch.optim import Adam
 from tqdm.auto import tqdm
@@ -1065,34 +1067,271 @@ class SUAVE:
     # ------------------------------------------------------------------
     # Persistence helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _state_dict_to_cpu(module: Module | None) -> OrderedDict[str, Tensor] | None:
+        """Return a CPU copy of ``module``'s state dict."""
+
+        if module is None:
+            return None
+        state_dict = module.state_dict()
+        return OrderedDict(
+            (key, value.detach().cpu() if isinstance(value, Tensor) else value)
+            for key, value in state_dict.items()
+        )
+
+    @staticmethod
+    def _tensor_to_cpu(tensor: Tensor | None) -> Tensor | None:
+        """Detach ``tensor`` to CPU if present."""
+
+        if tensor is None:
+            return None
+        return tensor.detach().cpu()
+
     def save(self, path: str | Path) -> Path:
         """Serialise minimal model state to ``path``."""
 
         if not self._is_fitted:
             raise RuntimeError("Model must be fitted before saving")
         path = Path(path)
-        state = {
+        metadata: dict[str, Any] = {
             "schema": self.schema.to_dict() if self.schema else None,
-            "classes": self._classes.tolist() if self._classes is not None else None,
-            "normalization": self._norm_stats_per_col,
-            "temperature_scaler": self._temperature_scaler_state,
             "behaviour": self.behaviour,
             "latent_dim": self.latent_dim,
             "n_components": self.n_components,
+            "hidden_dims": list(self.hidden_dims),
+            "dropout": self.dropout,
+            "learning_rate": self.learning_rate,
+            "batch_size": self.batch_size,
+            "kl_warmup_epochs": self.kl_warmup_epochs,
+            "val_split": self.val_split,
+            "stratify": self.stratify,
+            "random_state": self.random_state,
+        }
+        classifier_state: dict[str, Any] | None = None
+        if self._classifier is not None:
+            class_weight = None
+            use_weight = bool(getattr(self._classifier, "_use_weight", False))
+            if use_weight:
+                class_weight = self._classifier.class_weight.detach().cpu()
+            classifier_state = {
+                "state_dict": self._state_dict_to_cpu(self._classifier),
+                "use_weight": use_weight,
+                "class_weight": class_weight,
+            }
+        modules = {
+            "encoder": self._state_dict_to_cpu(self._encoder),
+            "decoder": self._state_dict_to_cpu(self._decoder),
+            "classifier": classifier_state,
+            "temperature_scaler": self._temperature_scaler.state_dict(),
             "prior": {
-                "logits": self._prior_component_logits.detach().cpu().tolist(),
-                "mu": self._prior_component_mu.detach().cpu().tolist(),
-                "logvar": self._prior_component_logvar.detach().cpu().tolist(),
+                "logits": self._prior_component_logits.detach().cpu(),
+                "mu": self._prior_component_mu.detach().cpu(),
+                "logvar": self._prior_component_logvar.detach().cpu(),
             },
         }
-        path.write_text(json.dumps(state))
+        artefacts: dict[str, Any] = {
+            "classes": self._classes,
+            "class_to_index": self._class_to_index,
+            "normalization": self._norm_stats_per_col,
+            "feature_layout": self._feature_layout,
+            "temperature_scaler_state": self._temperature_scaler_state,
+            "is_calibrated": self._is_calibrated,
+            "train_latent_mu": self._tensor_to_cpu(self._train_latent_mu),
+            "train_latent_logvar": self._tensor_to_cpu(self._train_latent_logvar),
+            "train_component_logits": self._tensor_to_cpu(self._train_component_logits),
+            "train_component_mu": self._tensor_to_cpu(self._train_component_mu),
+            "train_component_logvar": self._tensor_to_cpu(self._train_component_logvar),
+            "train_component_probs": self._tensor_to_cpu(self._train_component_probs),
+            "train_target_indices": self._train_target_indices,
+            "cached_logits": self._cached_logits,
+            "cached_probabilities": self._cached_probabilities,
+        }
+        payload = {
+            "metadata": metadata,
+            "modules": modules,
+            "artefacts": artefacts,
+        }
+        torch.save(payload, path)
         return path
 
     @classmethod
     def load(cls, path: str | Path) -> "SUAVE":
         """Load a model saved with :meth:`save`."""
 
-        data = json.loads(Path(path).read_text())
+        path = Path(path)
+        try:
+            payload = torch.load(path, map_location="cpu")
+        except (RuntimeError, pickle.UnpicklingError, EOFError):
+            payload = None
+        if isinstance(payload, dict) and "metadata" in payload:
+            return cls._load_from_payload(payload)
+        if payload is not None:
+            raise ValueError("Unexpected model archive format")
+        data = json.loads(path.read_text())
+        return cls._load_from_legacy_json(data)
+
+    @classmethod
+    def _load_from_payload(cls, payload: dict[str, Any]) -> "SUAVE":
+        """Instantiate ``SUAVE`` from a dictionary produced by :meth:`save`."""
+
+        metadata: dict[str, Any] = payload.get("metadata", {})
+        modules: dict[str, Any] = payload.get("modules", {})
+        artefacts: dict[str, Any] = payload.get("artefacts", {})
+        schema_dict = metadata.get("schema") or {}
+        schema = Schema(schema_dict) if schema_dict else None
+        behaviour = metadata.get("behaviour", "suave")
+        init_kwargs: dict[str, Any] = {}
+        for key in (
+            "latent_dim",
+            "n_components",
+            "hidden_dims",
+            "dropout",
+            "learning_rate",
+            "batch_size",
+            "kl_warmup_epochs",
+            "val_split",
+            "stratify",
+            "random_state",
+        ):
+            if key in metadata and metadata[key] is not None:
+                value = metadata[key]
+                if key == "hidden_dims":
+                    value = tuple(int(v) for v in value)
+                init_kwargs[key] = value
+        model = cls(schema=schema, behaviour=behaviour, **init_kwargs)
+
+        model._norm_stats_per_col = artefacts.get("normalization", {})
+        feature_layout = artefacts.get("feature_layout") or model._feature_layout
+        model._feature_layout = feature_layout
+        model._class_to_index = artefacts.get("class_to_index")
+        classes = artefacts.get("classes")
+        if classes is not None:
+            model._classes = np.asarray(classes)
+        cached_logits = artefacts.get("cached_logits")
+        model._cached_logits = (
+            None if cached_logits is None else np.asarray(cached_logits)
+        )
+        cached_prob = artefacts.get("cached_probabilities")
+        model._cached_probabilities = (
+            None if cached_prob is None else np.asarray(cached_prob)
+        )
+        model._temperature_scaler_state = artefacts.get("temperature_scaler_state")
+        model._is_calibrated = bool(artefacts.get("is_calibrated", False))
+
+        def _clone_optional_tensor(value: Any) -> Tensor | None:
+            if value is None:
+                return None
+            tensor = torch.as_tensor(value)
+            return tensor.clone().detach()
+
+        model._train_latent_mu = _clone_optional_tensor(
+            artefacts.get("train_latent_mu")
+        )
+        model._train_latent_logvar = _clone_optional_tensor(
+            artefacts.get("train_latent_logvar")
+        )
+        model._train_component_logits = _clone_optional_tensor(
+            artefacts.get("train_component_logits")
+        )
+        model._train_component_mu = _clone_optional_tensor(
+            artefacts.get("train_component_mu")
+        )
+        model._train_component_logvar = _clone_optional_tensor(
+            artefacts.get("train_component_logvar")
+        )
+        model._train_component_probs = _clone_optional_tensor(
+            artefacts.get("train_component_probs")
+        )
+        train_targets = artefacts.get("train_target_indices")
+        model._train_target_indices = (
+            None if train_targets is None else np.asarray(train_targets)
+        )
+
+        device = (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
+        model._device = device
+        encoder_state = modules.get("encoder")
+        decoder_state = modules.get("decoder")
+        classifier_payload = modules.get("classifier")
+        temperature_state = modules.get("temperature_scaler") or {}
+        prior_state = modules.get("prior") or {}
+
+        encoder_input_dim = cls._encoder_input_dim_from_layout(model._feature_layout)
+        model._encoder = EncoderMLP(
+            encoder_input_dim,
+            model.latent_dim,
+            hidden=model.hidden_dims,
+            dropout=model.dropout,
+            n_components=model.n_components,
+        ).to(device)
+        if isinstance(encoder_state, OrderedDict):
+            model._encoder.load_state_dict(encoder_state)
+        elif encoder_state is not None:
+            model._encoder.load_state_dict(OrderedDict(encoder_state))
+
+        if model.schema is None:
+            raise ValueError("Schema is required to restore decoder state")
+        model._decoder = Decoder(
+            model.latent_dim,
+            model.schema,
+            hidden=model.hidden_dims,
+            dropout=model.dropout,
+        ).to(device)
+        if isinstance(decoder_state, OrderedDict):
+            model._decoder.load_state_dict(decoder_state)
+        elif decoder_state is not None:
+            model._decoder.load_state_dict(OrderedDict(decoder_state))
+
+        if behaviour == "suave" and classifier_payload:
+            if model._classes is None:
+                raise ValueError("Saved model is missing class labels")
+            class_weight = None
+            if classifier_payload.get("use_weight"):
+                weight_value = classifier_payload.get("class_weight")
+                class_weight = torch.as_tensor(weight_value, dtype=torch.float32)
+            model._classifier = ClassificationHead(
+                model.latent_dim,
+                int(model._classes.size),
+                class_weight=class_weight,
+            ).to(device)
+            state = classifier_payload.get("state_dict")
+            if isinstance(state, OrderedDict):
+                model._classifier.load_state_dict(state)
+            elif state is not None:
+                model._classifier.load_state_dict(OrderedDict(state))
+        else:
+            model._classifier = None
+
+        model._temperature_scaler.load_state_dict(temperature_state)
+        model._temperature_scaler_state = temperature_state
+        model._is_calibrated = bool(temperature_state.get("fitted", False))
+
+        model._move_prior_parameters_to_device(device)
+        for attr, key in (
+            ("_prior_component_logits", "logits"),
+            ("_prior_component_mu", "mu"),
+            ("_prior_component_logvar", "logvar"),
+        ):
+            value = prior_state.get(key)
+            if value is None:
+                continue
+            tensor = torch.as_tensor(value, dtype=torch.float32, device=device)
+            param = getattr(model, attr)
+            if tensor.shape != param.data.shape:
+                raise ValueError(
+                    f"Saved prior tensor '{key}' has shape {tensor.shape} which does not match the model configuration {param.data.shape}"
+                )
+            with torch.no_grad():
+                param.copy_(tensor)
+
+        model._is_fitted = True
+        return model
+
+    @classmethod
+    def _load_from_legacy_json(cls, data: dict[str, Any]) -> "SUAVE":
+        """Fallback loader for the legacy JSON serialisation format."""
+
         schema_dict = data.get("schema") or {}
         schema = Schema(schema_dict) if schema_dict else None
         behaviour = data.get("behaviour", "suave")
@@ -1151,6 +1390,19 @@ class SUAVE:
                 with torch.no_grad():
                     model._prior_component_logvar.copy_(logvar_tensor)
         return model
+
+    @staticmethod
+    def _encoder_input_dim_from_layout(
+        feature_layout: dict[str, dict[str, int]],
+    ) -> int:
+        """Return encoder input dimensionality given ``feature_layout``."""
+
+        value_dims = 0
+        mask_dims = 0
+        for columns in feature_layout.values():
+            value_dims += sum(int(width) for width in columns.values())
+            mask_dims += len(columns)
+        return value_dims + mask_dims
 
     # ------------------------------------------------------------------
     # Representation helpers
