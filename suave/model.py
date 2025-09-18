@@ -23,7 +23,7 @@ from .modules.decoder import Decoder
 from .modules.encoder import EncoderMLP
 from .modules.heads import ClassificationHead
 from .modules import losses
-from .sampling import sample as sampling_stub
+from . import sampling as sampling_utils
 from .types import Schema
 
 LOGGER = logging.getLogger(__name__)
@@ -130,6 +130,9 @@ class SUAVE:
         self._class_to_index: dict[object, int] | None = None
         self._cached_logits: np.ndarray | None = None
         self._cached_probabilities: np.ndarray | None = None
+        self._train_latent_mu: Tensor | None = None
+        self._train_latent_logvar: Tensor | None = None
+        self._train_target_indices: np.ndarray | None = None
 
     # ------------------------------------------------------------------
     # Training utilities
@@ -327,6 +330,19 @@ class SUAVE:
 
             progress.set_postfix({"loss": epoch_loss / n_batches})
 
+        with torch.no_grad():
+            encoder_training_state = self._encoder.training
+            self._encoder.eval()
+            mu_all, logvar_all = self._encoder(encoder_inputs)
+            if encoder_training_state:
+                self._encoder.train()
+        self._train_latent_mu = mu_all.detach().cpu()
+        self._train_latent_logvar = logvar_all.detach().cpu()
+        if y_train_tensor is not None:
+            self._train_target_indices = y_train_tensor.detach().cpu().numpy()
+        else:
+            self._train_target_indices = None
+
         self._is_fitted = True
         self._is_calibrated = False
         self._temperature_scaler = TemperatureScaler()
@@ -498,6 +514,62 @@ class SUAVE:
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
+
+    def _draw_latent_samples(
+        self,
+        n_samples: int,
+        *,
+        conditional: bool,
+        targets: Optional[Iterable[object] | np.ndarray],
+        device: torch.device,
+    ) -> Tensor:
+        """Return latent samples from the prior or conditioned on ``targets``."""
+
+        if conditional:
+            return self._draw_conditional_latents(n_samples, targets, device)
+        return torch.randn(n_samples, self.latent_dim, device=device)
+
+    def _draw_conditional_latents(
+        self,
+        n_samples: int,
+        targets: Optional[Iterable[object] | np.ndarray],
+        device: torch.device,
+    ) -> Tensor:
+        """Sample latent variables conditioned on class labels."""
+
+        if targets is None:
+            raise ValueError("Targets must be provided when conditional=True")
+        if self._train_latent_mu is None or self._train_latent_logvar is None:
+            raise RuntimeError("Latent posterior statistics are unavailable for sampling")
+        if self._class_to_index is None or self._train_target_indices is None:
+            raise RuntimeError(
+                "Conditional sampling requires supervised targets from the training data"
+            )
+
+        target_array = np.asarray(targets).reshape(-1)
+        if target_array.shape[0] != n_samples:
+            raise ValueError("y must have length equal to n_samples when conditional=True")
+
+        latents = torch.zeros((n_samples, self.latent_dim), device=device)
+        rng = np.random.default_rng()
+        for row, raw_label in enumerate(target_array):
+            label = raw_label.item() if isinstance(raw_label, np.generic) else raw_label
+            if label not in self._class_to_index:
+                raise ValueError(
+                    f"Unknown class '{label}' supplied for conditional sampling"
+                )
+            class_index = self._class_to_index[label]
+            candidate_indices = np.where(self._train_target_indices == class_index)[0]
+            if candidate_indices.size == 0:
+                raise ValueError(
+                    f"No training samples available for class '{label}' to condition on"
+                )
+            selected = int(rng.choice(candidate_indices))
+            mu = self._train_latent_mu[selected].unsqueeze(0).to(device)
+            logvar = self._train_latent_logvar[selected].unsqueeze(0).to(device)
+            latent_sample = self._reparameterize(mu, logvar)
+            latents[row] = latent_sample.squeeze(0)
+        return latents
 
     def _apply_training_normalization(self, X: pd.DataFrame) -> pd.DataFrame:
         """Apply stored normalisation statistics to ``X``."""
@@ -747,8 +819,8 @@ class SUAVE:
         Returns
         -------
         numpy.ndarray
-            Array of shape ``(n_samples, latent_dim)`` containing the latent
-            posterior means produced by the trained encoder.
+            Float32 array with shape ``(n_samples, latent_dim)`` containing the
+            latent posterior means produced by the trained encoder.
 
         Examples
         --------
@@ -787,12 +859,60 @@ class SUAVE:
     def sample(
         self, n_samples: int, conditional: bool = False, y: Optional[np.ndarray] = None
     ) -> pd.DataFrame:
-        """Generate placeholder samples using :mod:`suave.sampling`."""
+        """Generate samples by decoding latent variables through the HI-VAE.
 
-        if not self._is_fitted:
+        Parameters
+        ----------
+        n_samples:
+            Number of synthetic rows to generate.
+        conditional:
+            If ``True`` the latent variables are drawn from posterior
+            approximations of the training data whose labels match ``y``.
+        y:
+            Sequence of class labels used when ``conditional=True``.  The array
+            must have length ``n_samples`` and contain values observed during
+            :meth:`fit`.
+
+        Returns
+        -------
+        pandas.DataFrame
+            DataFrame with shape ``(n_samples, n_features)`` whose columns match
+            the training schema.
+
+        Examples
+        --------
+        >>> samples = model.sample(5)
+        >>> samples.shape
+        (5, len(model.schema.feature_names))
+        """
+
+        if not self._is_fitted or self._decoder is None:
             raise RuntimeError("Model must be fitted before sampling")
-        n_features = len(self.schema.feature_names) if self.schema else 0
-        return sampling_stub(n_samples, n_features, conditional=conditional, y=y)
+        if self.schema is None:
+            raise RuntimeError("Schema is required to generate samples")
+        if n_samples <= 0:
+            return pd.DataFrame(columns=list(self.schema.feature_names))
+
+        device = self._select_device()
+        latents = self._draw_latent_samples(
+            n_samples, conditional=conditional, targets=y, device=device
+        )
+        data_tensors, mask_tensors = sampling_utils.build_placeholder_batches(
+            self._feature_layout, n_samples, device=device
+        )
+        decoder_training_state = self._decoder.training
+        self._decoder.eval()
+        with torch.no_grad():
+            decoder_out = self._decoder(
+                latents, data_tensors, self._norm_stats_per_col, mask_tensors
+            )
+        if decoder_training_state:
+            self._decoder.train()
+
+        samples = sampling_utils.decoder_outputs_to_frame(
+            decoder_out["per_feature"], self.schema, self._norm_stats_per_col
+        )
+        return samples
 
     # ------------------------------------------------------------------
     # Persistence helpers
