@@ -92,6 +92,26 @@ def test_conditional_sampling_validates_labels():
         model.sample(2, conditional=True, y=np.array([2, 2]))
 
 
+def test_save_load_predict_round_trip(tmp_path: Path):
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)
+    model.fit(X, y, epochs=1)
+    model.calibrate(X, y)
+    expected_probabilities = model.predict_proba(X)
+    expected_latents = model.encode(X)
+    save_path = tmp_path / "model.pt"
+    model.save(save_path)
+
+    reloaded = SUAVE.load(save_path)
+    reloaded_probabilities = reloaded.predict_proba(X)
+    np.testing.assert_allclose(expected_probabilities, reloaded_probabilities)
+    np.testing.assert_allclose(expected_latents, reloaded.encode(X))
+    samples = reloaded.sample(2)
+    assert isinstance(samples, pd.DataFrame)
+    assert list(samples.columns) == list(schema.feature_names)
+    assert len(samples) == 2
+
+
 def test_hivae_behaviour_disables_classifier():
     X, _, schema = make_dataset()
     model = SUAVE(schema=schema, behaviour="hivae", n_components=2)
