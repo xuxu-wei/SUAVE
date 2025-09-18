@@ -6,10 +6,7 @@ import math
 
 import numpy as np
 import pytest
-
-pytest.importorskip(
-    "sklearn", reason="scikit-learn is required for evaluation metrics tests"
-)
+pytest.importorskip("sklearn", reason="scikit-learn is required for evaluation metrics tests")
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -81,9 +78,7 @@ def test_metric_helpers_match_sklearn_multi_class() -> None:
     auprc = compute_auprc(probabilities, targets)
     brier = compute_brier(probabilities, targets)
 
-    expected_auroc = roc_auc_score(
-        targets, probabilities, multi_class="ovr", average="macro"
-    )
+    expected_auroc = roc_auc_score(targets, probabilities, multi_class="ovr", average="macro")
     expected_auprc = np.mean(
         [
             average_precision_score((targets == idx).astype(int), probabilities[:, idx])
@@ -115,10 +110,7 @@ def test_compute_ece_known_value() -> None:
             continue
         bin_confidence = np.mean(confidences[mask])
         bin_accuracy = np.mean(np.argmax(probabilities[mask], axis=1) == targets[mask])
-        expected += abs(bin_confidence - bin_accuracy) * (
-            np.sum(mask) / len(confidences)
-        )
-
+        expected += abs(bin_confidence - bin_accuracy) * (np.sum(mask) / len(confidences))
     assert ece == pytest.approx(expected)
 
 
@@ -134,7 +126,6 @@ def test_evaluate_accepts_one_dimensional_probabilities() -> None:
 
 def _logistic_regression_factory() -> LogisticRegression:
     return LogisticRegression(max_iter=500, solver="lbfgs")
-
 
 def test_tstr_and_trtr_workflow() -> None:
     X_syn = np.array([[0.0], [0.1], [1.0], [1.1]])

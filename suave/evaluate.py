@@ -148,11 +148,7 @@ def compute_auprc(probabilities: np.ndarray, targets: np.ndarray) -> float:
             continue
         try:
             scores.append(
-                float(
-                    average_precision_score(
-                        binary_target, prob_array[:, class_index]
-                    )
-                )
+                float(average_precision_score(binary_target, prob_array[:, class_index]))
             )
         except ValueError:
             continue
@@ -218,9 +214,8 @@ def compute_ece(
     confidences = np.max(prob_array, axis=1)
     predictions = np.argmax(prob_array, axis=1)
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    bin_indices = np.minimum(
-        np.digitize(confidences, bin_edges[1:], right=True), n_bins - 1
-    )
+    bin_indices = np.minimum(np.digitize(confidences, bin_edges[1:], right=True), n_bins - 1)
+
 
     ece = 0.0
     total = len(confidences)
@@ -317,9 +312,8 @@ def evaluate_tstr(
 
     model = model_factory()
     if not hasattr(model, "fit") or not hasattr(model, "predict_proba"):
-        raise ValueError(
-            "model_factory must return an object with fit and predict_proba"
-        )
+        raise ValueError("model_factory must return an object with fit and predict_proba")
+
 
     model.fit(X_syn, y_syn)
     probabilities = model.predict_proba(X_real)
@@ -358,9 +352,8 @@ def evaluate_trtr(
 
     model = model_factory()
     if not hasattr(model, "fit") or not hasattr(model, "predict_proba"):
-        raise ValueError(
-            "model_factory must return an object with fit and predict_proba"
-        )
+        raise ValueError("model_factory must return an object with fit and predict_proba")
+
 
     model.fit(X_train, y_train)
     probabilities = model.predict_proba(X_test)
@@ -381,6 +374,7 @@ def simple_membership_inference(
     induced by the observed scores are considered alongside extreme thresholds
     that force "all member" and "all non-member" predictions to ensure the
     majority-class baseline is explicitly evaluated.
+
 
     Args:
         train_probabilities: Probabilities predicted on the training data.
@@ -408,9 +402,7 @@ def simple_membership_inference(
     test_probs, test_labels = _prepare_inputs(test_probabilities, test_targets)
 
     if train_probs.shape[1] != test_probs.shape[1]:
-        raise ValueError(
-            "train and test probabilities must have the same number of classes"
-        )
+        raise ValueError("train and test probabilities must have the same number of classes")
 
     if train_probs.shape[0] == 0 or test_probs.shape[0] == 0:
         nan_value = float("nan")
@@ -421,9 +413,8 @@ def simple_membership_inference(
             "attack_majority_class_accuracy": nan_value,
         }
 
-    def _true_class_confidence(
-        prob_matrix: np.ndarray, labels: np.ndarray
-    ) -> np.ndarray:
+    def _true_class_confidence(prob_matrix: np.ndarray, labels: np.ndarray) -> np.ndarray:
+
         if prob_matrix.shape[1] == 2:
             confidences = np.where(labels == 1, prob_matrix[:, 1], prob_matrix[:, 0])
         else:
@@ -477,3 +468,4 @@ def simple_membership_inference(
         "attack_best_accuracy": float(accuracies[best_index]),
         "attack_majority_class_accuracy": majority_accuracy,
     }
+
