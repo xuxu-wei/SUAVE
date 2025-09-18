@@ -185,3 +185,31 @@ def test_hivae_inference_temperature_tracks_training_progress():
     model.fit(X, epochs=3)
     expected_tau = model._gumbel_temperature_for_epoch(2)
     assert model._inference_tau == pytest.approx(expected_tau)
+
+
+def test_hivae_prior_mean_layer_trains_and_samples():
+    X, _, schema = make_dataset()
+    model = SUAVE(
+        schema=schema,
+        behaviour="hivae",
+        n_components=2,
+        latent_dim=4,
+        batch_size=2,
+    )
+    assert model._prior_mean_layer is not None
+    initial_params = [
+        param.detach().cpu().numpy().copy()
+        for param in model._prior_mean_layer.parameters()
+    ]
+    model.fit(X, epochs=3)
+    samples = model.sample(3)
+    assert isinstance(samples, pd.DataFrame)
+    assert len(samples) == 3
+    updated_params = [
+        param.detach().cpu().numpy()
+        for param in model._prior_mean_layer.parameters()
+    ]
+    assert any(
+        not np.allclose(initial, updated)
+        for initial, updated in zip(initial_params, updated_params)
+    )
