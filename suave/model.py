@@ -14,6 +14,7 @@ import pandas as pd
 from pandas import CategoricalDtype
 import torch
 from torch import Tensor
+from torch.nn import Parameter
 from torch.distributions import Categorical
 from torch.optim import Adam
 from tqdm.auto import tqdm
@@ -146,9 +147,38 @@ class SUAVE:
         self._train_component_logvar: Tensor | None = None
         self._train_component_probs: Tensor | None = None
 
-        self._prior_component_logits = torch.zeros(self.n_components)
-        self._prior_component_mu = torch.zeros(self.n_components, self.latent_dim)
-        self._prior_component_logvar = torch.zeros(self.n_components, self.latent_dim)
+        self._reset_prior_parameters()
+
+    def _reset_prior_parameters(self) -> None:
+        """Initialise trainable tensors for the mixture prior parameters."""
+
+        self._prior_component_logits = Parameter(
+            torch.zeros(self.n_components, dtype=torch.float32)
+        )
+        self._prior_component_mu = Parameter(
+            torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32)
+        )
+        self._prior_component_logvar = Parameter(
+            torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32)
+        )
+
+    def _move_prior_parameters_to_device(self, device: torch.device) -> None:
+        """Ensure mixture prior parameters live on ``device`` as trainable tensors."""
+
+        for name in (
+            "_prior_component_logits",
+            "_prior_component_mu",
+            "_prior_component_logvar",
+        ):
+            tensor = getattr(self, name)
+            if not isinstance(tensor, Parameter):
+                tensor = Parameter(tensor)
+            if tensor.device != device:
+                tensor = Parameter(
+                    tensor.detach().to(device=device, dtype=torch.float32),
+                    requires_grad=True,
+                )
+            setattr(self, name, tensor)
 
     # ------------------------------------------------------------------
     # Training utilities
@@ -260,6 +290,7 @@ class SUAVE:
         self._train_component_probs = None
 
         device = self._select_device()
+        self._move_prior_parameters_to_device(device)
         encoder_inputs = encoder_inputs.to(device)
         for feature_type in data_tensors:
             for column, tensor in data_tensors[feature_type].items():
@@ -291,7 +322,15 @@ class SUAVE:
             ).to(device)
         else:
             self._classifier = None
-        parameters = list(self._encoder.parameters()) + list(self._decoder.parameters())
+        parameters = list(self._encoder.parameters())
+        parameters.extend(self._decoder.parameters())
+        parameters.extend(
+            [
+                self._prior_component_logits,
+                self._prior_component_mu,
+                self._prior_component_logvar,
+            ]
+        )
         if self._classifier is not None:
             parameters.extend(self._classifier.parameters())
         optimizer = Adam(parameters, lr=self.learning_rate)
@@ -304,10 +343,6 @@ class SUAVE:
         n_batches = max(1, math.ceil(n_samples / effective_batch))
         warmup_steps = max(1, kl_warmup_epochs * n_batches)
         global_step = 0
-        prior_logits = self._prior_component_logits.to(device)
-        prior_mu = self._prior_component_mu.to(device)
-        prior_logvar = self._prior_component_logvar.to(device)
-
         progress = tqdm(range(epochs), desc="Training", leave=False)
         for epoch in progress:
             permutation = torch.randperm(n_samples, device=device)
@@ -348,12 +383,14 @@ class SUAVE:
                 component_log_px_tensor = torch.stack(component_log_px, dim=-1)
                 global_step += 1
                 beta_scale = losses.kl_warmup(global_step, warmup_steps, self.beta)
-                categorical_kl = losses.kl_categorical(component_logits, prior_logits)
+                categorical_kl = losses.kl_categorical(
+                    component_logits, self._prior_component_logits
+                )
                 gaussian_kl = losses.kl_normal_mixture(
                     component_mu,
                     component_logvar,
-                    prior_mu,
-                    prior_logvar,
+                    self._prior_component_mu,
+                    self._prior_component_logvar,
                     posterior_probs,
                 )
                 total_kl = beta_scale * (categorical_kl + gaussian_kl)
@@ -603,9 +640,9 @@ class SUAVE:
         if conditional:
             return self._draw_conditional_latents(n_samples, targets, device)
         latents, _ = sampling_utils.sample_mixture_latents(
-            self._prior_component_logits,
-            self._prior_component_mu,
-            self._prior_component_logvar,
+            self._prior_component_logits.detach(),
+            self._prior_component_mu.detach(),
+            self._prior_component_logvar.detach(),
             n_samples,
             device=device,
         )
@@ -1039,6 +1076,13 @@ class SUAVE:
             "normalization": self._norm_stats_per_col,
             "temperature_scaler": self._temperature_scaler_state,
             "behaviour": self.behaviour,
+            "latent_dim": self.latent_dim,
+            "n_components": self.n_components,
+            "prior": {
+                "logits": self._prior_component_logits.detach().cpu().tolist(),
+                "mu": self._prior_component_mu.detach().cpu().tolist(),
+                "logvar": self._prior_component_logvar.detach().cpu().tolist(),
+            },
         }
         path.write_text(json.dumps(state))
         return path
@@ -1051,7 +1095,22 @@ class SUAVE:
         schema_dict = data.get("schema") or {}
         schema = Schema(schema_dict) if schema_dict else None
         behaviour = data.get("behaviour", "suave")
-        model = cls(schema=schema, behaviour=behaviour)
+        prior_state = data.get("prior") or {}
+        latent_dim = data.get("latent_dim")
+        n_components = data.get("n_components")
+        mu_state = prior_state.get("mu")
+        if n_components is None and isinstance(mu_state, list) and mu_state:
+            n_components = len(mu_state)
+        if latent_dim is None and isinstance(mu_state, list) and mu_state:
+            first_row = mu_state[0]
+            if isinstance(first_row, list):
+                latent_dim = len(first_row)
+        init_kwargs: dict[str, object] = {}
+        if latent_dim is not None:
+            init_kwargs["latent_dim"] = int(latent_dim)
+        if n_components is not None:
+            init_kwargs["n_components"] = int(n_components)
+        model = cls(schema=schema, behaviour=behaviour, **init_kwargs)
         classes = data.get("classes")
         if classes is not None:
             model._classes = np.array(classes)
@@ -1062,6 +1121,34 @@ class SUAVE:
             model._temperature_scaler_state = scaler_state
             model._temperature_scaler.load_state_dict(scaler_state)
             model._is_calibrated = True
+        if prior_state:
+            logits_state = prior_state.get("logits")
+            mu_state = prior_state.get("mu")
+            logvar_state = prior_state.get("logvar")
+            if logits_state is not None:
+                logits_tensor = torch.tensor(logits_state, dtype=torch.float32)
+                if logits_tensor.shape != model._prior_component_logits.shape:
+                    raise ValueError(
+                        "Saved prior logits do not match the model configuration"
+                    )
+                with torch.no_grad():
+                    model._prior_component_logits.copy_(logits_tensor)
+            if mu_state is not None:
+                mu_tensor = torch.tensor(mu_state, dtype=torch.float32)
+                if mu_tensor.shape != model._prior_component_mu.shape:
+                    raise ValueError(
+                        "Saved prior means do not match the model configuration"
+                    )
+                with torch.no_grad():
+                    model._prior_component_mu.copy_(mu_tensor)
+            if logvar_state is not None:
+                logvar_tensor = torch.tensor(logvar_state, dtype=torch.float32)
+                if logvar_tensor.shape != model._prior_component_logvar.shape:
+                    raise ValueError(
+                        "Saved prior log-variances do not match the model configuration"
+                    )
+                with torch.no_grad():
+                    model._prior_component_logvar.copy_(logvar_tensor)
         return model
 
     # ------------------------------------------------------------------
