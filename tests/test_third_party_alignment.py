@@ -7,7 +7,9 @@ import math
 import numpy as np
 import torch
 
+from suave.modules import losses
 from suave.modules.decoder import CatHead, CountHead, OrdinalHead, PosHead, RealHead
+from suave.modules.prior import PriorMean
 
 
 def _softplus(x: np.ndarray) -> np.ndarray:
@@ -190,6 +192,53 @@ def test_real_head_matches_third_party_formulation() -> None:
         atol=1e-5,
         rtol=1e-4,
     )
+
+
+def test_categorical_kl_matches_tensorflow_formula() -> None:
+    rng = np.random.default_rng(11)
+    batch = 6
+    n_components = 4
+
+    logits = torch.from_numpy(rng.normal(size=(batch, n_components)).astype(np.float32))
+    prior_logits = torch.zeros(n_components)
+    kl = losses.kl_categorical(logits, prior_logits)
+
+    probs = torch.softmax(logits, dim=-1).numpy()
+    safe_probs = np.clip(probs, a_min=1e-6, a_max=None)
+    expected = np.log(float(n_components)) + np.sum(probs * np.log(safe_probs), axis=-1)
+    torch.testing.assert_close(
+        kl, torch.from_numpy(expected.astype(np.float32)), atol=1e-5, rtol=1e-5
+    )
+
+
+def test_gaussian_kl_matches_tensorflow_formula() -> None:
+    rng = np.random.default_rng(17)
+    batch, n_components, latent_dim = 5, 3, 4
+
+    logits = torch.from_numpy(rng.normal(size=(batch, n_components)).astype(np.float32))
+    posterior_probs = torch.softmax(logits, dim=-1)
+    mu_q = torch.from_numpy(
+        rng.normal(size=(batch, n_components, latent_dim)).astype(np.float32)
+    )
+    logvar_q = torch.from_numpy(
+        rng.normal(size=(batch, n_components, latent_dim)).astype(np.float32)
+    )
+
+    prior = PriorMean(n_components, latent_dim)
+    means = torch.from_numpy(
+        rng.normal(scale=0.05, size=(n_components, latent_dim)).astype(np.float32)
+    )
+    prior.load_component_means(means)
+    mu_p = prior.component_means()
+    logvar_p = torch.zeros_like(mu_p)
+
+    kl = losses.kl_normal_mixture(mu_q, logvar_q, mu_p, logvar_p, posterior_probs)
+
+    var_q = torch.exp(logvar_q)
+    diff = mu_q - mu_p.unsqueeze(0)
+    component_kl = 0.5 * (var_q + diff.pow(2) - logvar_q - 1.0).sum(dim=-1)
+    expected = (posterior_probs * component_kl).sum(dim=-1)
+    torch.testing.assert_close(kl, expected, atol=1e-5, rtol=1e-5)
 
 
 def test_categorical_head_matches_third_party_formulation() -> None:

@@ -28,6 +28,7 @@ from .modules.decoder import Decoder
 from .modules.encoder import EncoderMLP
 from .modules.heads import ClassificationHead
 from .modules import losses
+from .modules.prior import PriorMean
 from . import sampling as sampling_utils
 from .types import Schema
 
@@ -189,39 +190,107 @@ class SUAVE:
         self._train_component_mu: Tensor | None = None
         self._train_component_logvar: Tensor | None = None
         self._train_component_probs: Tensor | None = None
+        self._prior_mean_layer: PriorMean | None = None
 
         self._reset_prior_parameters()
 
     def _reset_prior_parameters(self) -> None:
         """Initialise trainable tensors for the mixture prior parameters."""
 
-        self._prior_component_logits = Parameter(
-            torch.zeros(self.n_components, dtype=torch.float32)
-        )
-        self._prior_component_mu = Parameter(
-            torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32)
-        )
-        self._prior_component_logvar = Parameter(
-            torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32)
-        )
+        if self.behaviour == "hivae":
+            self._prior_component_logits = Parameter(
+                torch.zeros(self.n_components, dtype=torch.float32),
+                requires_grad=False,
+            )
+            self._prior_component_mu = None
+            self._prior_component_logvar = Parameter(
+                torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32),
+                requires_grad=False,
+            )
+            self._prior_mean_layer = PriorMean(self.n_components, self.latent_dim)
+        else:
+            self._prior_component_logits = Parameter(
+                torch.zeros(self.n_components, dtype=torch.float32)
+            )
+            self._prior_component_mu = Parameter(
+                torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32)
+            )
+            self._prior_component_logvar = Parameter(
+                torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32)
+            )
+            self._prior_mean_layer = None
 
     def _move_prior_parameters_to_device(self, device: torch.device) -> None:
         """Ensure mixture prior parameters live on ``device`` as trainable tensors."""
 
-        for name in (
-            "_prior_component_logits",
-            "_prior_component_mu",
-            "_prior_component_logvar",
+        def _wrap(tensor: Tensor | Parameter | None) -> Parameter | None:
+            if tensor is None:
+                return None
+            requires_grad = bool(getattr(tensor, "requires_grad", False))
+            data = tensor.detach().to(device=device, dtype=torch.float32)
+            return Parameter(data, requires_grad=requires_grad)
+
+        self._prior_component_logits = _wrap(self._prior_component_logits)
+        self._prior_component_logvar = _wrap(self._prior_component_logvar)
+        if self._prior_component_mu is not None:
+            self._prior_component_mu = _wrap(self._prior_component_mu)
+        if self._prior_mean_layer is not None:
+            self._prior_mean_layer.to(device)
+
+    def _prior_parameters_for_optimizer(self) -> list[Parameter]:
+        """Return the list of trainable prior parameters."""
+
+        if self.behaviour == "hivae":
+            if self._prior_mean_layer is None:
+                raise RuntimeError("Prior mean layer is not initialised")
+            return list(self._prior_mean_layer.parameters())
+        params: list[Parameter] = []
+        for param in (
+            self._prior_component_logits,
+            self._prior_component_mu,
+            self._prior_component_logvar,
         ):
-            tensor = getattr(self, name)
-            if not isinstance(tensor, Parameter):
-                tensor = Parameter(tensor)
-            if tensor.device != device:
-                tensor = Parameter(
-                    tensor.detach().to(device=device, dtype=torch.float32),
-                    requires_grad=True,
-                )
-            setattr(self, name, tensor)
+            if isinstance(param, Parameter):
+                params.append(param)
+        return params
+
+    def _prior_component_logits_tensor(self) -> Tensor:
+        """Return the tensor of prior logits on the active device."""
+
+        if self._prior_component_logits is None:
+            raise RuntimeError("Prior logits are not initialised")
+        return self._prior_component_logits
+
+    def _prior_component_means_tensor(self) -> Tensor:
+        """Return the matrix of prior means for each mixture component."""
+
+        if self.behaviour == "hivae":
+            if self._prior_mean_layer is None:
+                raise RuntimeError("Prior mean layer is not initialised")
+            return self._prior_mean_layer.component_means()
+        if self._prior_component_mu is None:
+            raise RuntimeError("Prior component means are not initialised")
+        return self._prior_component_mu
+
+    def _prior_component_logvar_tensor(self) -> Tensor:
+        """Return the diagonal log-variance of the prior distribution."""
+
+        if self._prior_component_logvar is None:
+            raise RuntimeError("Prior log-variance is not initialised")
+        return self._prior_component_logvar
+
+    def _gumbel_temperature_for_epoch(self, epoch: int) -> float:
+        """Return the annealed Gumbel-Softmax temperature for ``epoch``."""
+
+        if self.behaviour != "hivae" or self._tau_start is None:
+            return 1.0
+        tau_start = float(self._tau_start)
+        tau_min = float(self._tau_min) if self._tau_min is not None else tau_start
+        tau_decay = float(self._tau_decay) if self._tau_decay is not None else 0.0
+        temperature = tau_start - tau_decay * float(epoch)
+        if temperature < tau_min:
+            return tau_min
+        return temperature
 
     def _gumbel_temperature_for_epoch(self, epoch: int) -> float:
         """Return the annealed Gumbel-Softmax temperature for ``epoch``."""
@@ -381,13 +450,7 @@ class SUAVE:
             self._classifier = None
         parameters = list(self._encoder.parameters())
         parameters.extend(self._decoder.parameters())
-        parameters.extend(
-            [
-                self._prior_component_logits,
-                self._prior_component_mu,
-                self._prior_component_logvar,
-            ]
-        )
+        parameters.extend(self._prior_parameters_for_optimizer())
         if self._classifier is not None:
             parameters.extend(self._classifier.parameters())
         optimizer = Adam(parameters, lr=self.learning_rate)
@@ -441,7 +504,7 @@ class SUAVE:
                 global_step += 1
                 beta_scale = losses.kl_warmup(global_step, warmup_steps, self.beta)
                 categorical_kl = losses.kl_categorical(
-                    component_logits, self._prior_component_logits
+                    component_logits, self._prior_component_logits_tensor()
                 )
 
                 if self.behaviour == "suave":
@@ -1474,16 +1537,24 @@ class SUAVE:
                 "use_weight": use_weight,
                 "class_weight": class_weight,
             }
+        prior_state: dict[str, Any] = {
+            "logits": self._prior_component_logits_tensor().detach().cpu(),
+            "logvar": self._prior_component_logvar_tensor().detach().cpu(),
+        }
+        if self.behaviour == "hivae":
+            if self._prior_mean_layer is None:
+                raise RuntimeError("Prior mean layer is not initialised")
+            prior_state["mean_state_dict"] = self._state_dict_to_cpu(
+                self._prior_mean_layer
+            )
+        else:
+            prior_state["mu"] = self._prior_component_means_tensor().detach().cpu()
         modules = {
             "encoder": self._state_dict_to_cpu(self._encoder),
             "decoder": self._state_dict_to_cpu(self._decoder),
             "classifier": classifier_state,
             "temperature_scaler": self._temperature_scaler.state_dict(),
-            "prior": {
-                "logits": self._prior_component_logits.detach().cpu(),
-                "mu": self._prior_component_mu.detach().cpu(),
-                "logvar": self._prior_component_logvar.detach().cpu(),
-            },
+            "prior": prior_state,
         }
         artefacts: dict[str, Any] = {
             "classes": self._classes,
@@ -1674,22 +1745,60 @@ class SUAVE:
         model._is_calibrated = bool(temperature_state.get("fitted", False))
 
         model._move_prior_parameters_to_device(device)
-        for attr, key in (
-            ("_prior_component_logits", "logits"),
-            ("_prior_component_mu", "mu"),
-            ("_prior_component_logvar", "logvar"),
-        ):
-            value = prior_state.get(key)
-            if value is None:
-                continue
-            tensor = torch.as_tensor(value, dtype=torch.float32, device=device)
-            param = getattr(model, attr)
-            if tensor.shape != param.data.shape:
+        logits_value = prior_state.get("logits")
+        if logits_value is not None:
+            logits_tensor = torch.as_tensor(
+                logits_value, dtype=torch.float32, device=device
+            )
+            param = model._prior_component_logits_tensor()
+            if logits_tensor.shape != param.shape:
                 raise ValueError(
-                    f"Saved prior tensor '{key}' has shape {tensor.shape} which does not match the model configuration {param.data.shape}"
+                    "Saved prior logits do not match the model configuration"
                 )
             with torch.no_grad():
-                param.copy_(tensor)
+                param.copy_(logits_tensor)
+        logvar_value = prior_state.get("logvar")
+        if logvar_value is not None:
+            logvar_tensor = torch.as_tensor(
+                logvar_value, dtype=torch.float32, device=device
+            )
+            param_logvar = model._prior_component_logvar_tensor()
+            if logvar_tensor.shape != param_logvar.shape:
+                raise ValueError(
+                    "Saved prior log-variance does not match the model configuration"
+                )
+            with torch.no_grad():
+                param_logvar.copy_(logvar_tensor)
+        if model.behaviour == "hivae":
+            if model._prior_mean_layer is None:
+                raise RuntimeError("Prior mean layer is not initialised")
+            mean_state = prior_state.get("mean_state_dict")
+            if mean_state is not None:
+                state = (
+                    mean_state
+                    if isinstance(mean_state, OrderedDict)
+                    else OrderedDict(mean_state)
+                )
+                model._prior_mean_layer.load_state_dict(state)
+            else:
+                mu_value = prior_state.get("mu")
+                if mu_value is not None:
+                    means_tensor = torch.as_tensor(
+                        mu_value, dtype=torch.float32, device=device
+                    )
+                    model._prior_mean_layer.load_component_means(means_tensor)
+        else:
+            mu_value = prior_state.get("mu")
+            if mu_value is not None and model._prior_component_mu is not None:
+                mu_tensor = torch.as_tensor(
+                    mu_value, dtype=torch.float32, device=device
+                )
+                if mu_tensor.shape != model._prior_component_mu.shape:
+                    raise ValueError(
+                        "Saved prior means do not match the model configuration"
+                    )
+                with torch.no_grad():
+                    model._prior_component_mu.copy_(mu_tensor)
 
         model._is_fitted = True
         return model
@@ -1733,28 +1842,35 @@ class SUAVE:
             logvar_state = prior_state.get("logvar")
             if logits_state is not None:
                 logits_tensor = torch.tensor(logits_state, dtype=torch.float32)
-                if logits_tensor.shape != model._prior_component_logits.shape:
+                logits_param = model._prior_component_logits_tensor()
+                if logits_tensor.shape != logits_param.shape:
                     raise ValueError(
                         "Saved prior logits do not match the model configuration"
                     )
                 with torch.no_grad():
-                    model._prior_component_logits.copy_(logits_tensor)
-            if mu_state is not None:
-                mu_tensor = torch.tensor(mu_state, dtype=torch.float32)
-                if mu_tensor.shape != model._prior_component_mu.shape:
-                    raise ValueError(
-                        "Saved prior means do not match the model configuration"
-                    )
-                with torch.no_grad():
-                    model._prior_component_mu.copy_(mu_tensor)
+                    logits_param.copy_(logits_tensor)
             if logvar_state is not None:
                 logvar_tensor = torch.tensor(logvar_state, dtype=torch.float32)
-                if logvar_tensor.shape != model._prior_component_logvar.shape:
+                logvar_param = model._prior_component_logvar_tensor()
+                if logvar_tensor.shape != logvar_param.shape:
                     raise ValueError(
                         "Saved prior log-variances do not match the model configuration"
                     )
                 with torch.no_grad():
-                    model._prior_component_logvar.copy_(logvar_tensor)
+                    logvar_param.copy_(logvar_tensor)
+            if mu_state is not None:
+                mu_tensor = torch.tensor(mu_state, dtype=torch.float32)
+                if model.behaviour == "hivae":
+                    if model._prior_mean_layer is None:
+                        raise RuntimeError("Prior mean layer is not initialised")
+                    model._prior_mean_layer.load_component_means(mu_tensor)
+                elif model._prior_component_mu is not None:
+                    if mu_tensor.shape != model._prior_component_mu.shape:
+                        raise ValueError(
+                            "Saved prior means do not match the model configuration"
+                        )
+                    with torch.no_grad():
+                        model._prior_component_mu.copy_(mu_tensor)
         return model
 
     @staticmethod
