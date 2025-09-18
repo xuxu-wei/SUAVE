@@ -46,7 +46,7 @@ def test_fit_logs(caplog, epochs):
 
 def test_predict_proba_shape():
     X, y, schema = make_dataset()
-    model = SUAVE(schema=schema)
+    model = SUAVE(schema=schema, n_components=2)
     model.fit(X, y)
     probabilities = model.predict_proba(X)
     assert probabilities.shape == (len(X), 2)
@@ -56,7 +56,7 @@ def test_predict_proba_shape():
 
 def test_encode_returns_latent_means():
     X, y, schema = make_dataset()
-    model = SUAVE(schema=schema, latent_dim=4, batch_size=2)
+    model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)
     model.fit(X, y)
     assert model._encoder is not None
     was_training = model._encoder.training
@@ -69,7 +69,7 @@ def test_encode_returns_latent_means():
 
 def test_sample_generates_schema_aligned_dataframe():
     X, y, schema = make_dataset()
-    model = SUAVE(schema=schema, latent_dim=4, batch_size=2)
+    model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)
     model.fit(X, y, epochs=1)
     samples = model.sample(3)
     assert isinstance(samples, pd.DataFrame)
@@ -83,7 +83,7 @@ def test_sample_generates_schema_aligned_dataframe():
 
 def test_conditional_sampling_validates_labels():
     X, y, schema = make_dataset()
-    model = SUAVE(schema=schema, latent_dim=4, batch_size=2)
+    model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)
     model.fit(X, y, epochs=1)
     requested = np.array([0, 1, 1])
     samples = model.sample(len(requested), conditional=True, y=requested)
@@ -94,7 +94,7 @@ def test_conditional_sampling_validates_labels():
 
 def test_hivae_behaviour_disables_classifier():
     X, _, schema = make_dataset()
-    model = SUAVE(schema=schema, behaviour="hivae")
+    model = SUAVE(schema=schema, behaviour="hivae", n_components=2)
     model.fit(X, epochs=1)
     latent = model.encode(X)
     assert latent.shape[0] == len(X)
@@ -104,7 +104,7 @@ def test_hivae_behaviour_disables_classifier():
 
 def test_hivae_behaviour_persists_after_save(tmp_path: Path):
     X, _, schema = make_dataset()
-    model = SUAVE(schema=schema, behaviour="hivae")
+    model = SUAVE(schema=schema, behaviour="hivae", n_components=2)
     model.fit(X, epochs=1)
     save_path = tmp_path / "model.json"
     model.save(save_path)

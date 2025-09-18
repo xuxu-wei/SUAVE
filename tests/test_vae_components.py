@@ -14,17 +14,35 @@ from suave.modules.distributions import (
     ordinal_probabilities,
 )
 from suave.modules.encoder import EncoderMLP
+from suave.sampling import sample_mixture_latents
 from suave.types import Schema
 
 
 def test_encoder_mlp_shapes():
-    encoder = EncoderMLP(input_dim=5, latent_dim=3, hidden=(4,), dropout=0.0)
+    encoder = EncoderMLP(
+        input_dim=5, latent_dim=3, hidden=(4,), dropout=0.0, n_components=2
+    )
     x = torch.randn(7, 5)
-    mu, logvar = encoder(x)
-    assert mu.shape == (7, 3)
-    assert logvar.shape == (7, 3)
+    logits, mu, logvar = encoder(x)
+    assert logits.shape == (7, 2)
+    assert mu.shape == (7, 2, 3)
+    assert logvar.shape == (7, 2, 3)
     assert torch.all(logvar <= EncoderMLP.LOGVAR_RANGE[1])
     assert torch.all(logvar >= EncoderMLP.LOGVAR_RANGE[0])
+
+
+def test_sample_mixture_latents_outputs_assignments():
+    logits = torch.tensor([0.5, 0.5])
+    mu = torch.zeros(2, 3)
+    logvar = torch.zeros(2, 3)
+    latents, assignments = sample_mixture_latents(
+        logits, mu, logvar, n_samples=4, device=torch.device("cpu")
+    )
+    assert latents.shape == (4, 3)
+    assert assignments.shape == (4,)
+    assert assignments.dtype == torch.long
+    assert assignments.min() >= 0
+    assert assignments.max() < 2
 
 
 def test_real_head_output_shapes():

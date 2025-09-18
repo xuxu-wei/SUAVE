@@ -14,6 +14,7 @@ import pandas as pd
 from pandas import CategoricalDtype
 import torch
 from torch import Tensor
+from torch.distributions import Categorical
 from torch.optim import Adam
 from tqdm.auto import tqdm
 
@@ -39,6 +40,9 @@ class SUAVE:
         initialisation it must be supplied to :meth:`fit`.
     latent_dim:
         Dimensionality of the latent representation. Default is ``32``.
+    n_components:
+        Number of mixture components in the hierarchical latent prior.
+        Default is ``1`` which recovers a single Gaussian encoder.
     beta:
         Weighting factor for the KL term. Default is ``1.5``.
     hidden_dims:
@@ -83,6 +87,7 @@ class SUAVE:
         schema: Optional[Schema] = None,
         *,
         latent_dim: int = 32,
+        n_components: int = 1,
         beta: float = 1.5,
         hidden_dims: Iterable[int] = (256, 128),
         dropout: float = 0.1,
@@ -96,6 +101,9 @@ class SUAVE:
     ) -> None:
         self.schema = schema
         self.latent_dim = latent_dim
+        if n_components <= 0:
+            raise ValueError("n_components must be positive")
+        self.n_components = int(n_components)
         self.beta = beta
         self.hidden_dims = tuple(hidden_dims)
         self.dropout = dropout
@@ -133,6 +141,14 @@ class SUAVE:
         self._train_latent_mu: Tensor | None = None
         self._train_latent_logvar: Tensor | None = None
         self._train_target_indices: np.ndarray | None = None
+        self._train_component_logits: Tensor | None = None
+        self._train_component_mu: Tensor | None = None
+        self._train_component_logvar: Tensor | None = None
+        self._train_component_probs: Tensor | None = None
+
+        self._prior_component_logits = torch.zeros(self.n_components)
+        self._prior_component_mu = torch.zeros(self.n_components, self.latent_dim)
+        self._prior_component_logvar = torch.zeros(self.n_components, self.latent_dim)
 
     # ------------------------------------------------------------------
     # Training utilities
@@ -238,6 +254,11 @@ class SUAVE:
             X_train_std, missing_mask
         )
 
+        self._train_component_logits = None
+        self._train_component_mu = None
+        self._train_component_logvar = None
+        self._train_component_probs = None
+
         device = self._select_device()
         encoder_inputs = encoder_inputs.to(device)
         for feature_type in data_tensors:
@@ -253,6 +274,7 @@ class SUAVE:
             self.latent_dim,
             hidden=self.hidden_dims,
             dropout=self.dropout,
+            n_components=self.n_components,
         ).to(device)
         self._decoder = Decoder(
             self.latent_dim,
@@ -282,6 +304,9 @@ class SUAVE:
         n_batches = max(1, math.ceil(n_samples / effective_batch))
         warmup_steps = max(1, kl_warmup_epochs * n_batches)
         global_step = 0
+        prior_logits = self._prior_component_logits.to(device)
+        prior_mu = self._prior_component_mu.to(device)
+        prior_logvar = self._prior_component_logvar.to(device)
 
         progress = tqdm(range(epochs), desc="Training", leave=False)
         for epoch in progress:
@@ -305,19 +330,41 @@ class SUAVE:
                     for key, tensors in mask_tensors.items()
                 }
 
-                mu_z, logvar_z = self._encoder(batch_input)
-                z = self._reparameterize(mu_z, logvar_z)
-                decoder_out = self._decoder(
-                    z, batch_data, self._norm_stats_per_col, batch_masks
+                component_logits, component_mu, component_logvar = self._encoder(
+                    batch_input
                 )
-                recon_terms = decoder_out["log_px"]
+                posterior_probs = torch.softmax(component_logits, dim=-1)
+                z_samples = self._reparameterize(component_mu, component_logvar)
+                component_log_px: list[Tensor] = []
+                for component_idx in range(self.n_components):
+                    decoder_out = self._decoder(
+                        z_samples[:, component_idx, :],
+                        batch_data,
+                        self._norm_stats_per_col,
+                        batch_masks,
+                    )
+                    recon_sum = losses.sum_reconstruction_terms(decoder_out["log_px"])
+                    component_log_px.append(recon_sum)
+                component_log_px_tensor = torch.stack(component_log_px, dim=-1)
                 global_step += 1
                 beta_scale = losses.kl_warmup(global_step, warmup_steps, self.beta)
-                kl = losses.kl_normal(mu_z, logvar_z) * beta_scale
-                elbo_value = losses.elbo(recon_terms, kl)
+                categorical_kl = losses.kl_categorical(component_logits, prior_logits)
+                gaussian_kl = losses.kl_normal_mixture(
+                    component_mu,
+                    component_logvar,
+                    prior_mu,
+                    prior_logvar,
+                    posterior_probs,
+                )
+                total_kl = beta_scale * (categorical_kl + gaussian_kl)
+                weighted_recon = (posterior_probs * component_log_px_tensor).sum(dim=-1)
+                elbo_value = weighted_recon - total_kl
                 loss = -elbo_value.mean()
+                latent_for_classifier = (posterior_probs.unsqueeze(-1) * z_samples).sum(
+                    dim=1
+                )
                 if self._classifier is not None and y_train_tensor is not None:
-                    logits = self._classifier(z)
+                    logits = self._classifier(latent_for_classifier)
                     batch_targets = y_train_tensor[batch_indices]
                     classification_loss = self._classifier.loss(logits, batch_targets)
                     loss = loss + classification_loss
@@ -333,11 +380,24 @@ class SUAVE:
         with torch.no_grad():
             encoder_training_state = self._encoder.training
             self._encoder.eval()
-            mu_all, logvar_all = self._encoder(encoder_inputs)
+            component_logits_all, component_mu_all, component_logvar_all = (
+                self._encoder(encoder_inputs)
+            )
             if encoder_training_state:
                 self._encoder.train()
-        self._train_latent_mu = mu_all.detach().cpu()
-        self._train_latent_logvar = logvar_all.detach().cpu()
+        posterior_mean, posterior_logvar, posterior_probs = (
+            self._mixture_posterior_statistics(
+                component_logits_all,
+                component_mu_all,
+                component_logvar_all,
+            )
+        )
+        self._train_latent_mu = posterior_mean.detach().cpu()
+        self._train_latent_logvar = posterior_logvar.detach().cpu()
+        self._train_component_logits = component_logits_all.detach().cpu()
+        self._train_component_mu = component_mu_all.detach().cpu()
+        self._train_component_logvar = component_logvar_all.detach().cpu()
+        self._train_component_probs = posterior_probs.detach().cpu()
         if y_train_tensor is not None:
             self._train_target_indices = y_train_tensor.detach().cpu().numpy()
         else:
@@ -515,6 +575,21 @@ class SUAVE:
         eps = torch.randn_like(std)
         return mu + eps * std
 
+    @staticmethod
+    def _mixture_posterior_statistics(
+        logits: Tensor, mu: Tensor, logvar: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Return mean, log-variance and component probabilities for a mixture."""
+
+        probs = torch.softmax(logits, dim=-1)
+        weighted_mu = (probs.unsqueeze(-1) * mu).sum(dim=1)
+        second_moment = (probs.unsqueeze(-1) * (torch.exp(logvar) + mu.pow(2))).sum(
+            dim=1
+        )
+        var = torch.clamp(second_moment - weighted_mu.pow(2), min=1e-6)
+        logvar_mean = torch.log(var)
+        return weighted_mu, logvar_mean, probs
+
     def _draw_latent_samples(
         self,
         n_samples: int,
@@ -527,7 +602,14 @@ class SUAVE:
 
         if conditional:
             return self._draw_conditional_latents(n_samples, targets, device)
-        return torch.randn(n_samples, self.latent_dim, device=device)
+        latents, _ = sampling_utils.sample_mixture_latents(
+            self._prior_component_logits,
+            self._prior_component_mu,
+            self._prior_component_logvar,
+            n_samples,
+            device=device,
+        )
+        return latents
 
     def _draw_conditional_latents(
         self,
@@ -539,8 +621,14 @@ class SUAVE:
 
         if targets is None:
             raise ValueError("Targets must be provided when conditional=True")
-        if self._train_latent_mu is None or self._train_latent_logvar is None:
-            raise RuntimeError("Latent posterior statistics are unavailable for sampling")
+        if (
+            self._train_component_mu is None
+            or self._train_component_logvar is None
+            or self._train_component_probs is None
+        ):
+            raise RuntimeError(
+                "Latent posterior statistics are unavailable for sampling"
+            )
         if self._class_to_index is None or self._train_target_indices is None:
             raise RuntimeError(
                 "Conditional sampling requires supervised targets from the training data"
@@ -548,7 +636,9 @@ class SUAVE:
 
         target_array = np.asarray(targets).reshape(-1)
         if target_array.shape[0] != n_samples:
-            raise ValueError("y must have length equal to n_samples when conditional=True")
+            raise ValueError(
+                "y must have length equal to n_samples when conditional=True"
+            )
 
         latents = torch.zeros((n_samples, self.latent_dim), device=device)
         rng = np.random.default_rng()
@@ -565,8 +655,19 @@ class SUAVE:
                     f"No training samples available for class '{label}' to condition on"
                 )
             selected = int(rng.choice(candidate_indices))
-            mu = self._train_latent_mu[selected].unsqueeze(0).to(device)
-            logvar = self._train_latent_logvar[selected].unsqueeze(0).to(device)
+            component_probs = self._train_component_probs[selected].to(device)
+            component_dist = Categorical(probs=component_probs)
+            component_idx = int(component_dist.sample())
+            mu = (
+                self._train_component_mu[selected, component_idx]
+                .unsqueeze(0)
+                .to(device)
+            )
+            logvar = (
+                self._train_component_logvar[selected, component_idx]
+                .unsqueeze(0)
+                .to(device)
+            )
             latent_sample = self._reparameterize(mu, logvar)
             latents[row] = latent_sample.squeeze(0)
         return latents
@@ -705,8 +806,11 @@ class SUAVE:
         self._encoder.eval()
         self._classifier.eval()
         with torch.no_grad():
-            mu, _ = self._encoder(encoder_inputs)
-            logits_tensor = self._classifier(mu)
+            logits_enc, mu_enc, logvar_enc = self._encoder(encoder_inputs)
+            posterior_mean, _, _ = self._mixture_posterior_statistics(
+                logits_enc, mu_enc, logvar_enc
+            )
+            logits_tensor = self._classifier(posterior_mean)
         if was_encoder_training:
             self._encoder.train()
         if was_classifier_training:
@@ -738,10 +842,13 @@ class SUAVE:
         was_training = self._encoder.training
         self._encoder.eval()
         with torch.no_grad():
-            mu, logvar = self._encoder(encoder_inputs)
+            logits_enc, mu_enc, logvar_enc = self._encoder(encoder_inputs)
         if was_training:
             self._encoder.train()
-        return mu, logvar
+        posterior_mean, posterior_logvar, _ = self._mixture_posterior_statistics(
+            logits_enc, mu_enc, logvar_enc
+        )
+        return posterior_mean, posterior_logvar
 
     # ------------------------------------------------------------------
     # Prediction utilities
@@ -849,8 +956,11 @@ class SUAVE:
             for start in range(0, n_samples, effective_batch):
                 end = min(start + effective_batch, n_samples)
                 batch_inputs = encoder_inputs[start:end]
-                mu, _ = self._encoder(batch_inputs)
-                latent_batches.append(mu.cpu())
+                logits_enc, mu_enc, logvar_enc = self._encoder(batch_inputs)
+                posterior_mean, _, _ = self._mixture_posterior_statistics(
+                    logits_enc, mu_enc, logvar_enc
+                )
+                latent_batches.append(posterior_mean.cpu())
         if was_training:
             self._encoder.train()
 

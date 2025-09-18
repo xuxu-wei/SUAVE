@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import Tensor
+from torch.distributions import Categorical
 
 from .types import Schema
 
@@ -17,6 +18,35 @@ def _initialise_feature_dict() -> Dict[str, Dict[str, Tensor]]:
     """Return an empty nested dictionary keyed by schema feature types."""
 
     return {"real": {}, "pos": {}, "count": {}, "cat": {}, "ordinal": {}}
+
+
+def sample_mixture_latents(
+    prior_logits: Tensor,
+    prior_mu: Tensor,
+    prior_logvar: Tensor,
+    n_samples: int,
+    *,
+    device: torch.device,
+) -> tuple[Tensor, Tensor]:
+    """Sample mixture assignments and component-wise latent vectors."""
+
+    if n_samples < 0:
+        raise ValueError("n_samples must be non-negative")
+    if n_samples == 0:
+        empty = torch.empty((0, prior_mu.size(-1)), device=device)
+        return empty, torch.empty((0,), dtype=torch.long, device=device)
+
+    logits = prior_logits.to(device)
+    mu = prior_mu.to(device)
+    logvar = prior_logvar.to(device)
+    categorical = Categorical(logits=logits)
+    assignments = categorical.sample((n_samples,))
+    selected_mu = mu[assignments]
+    selected_logvar = logvar[assignments]
+    std = torch.exp(0.5 * selected_logvar)
+    eps = torch.randn_like(std)
+    latents = selected_mu + eps * std
+    return latents, assignments
 
 
 def build_placeholder_batches(
@@ -37,7 +67,9 @@ def build_placeholder_batches(
             else:
                 shape = (n_samples, int(width))
             data_tensors[feature_type][column] = torch.zeros(shape, device=device)
-            mask_tensors[feature_type][column] = torch.ones((n_samples, 1), device=device)
+            mask_tensors[feature_type][column] = torch.ones(
+                (n_samples, 1), device=device
+            )
     return data_tensors, mask_tensors
 
 
