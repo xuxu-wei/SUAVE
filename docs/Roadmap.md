@@ -14,9 +14,15 @@
    - 分类头：冻结解码器 → 训练 head → **轻联合微调**（warm-start → head → light joint FT）
    - 温度缩放校准 + 基础可视化（ROC/PR、可靠性图、潜变量相关热图）
 2. **低成本增强（按需启用）**
-   - 追加似然头：
-   - 条件生成（CVAE 开关 `conditional=True`）：`fit(..., y=...)` 时启用可控采样
-   - 类不平衡：`class_weight/focal` + 条件过采样
+
+   - [x] 追加似然头
+   - [ ] 自动化：自动化识别数据类型和生成schema
+
+   - [ ] 条件生成（CVAE 开关 `conditional=True`）：`fit(..., y=...)` 时启用可控采样
+
+   - [ ] 可解释性：beta-VAE
+
+   - [ ] 类不平衡：`class_weight/focal` + 条件过采样
 3. **评测闭环**
    - **TSTR/TRTR** 脚手架（独立评测器）
    - 简单 **MIA**（membership inference）基线（影子模型/置信阈值法）
@@ -248,16 +254,7 @@ evaluate.mia_baseline(m, X_train)
 >
 > ------
 >
-> ### ~~Task-3｜条件生成（CVAE 开关）~~
->
-> **Prompt 给 codex：**
->
-> > - 当 `conditional=True` 且 `fit(..., y_train)` 非空时：在 encoder/decoder 输入拼接 `y`；`sampling.sample(n, y=None)` 支持条件采样。
-> > - 单测：`sample(n=32, y=1)` 返回形状正确；为不同 y 采样的分布在关键列上有可区分的均值差。
->
-> ------
->
-> ### Task-4（增强）｜追加似然头（pos/count/ordinal）与数值稳定
+> ### Task-3（增强）｜追加似然头（pos/count/ordinal）与数值稳定
 >
 > **Prompt 给 codex：**
 >
@@ -271,7 +268,7 @@ evaluate.mia_baseline(m, X_train)
 >
 > ------
 >
-> ### Task-5｜评测闭环（TSTR/TRTR、MIA基线）
+> ### Task-4｜评测闭环（TSTR/TRTR、MIA基线）
 >
 > **Prompt 给 codex：**
 >
@@ -282,7 +279,7 @@ evaluate.mia_baseline(m, X_train)
 >
 > ------
 >
-> ### Task-6｜文档与示例
+> ### Task-5｜文档与示例
 >
 > **Prompt 给 codex：**
 >
@@ -325,18 +322,6 @@ black . && ruff .
 
 ------
 
-# 五、后续工作流（每日循环）
-
-1. 把今天的 **目标任务** 粘到 codex（严格按 Task-1/2/3…），让它**只改涉及文件**。
-2. 本地跑单测与示例；不通过就让 codex 修复（给它报错信息和期望行为）。
-3. 每完成一小步就 commit，保持可回滚。
-4. 结果不理想？先降复杂度（关闭条件生成/只保留 real/cat）以确保端到端能跑。
-5. 每晚把 example 结果图表固化到 `examples/figs/`，便于稿件复用。
-
-
-
-------
-
 ## 附：给 codex 的“分布映射”速查（短表）
 
 | HI-VAE TF 名     | PyTorch 目标                                            |
@@ -348,3 +333,4 @@ black . && ruff .
 | `loglik_count`   | Poisson：`Poisson(rate=softplus(raw))`                  |
 
 > 缺失处理：所有 NLL 都要 **乘 mask**；评估需返回 `log_px_missing`。
+
