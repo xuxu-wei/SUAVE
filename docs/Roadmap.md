@@ -248,7 +248,7 @@ evaluate.mia_baseline(m, X_train)
 >
 > ------
 >
-> ### Task-3｜条件生成（CVAE 开关）
+> ### ~~Task-3｜条件生成（CVAE 开关）~~
 >
 > **Prompt 给 codex：**
 >
