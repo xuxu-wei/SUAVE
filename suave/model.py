@@ -10,6 +10,7 @@ from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from pandas import CategoricalDtype
 import torch
 from torch import Tensor
 from torch.optim import Adam
@@ -19,6 +20,7 @@ from . import data as data_utils
 from .modules.calibrate import TemperatureScaler
 from .modules.decoder import Decoder
 from .modules.encoder import EncoderMLP
+from .modules.heads import ClassificationHead
 from .modules import losses
 from .sampling import sample as sampling_stub
 from .types import Schema
@@ -106,7 +108,10 @@ class SUAVE:
         self._device: torch.device | None = None
         self._encoder: EncoderMLP | None = None
         self._decoder: Decoder | None = None
+        self._classifier: ClassificationHead | None = None
         self._feature_layout: dict[str, dict[str, int]] = {"real": {}, "cat": {}}
+        self._class_to_index: dict[object, int] | None = None
+        self._cached_logits: np.ndarray | None = None
 
     # ------------------------------------------------------------------
     # Training utilities
@@ -186,6 +191,17 @@ class SUAVE:
         self._classes = np.unique(y_train_array)
         if self._classes.size == 0:
             raise ValueError("Training targets must contain at least one class")
+        self._class_to_index = {
+            cls: idx for idx, cls in enumerate(self._classes.tolist())
+        }
+        train_target_indices = self._map_targets_to_indices(y_train_array)
+        class_counts = np.bincount(
+            train_target_indices, minlength=self._classes.size
+        ).astype(np.float32)
+        total_count = float(class_counts.sum())
+        if total_count <= 0:
+            raise ValueError("Training targets must contain at least one class")
+        class_weights = total_count / (len(class_counts) * class_counts)
 
         batch_size = batch_size or self.batch_size
         kl_warmup_epochs = kl_warmup_epochs or self.kl_warmup_epochs
@@ -215,8 +231,21 @@ class SUAVE:
             hidden=self.hidden_dims,
             dropout=self.dropout,
         ).to(device)
-        parameters = list(self._encoder.parameters()) + list(self._decoder.parameters())
+        self._classifier = ClassificationHead(
+            self.latent_dim,
+            self._classes.size,
+            class_weight=class_weights,
+        ).to(device)
+        parameters = (
+            list(self._encoder.parameters())
+            + list(self._decoder.parameters())
+            + list(self._classifier.parameters())
+        )
         optimizer = Adam(parameters, lr=self.learning_rate)
+
+        y_train_tensor = torch.from_numpy(train_target_indices.astype(np.int64)).to(
+            device
+        )
 
         n_samples = encoder_inputs.size(0)
         effective_batch = min(batch_size, n_samples)
@@ -256,7 +285,10 @@ class SUAVE:
                 beta_scale = losses.kl_warmup(global_step, warmup_steps, self.beta)
                 kl = losses.kl_normal(mu_z, logvar_z) * beta_scale
                 elbo_value = losses.elbo(recon_terms, kl)
-                loss = -elbo_value.mean()
+                logits = self._classifier(z)
+                batch_targets = y_train_tensor[batch_indices]
+                classification_loss = self._classifier.loss(logits, batch_targets)
+                loss = -elbo_value.mean() + classification_loss
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -268,6 +300,8 @@ class SUAVE:
 
         self._is_fitted = True
         self._is_calibrated = False
+        self._temperature_scaler = TemperatureScaler()
+        self._cached_logits = None
         LOGGER.info("Fit complete")
         return self
 
@@ -290,6 +324,8 @@ class SUAVE:
         self,
         X: pd.DataFrame,
         mask: pd.DataFrame,
+        *,
+        update_layout: bool = True,
     ) -> Tuple[
         Tensor,
         Dict[str, Dict[str, Tensor]],
@@ -305,7 +341,7 @@ class SUAVE:
         real_masks: Dict[str, Tensor] = {}
         cat_masks: Dict[str, Tensor] = {}
 
-        self._feature_layout = {"real": {}, "cat": {}}
+        feature_layout = {"real": {}, "cat": {}}
 
         for column in self.schema.real_features:
             values = pd.to_numeric(X[column], errors="coerce").to_numpy(
@@ -320,10 +356,12 @@ class SUAVE:
             real_masks[column] = mask_tensor
             value_parts.append(tensor)
             mask_parts.append(mask_tensor)
-            self._feature_layout["real"][column] = 1
+            feature_layout["real"][column] = 1
 
         for column in self.schema.categorical_features:
-            series = X[column].astype("category")
+            series = X[column]
+            if not isinstance(series.dtype, CategoricalDtype):
+                series = series.astype("category")
             codes = series.cat.codes.to_numpy()
             n_classes = int(self.schema[column].n_classes or series.cat.categories.size)
             if n_classes <= 0:
@@ -341,7 +379,7 @@ class SUAVE:
             cat_masks[column] = mask_tensor
             value_parts.append(tensor)
             mask_parts.append(mask_tensor)
-            self._feature_layout["cat"][column] = n_classes
+            feature_layout["cat"][column] = n_classes
 
         if not value_parts:
             raise ValueError("No supported features present in the training data")
@@ -349,6 +387,8 @@ class SUAVE:
         encoder_inputs = torch.cat(value_parts + mask_parts, dim=1).float()
         data_tensors = {"real": real_data, "cat": cat_data}
         mask_tensors = {"real": real_masks, "cat": cat_masks}
+        if update_layout:
+            self._feature_layout = feature_layout
         return encoder_inputs, data_tensors, mask_tensors
 
     @staticmethod
@@ -359,11 +399,100 @@ class SUAVE:
         eps = torch.randn_like(std)
         return mu + eps * std
 
+    def _apply_training_normalization(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Apply stored normalisation statistics to ``X``."""
+
+        if self.schema is None:
+            raise RuntimeError("Schema is required for normalisation")
+        self.schema.require_columns(X.columns)
+        normalised = X.reset_index(drop=True).copy()
+        for column in self.schema.real_features:
+            stats = self._norm_stats_per_col.get(column, {})
+            mean = float(stats.get("mean", 0.0))
+            std = float(stats.get("std", 1.0))
+            if std <= 0:
+                std = 1.0
+            values = pd.to_numeric(normalised[column], errors="coerce")
+            normalised[column] = (values - mean) / max(std, 1e-6)
+        for column in self.schema.categorical_features:
+            stats = self._norm_stats_per_col.get(column, {})
+            categories = stats.get("categories")
+            if categories is not None:
+                normalised[column] = pd.Categorical(
+                    normalised[column], categories=categories
+                )
+            else:
+                normalised[column] = normalised[column].astype("category")
+        return normalised
+
+    def _prepare_inference_inputs(self, X: pd.DataFrame) -> Tensor:
+        """Return encoder inputs for inference using stored statistics."""
+
+        if self.schema is None:
+            raise RuntimeError("Schema must be defined for inference")
+        aligned = X.reset_index(drop=True)
+        mask = data_utils.build_missing_mask(aligned)
+        normalised = self._apply_training_normalization(aligned)
+        encoder_inputs, _, _ = self._prepare_training_tensors(
+            normalised, mask, update_layout=False
+        )
+        return encoder_inputs.float()
+
+    def _map_targets_to_indices(self, targets: Iterable[object]) -> np.ndarray:
+        """Convert raw targets into class indices."""
+
+        if self._class_to_index is None:
+            raise RuntimeError("Model classes are not initialised")
+        target_array = np.asarray(targets).reshape(-1)
+        indices: list[int] = []
+        for value in target_array:
+            if value not in self._class_to_index:
+                raise ValueError(f"Unknown class '{value}' encountered")
+            indices.append(self._class_to_index[value])
+        return np.asarray(indices, dtype=np.int64)
+
+    def _compute_logits(self, X: pd.DataFrame) -> np.ndarray:
+        """Run the classifier head on ``X`` and cache the logits."""
+
+        if not self._is_fitted or self._encoder is None or self._classifier is None:
+            raise RuntimeError("Model must be fitted before computing logits")
+        device = self._select_device()
+        encoder_inputs = self._prepare_inference_inputs(X).to(device)
+        was_encoder_training = self._encoder.training
+        was_classifier_training = self._classifier.training
+        self._encoder.eval()
+        self._classifier.eval()
+        with torch.no_grad():
+            mu, _ = self._encoder(encoder_inputs)
+            logits_tensor = self._classifier(mu)
+        if was_encoder_training:
+            self._encoder.train()
+        if was_classifier_training:
+            self._classifier.train()
+        logits = logits_tensor.cpu().numpy()
+        self._cached_logits = logits
+        return logits
+
+    def _infer_latent_statistics(self, X: pd.DataFrame) -> tuple[Tensor, Tensor]:
+        """Return posterior parameters for ``X`` using the trained encoder."""
+
+        if not self._is_fitted or self._encoder is None:
+            raise RuntimeError("Model must be fitted before encoding data")
+        device = self._select_device()
+        encoder_inputs = self._prepare_inference_inputs(X).to(device)
+        was_training = self._encoder.training
+        self._encoder.eval()
+        with torch.no_grad():
+            mu, logvar = self._encoder(encoder_inputs)
+        if was_training:
+            self._encoder.train()
+        return mu, logvar
+
     # ------------------------------------------------------------------
     # Prediction utilities
     # ------------------------------------------------------------------
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Return placeholder class probabilities.
+        """Return calibrated class probabilities for ``X``.
 
         Parameters
         ----------
@@ -373,8 +502,8 @@ class SUAVE:
         Returns
         -------
         numpy.ndarray
-            Array of shape ``(n_samples, n_classes)`` containing uniform
-            probabilities across the observed classes.
+            Array of shape ``(n_samples, n_classes)`` containing the calibrated
+            probabilities produced by the classifier head.
 
         Examples
         --------
@@ -385,14 +514,14 @@ class SUAVE:
 
         if not self._is_fitted or self._classes is None:
             raise RuntimeError("Model must be fitted before calling predict_proba")
-        n_samples = len(X)
-        n_classes = len(self._classes)
-        probabilities = np.full((n_samples, n_classes), 1.0 / n_classes)
+        logits = self._compute_logits(X)
         if self._is_calibrated:
-            logits = np.log(probabilities + 1e-8)
             logits = self._temperature_scaler(logits)
-            probabilities = np.exp(logits)
-            probabilities /= probabilities.sum(axis=1, keepdims=True)
+        logits = logits - logits.max(axis=1, keepdims=True)
+        probabilities = np.exp(logits)
+        normaliser = probabilities.sum(axis=1, keepdims=True)
+        normaliser[normaliser == 0.0] = 1.0
+        probabilities /= normaliser
         return probabilities
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -406,25 +535,26 @@ class SUAVE:
     # Calibration utilities
     # ------------------------------------------------------------------
     def calibrate(self, X: pd.DataFrame, y: pd.Series | np.ndarray) -> "SUAVE":
-        """Apply temperature scaling using placeholder logits."""
+        """Fit the temperature scaler using logits from ``X``."""
 
-        if not self._is_fitted:
+        if not self._is_fitted or self._classes is None:
             raise RuntimeError("Fit must be called before calibrate")
         if len(X) != len(y):
             raise ValueError("X and y must have matching first dimensions")
+        logits = self._compute_logits(X)
+        target_indices = self._map_targets_to_indices(y)
+        self._temperature_scaler.fit(logits, target_indices)
         self._is_calibrated = True
-        self._temperature_scaler = TemperatureScaler(temperature=1.0)
         return self
 
     # ------------------------------------------------------------------
     # Latent utilities and sampling
     # ------------------------------------------------------------------
     def encode(self, X: pd.DataFrame) -> np.ndarray:
-        """Return zero latent representations matching ``latent_dim``."""
+        """Return posterior means of the latent representation for ``X``."""
 
-        if not self._is_fitted:
-            raise RuntimeError("Model must be fitted before encoding data")
-        return np.zeros((len(X), self.latent_dim))
+        mu, _ = self._infer_latent_statistics(X)
+        return mu.cpu().numpy()
 
     def sample(
         self, n_samples: int, conditional: bool = False, y: Optional[np.ndarray] = None

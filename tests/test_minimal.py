@@ -5,6 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -49,3 +50,5 @@ def test_predict_proba_shape():
     model.fit(X, y)
     probabilities = model.predict_proba(X)
     assert probabilities.shape == (len(X), 2)
+    uniform = np.full_like(probabilities, 1.0 / probabilities.shape[1])
+    assert not np.allclose(probabilities, uniform)

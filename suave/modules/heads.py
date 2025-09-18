@@ -1,15 +1,58 @@
-"""Classification heads for the minimal SUAVE placeholder implementation."""
+"""Classification heads mirroring the TensorFlow HI-VAE baseline."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import Iterable, Sequence
+
+import torch
+from torch import Tensor, nn
+from torch.nn import functional as F
 
 
-@dataclass
-class ClassificationHead:
-    """Placeholder classification head returning zero logits."""
+class ClassificationHead(nn.Module):
+    """Linear classifier operating on latent representations.
 
-    n_classes: int
+    Parameters
+    ----------
+    in_features:
+        Dimensionality of the latent vectors produced by the encoder.
+    n_classes:
+        Number of target classes.
+    class_weight:
+        Optional weighting applied to the cross-entropy objective.  The
+        semantics follow :func:`torch.nn.functional.cross_entropy`.
+    """
 
-    def __call__(self, latents):  # pragma: no cover - placeholder behaviour
-        return [0.0] * self.n_classes
+    def __init__(
+        self,
+        in_features: int,
+        n_classes: int,
+        *,
+        class_weight: Iterable[float] | Sequence[float] | Tensor | None = None,
+    ) -> None:
+        super().__init__()
+        if n_classes < 2:
+            raise ValueError("Classification head requires at least two classes")
+        self.linear = nn.Linear(in_features, n_classes)
+        if class_weight is not None:
+            weight_tensor = torch.as_tensor(class_weight, dtype=torch.float32)
+            if weight_tensor.numel() != n_classes:
+                raise ValueError(
+                    "class_weight must provide a value for every target class"
+                )
+            self.register_buffer("class_weight", weight_tensor)
+            self._use_weight = True
+        else:
+            self.register_buffer("class_weight", torch.ones(n_classes))
+            self._use_weight = False
+
+    def forward(self, latents: Tensor) -> Tensor:
+        """Return unnormalised logits for ``latents``."""
+
+        return self.linear(latents)
+
+    def loss(self, logits: Tensor, targets: Tensor) -> Tensor:
+        """Cross-entropy objective respecting optional class weights."""
+
+        weight = self.class_weight if self._use_weight else None
+        return F.cross_entropy(logits, targets, weight=weight)
