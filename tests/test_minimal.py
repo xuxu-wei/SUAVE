@@ -144,9 +144,44 @@ def test_hivae_behaviour_persists_after_save(tmp_path: Path):
     X, _, schema = make_dataset()
     model = SUAVE(schema=schema, behaviour="hivae", n_components=2)
     model.fit(X, epochs=1)
+    trained_tau = model._inference_tau
     save_path = tmp_path / "model.json"
     model.save(save_path)
     loaded = SUAVE.load(save_path)
     assert loaded.behaviour == "hivae"
+    assert loaded._inference_tau == pytest.approx(trained_tau)
     with pytest.raises(RuntimeError):
         loaded.predict_proba(X)
+
+
+def test_hivae_temperature_without_annealing_is_reproducible():
+    X, _, schema = make_dataset()
+    model = SUAVE(
+        schema=schema,
+        behaviour="hivae",
+        n_components=2,
+        tau_start=1.0,
+        tau_min=1.0,
+        tau_decay=0.0,
+    )
+    model.fit(X, epochs=1)
+    assert model._gumbel_temperature_for_epoch(0) == pytest.approx(1.0)
+    assert model._inference_tau == pytest.approx(1.0)
+    latents_first = model.encode(X)
+    latents_second = model.encode(X)
+    np.testing.assert_allclose(latents_first, latents_second)
+
+
+def test_hivae_inference_temperature_tracks_training_progress():
+    X, _, schema = make_dataset()
+    model = SUAVE(
+        schema=schema,
+        behaviour="hivae",
+        n_components=2,
+        tau_start=1.0,
+        tau_min=0.5,
+        tau_decay=0.2,
+    )
+    model.fit(X, epochs=3)
+    expected_tau = model._gumbel_temperature_for_epoch(2)
+    assert model._inference_tau == pytest.approx(expected_tau)
