@@ -6,6 +6,8 @@ import math
 
 import numpy as np
 import pytest
+pytest.importorskip("sklearn", reason="scikit-learn is required for evaluation metrics tests")
+
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 
@@ -109,7 +111,6 @@ def test_compute_ece_known_value() -> None:
         bin_confidence = np.mean(confidences[mask])
         bin_accuracy = np.mean(np.argmax(probabilities[mask], axis=1) == targets[mask])
         expected += abs(bin_confidence - bin_accuracy) * (np.sum(mask) / len(confidences))
-
     assert ece == pytest.approx(expected)
 
 
@@ -123,6 +124,9 @@ def test_evaluate_accepts_one_dimensional_probabilities() -> None:
     assert metrics["brier"] == pytest.approx(np.mean((probabilities - targets) ** 2))
 
 
+def _logistic_regression_factory() -> LogisticRegression:
+    return LogisticRegression(max_iter=500, solver="lbfgs")
+
 def test_tstr_and_trtr_workflow() -> None:
     X_syn = np.array([[0.0], [0.1], [1.0], [1.1]])
     y_syn = np.array([0, 0, 1, 1])
@@ -131,10 +135,12 @@ def test_tstr_and_trtr_workflow() -> None:
     X_real_test = np.array([[0.02], [0.12], [0.98], [1.08]])
     y_real_test = np.array([0, 0, 1, 1])
 
-    factory = lambda: LogisticRegression(max_iter=500, solver="lbfgs")
-
-    tstr_metrics = evaluate_tstr((X_syn, y_syn), (X_real_test, y_real_test), factory)
-    trtr_metrics = evaluate_trtr((X_real_train, y_real_train), (X_real_test, y_real_test), factory)
+    tstr_metrics = evaluate_tstr(
+        (X_syn, y_syn), (X_real_test, y_real_test), _logistic_regression_factory
+    )
+    trtr_metrics = evaluate_trtr(
+        (X_real_train, y_real_train), (X_real_test, y_real_test), _logistic_regression_factory
+    )
 
     assert tstr_metrics["accuracy"] >= 0.75
     assert trtr_metrics["accuracy"] >= 0.75
@@ -152,3 +158,21 @@ def test_simple_membership_inference_baseline() -> None:
 
     assert results["attack_auc"] == pytest.approx(1.0)
     assert results["attack_best_accuracy"] == pytest.approx(1.0)
+    assert results["attack_best_threshold"] == pytest.approx(0.85)
+    assert results["attack_majority_class_accuracy"] == pytest.approx(0.5)
+
+
+def test_simple_membership_inference_identical_scores_majority_accuracy() -> None:
+    train_probabilities = np.full((2, 2), 0.5)
+    train_targets = np.ones(2, dtype=int)
+    test_probabilities = np.full((8, 2), 0.5)
+    test_targets = np.zeros(8, dtype=int)
+
+    metrics = simple_membership_inference(
+        train_probabilities, train_targets, test_probabilities, test_targets
+    )
+
+    majority_ratio = test_targets.size / (train_targets.size + test_targets.size)
+    assert metrics["attack_best_accuracy"] == pytest.approx(majority_ratio)
+    assert metrics["attack_majority_class_accuracy"] == pytest.approx(majority_ratio)
+    assert metrics["attack_best_threshold"] > float(test_probabilities[:, 0].max())

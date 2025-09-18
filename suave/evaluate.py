@@ -216,6 +216,7 @@ def compute_ece(
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
     bin_indices = np.minimum(np.digitize(confidences, bin_edges[1:], right=True), n_bins - 1)
 
+
     ece = 0.0
     total = len(confidences)
     for bin_index in range(n_bins):
@@ -313,6 +314,7 @@ def evaluate_tstr(
     if not hasattr(model, "fit") or not hasattr(model, "predict_proba"):
         raise ValueError("model_factory must return an object with fit and predict_proba")
 
+
     model.fit(X_syn, y_syn)
     probabilities = model.predict_proba(X_real)
     return evaluate_classification(probabilities, y_real)
@@ -352,6 +354,7 @@ def evaluate_trtr(
     if not hasattr(model, "fit") or not hasattr(model, "predict_proba"):
         raise ValueError("model_factory must return an object with fit and predict_proba")
 
+
     model.fit(X_train, y_train)
     probabilities = model.predict_proba(X_test)
     return evaluate_classification(probabilities, y_test)
@@ -366,8 +369,12 @@ def simple_membership_inference(
     """Run a simple membership-inference attack baseline.
 
     The attack scores each example by the predicted probability of its true
-    class and reports the AUROC and best threshold accuracy for separating
-    training (members) from test (non-members) samples.
+    class and evaluates a sweep over decision thresholds to separate members
+    (training examples) from non-members (held-out examples). All thresholds
+    induced by the observed scores are considered alongside extreme thresholds
+    that force "all member" and "all non-member" predictions to ensure the
+    majority-class baseline is explicitly evaluated.
+
 
     Args:
         train_probabilities: Probabilities predicted on the training data.
@@ -376,7 +383,8 @@ def simple_membership_inference(
         test_targets: Integer encoded held-out labels.
 
     Returns:
-        A dictionary containing ``attack_auc`` and ``attack_best_accuracy``. The
+        A dictionary containing ``attack_auc``, ``attack_best_threshold``,
+        ``attack_best_accuracy``, and ``attack_majority_class_accuracy``. The
         scores are ``numpy.nan`` when the attack is undefined (e.g., only a
         single membership class is present).
 
@@ -398,9 +406,15 @@ def simple_membership_inference(
 
     if train_probs.shape[0] == 0 or test_probs.shape[0] == 0:
         nan_value = float("nan")
-        return {"attack_auc": nan_value, "attack_best_accuracy": nan_value}
+        return {
+            "attack_auc": nan_value,
+            "attack_best_threshold": nan_value,
+            "attack_best_accuracy": nan_value,
+            "attack_majority_class_accuracy": nan_value,
+        }
 
     def _true_class_confidence(prob_matrix: np.ndarray, labels: np.ndarray) -> np.ndarray:
+
         if prob_matrix.shape[1] == 2:
             confidences = np.where(labels == 1, prob_matrix[:, 1], prob_matrix[:, 0])
         else:
@@ -412,22 +426,46 @@ def simple_membership_inference(
 
     scores = np.concatenate([member_scores, non_member_scores])
     membership_labels = np.concatenate(
-        [np.ones_like(member_scores, dtype=int), np.zeros_like(non_member_scores, dtype=int)]
+        [
+            np.ones_like(member_scores, dtype=int),
+            np.zeros_like(non_member_scores, dtype=int),
+        ]
     )
+
+    total_samples = float(scores.size)
+    member_ratio = float(member_scores.size) / total_samples
+    non_member_ratio = float(non_member_scores.size) / total_samples
+    majority_accuracy = float(max(member_ratio, non_member_ratio))
 
     if np.unique(membership_labels).size < 2:
         nan_value = float("nan")
-        return {"attack_auc": nan_value, "attack_best_accuracy": nan_value}
+        return {
+            "attack_auc": nan_value,
+            "attack_best_threshold": nan_value,
+            "attack_best_accuracy": nan_value,
+            "attack_majority_class_accuracy": majority_accuracy,
+        }
 
     try:
         attack_auc = float(roc_auc_score(membership_labels, scores))
     except ValueError:
         attack_auc = float("nan")
 
-    thresholds = np.unique(scores)
-    best_accuracy = 0.0
-    for threshold in thresholds:
-        predictions = (scores >= threshold).astype(int)
-        best_accuracy = max(best_accuracy, float(np.mean(predictions == membership_labels)))
+    unique_thresholds = np.unique(scores)
+    lower_extreme = np.nextafter(scores.min(), -np.inf)
+    upper_extreme = np.nextafter(scores.max(), np.inf)
+    candidate_thresholds = np.unique(
+        np.concatenate((unique_thresholds, np.array([lower_extreme, upper_extreme])))
+    )
 
-    return {"attack_auc": attack_auc, "attack_best_accuracy": best_accuracy}
+    predictions = scores[None, :] >= candidate_thresholds[:, None]
+    accuracies = (predictions == membership_labels).mean(axis=1)
+    best_index = int(np.argmax(accuracies))
+
+    return {
+        "attack_auc": attack_auc,
+        "attack_best_threshold": float(candidate_thresholds[best_index]),
+        "attack_best_accuracy": float(accuracies[best_index]),
+        "attack_majority_class_accuracy": majority_accuracy,
+    }
+
