@@ -13,8 +13,10 @@ class ColumnSpec:
     Parameters
     ----------
     type:
-        Logical feature type. Only ``"real"`` and ``"cat"`` are currently
-        supported in the minimal implementation.
+        Logical feature type. Supported values mirror the HI-VAE
+        implementation: ``"real"`` (Gaussian), ``"pos"`` (log-normal),
+        ``"count"`` (Poisson), ``"cat"`` (categorical) and ``"ordinal"``
+        (cumulative link).
     n_classes:
         Number of distinct categories for categorical features. It must be
         provided when ``type`` is ``"cat"``.
@@ -54,7 +56,7 @@ class Schema:
     ['gender']
     """
 
-    _SUPPORTED_TYPES = {"real", "cat"}
+    _SUPPORTED_TYPES = {"real", "cat", "pos", "count", "ordinal"}
 
     def __init__(self, columns: Mapping[str, Mapping[str, object]]):
         self._columns: Dict[str, ColumnSpec] = {}
@@ -64,16 +66,23 @@ class Schema:
             if column_type not in self._SUPPORTED_TYPES:
                 raise ValueError(
                     f"Unsupported column type '{column_type}' for '{name}'. "
-                    "Supported types: real, cat."
+                    "Supported types: real, pos, count, cat, ordinal."
                 )
             n_classes = spec_dict.get("n_classes")
-            if column_type == "cat" and n_classes is None:
+            if column_type in {"cat", "ordinal"}:
+                if n_classes is None:
+                    raise ValueError(
+                        f"Column '{name}' of type '{column_type}' requires 'n_classes'."
+                    )
+                if int(n_classes) <= 1:
+                    raise ValueError(
+                        f"Column '{name}' of type '{column_type}' must declare "
+                        "'n_classes' greater than 1."
+                    )
+                n_classes = int(n_classes)
+            elif n_classes is not None:
                 raise ValueError(
-                    f"Column '{name}' is categorical but missing 'n_classes'."
-                )
-            if column_type == "real" and n_classes is not None:
-                raise ValueError(
-                    f"Column '{name}' is real-valued and should not provide 'n_classes'."
+                    f"Column '{name}' of type '{column_type}' should not provide 'n_classes'."
                 )
             self._columns[name] = ColumnSpec(type=column_type, n_classes=n_classes)
 
@@ -99,6 +108,28 @@ class Schema:
         """Names of columns declared as ``"cat"``."""
 
         return tuple(name for name, spec in self._columns.items() if spec.type == "cat")
+
+    @property
+    def positive_features(self) -> Iterable[str]:
+        """Names of columns declared as ``"pos"``."""
+
+        return tuple(name for name, spec in self._columns.items() if spec.type == "pos")
+
+    @property
+    def count_features(self) -> Iterable[str]:
+        """Names of columns declared as ``"count"``."""
+
+        return tuple(
+            name for name, spec in self._columns.items() if spec.type == "count"
+        )
+
+    @property
+    def ordinal_features(self) -> Iterable[str]:
+        """Names of columns declared as ``"ordinal"``."""
+
+        return tuple(
+            name for name, spec in self._columns.items() if spec.type == "ordinal"
+        )
 
     # ------------------------------------------------------------------
     # Mapping protocol helpers

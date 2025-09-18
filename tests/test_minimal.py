@@ -66,6 +66,7 @@ def test_encode_returns_latent_means():
     assert model._encoder is not None
     assert model._encoder.training == was_training
 
+
 def test_hivae_behaviour_disables_classifier():
     X, _, schema = make_dataset()
     model = SUAVE(schema=schema, behaviour="hivae")
@@ -86,4 +87,3 @@ def test_hivae_behaviour_persists_after_save(tmp_path: Path):
     assert loaded.behaviour == "hivae"
     with pytest.raises(RuntimeError):
         loaded.predict_proba(X)
-
