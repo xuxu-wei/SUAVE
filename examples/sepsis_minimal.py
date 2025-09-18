@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from suave import SUAVE, Schema
+from suave.evaluate import evaluate_classification
 from suave.plots import plot_reliability_curve
 
 
@@ -32,6 +33,11 @@ def main() -> None:
     model.fit(X, y, epochs=1)
     probabilities = model.predict_proba(X)
     model.calibrate(X, y)
+
+    metrics = evaluate_classification(probabilities, y.to_numpy())
+    print("Evaluation metrics:")
+    for name, value in metrics.items():
+        print(f"  {name}: {value:.4f}")
 
     output_path = data_path.with_name("reliability_placeholder.png")
     plot_reliability_curve(probabilities[:, 1], y, output_path=output_path)
