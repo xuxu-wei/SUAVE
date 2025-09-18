@@ -54,6 +54,19 @@ def test_predict_proba_shape():
     assert not np.allclose(probabilities, uniform)
 
 
+def test_encode_returns_latent_means():
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, latent_dim=4, batch_size=2)
+    model.fit(X, y)
+    assert model._encoder is not None
+    was_training = model._encoder.training
+    latents = model.encode(X)
+    assert latents.shape == (len(X), model.latent_dim)
+    assert latents.dtype == np.float32
+    assert model._encoder is not None
+    assert model._encoder.training == was_training
+
+
 def test_hivae_behaviour_disables_classifier():
     X, _, schema = make_dataset()
     model = SUAVE(schema=schema, behaviour="hivae")

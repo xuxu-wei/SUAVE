@@ -612,10 +612,52 @@ class SUAVE:
     # Latent utilities and sampling
     # ------------------------------------------------------------------
     def encode(self, X: pd.DataFrame) -> np.ndarray:
-        """Return posterior means of the latent representation for ``X``."""
+        """Return posterior means of the latent representation for ``X``.
 
-        mu, _ = self._infer_latent_statistics(X)
-        return mu.cpu().numpy()
+        Parameters
+        ----------
+        X:
+            Input features with shape ``(n_samples, n_features)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Array of shape ``(n_samples, latent_dim)`` containing the latent
+            posterior means produced by the trained encoder.
+
+        Examples
+        --------
+        >>> latents = model.encode(X)
+        >>> latents.shape
+        (len(X), model.latent_dim)
+        """
+
+        if not self._is_fitted or self._encoder is None:
+            raise RuntimeError("Model must be fitted before encoding data")
+
+        device = self._select_device()
+        encoder_inputs = self._prepare_inference_inputs(X).to(device)
+        n_samples = encoder_inputs.size(0)
+        if n_samples == 0:
+            return np.empty((0, self.latent_dim), dtype=np.float32)
+
+        effective_batch = min(self.batch_size, n_samples)
+        if effective_batch <= 0:
+            effective_batch = n_samples
+
+        latent_batches: list[Tensor] = []
+        was_training = self._encoder.training
+        self._encoder.eval()
+        with torch.no_grad():
+            for start in range(0, n_samples, effective_batch):
+                end = min(start + effective_batch, n_samples)
+                batch_inputs = encoder_inputs[start:end]
+                mu, _ = self._encoder(batch_inputs)
+                latent_batches.append(mu.cpu())
+        if was_training:
+            self._encoder.train()
+
+        return torch.cat(latent_batches, dim=0).numpy()
 
     def sample(
         self, n_samples: int, conditional: bool = False, y: Optional[np.ndarray] = None
