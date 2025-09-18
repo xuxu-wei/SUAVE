@@ -149,7 +149,9 @@ def compute_auprc(probabilities: np.ndarray, targets: np.ndarray) -> float:
         try:
             scores.append(
                 float(
-                    average_precision_score(binary_target, prob_array[:, class_index])
+                    average_precision_score(
+                        binary_target, prob_array[:, class_index]
+                    )
                 )
             )
         except ValueError:

@@ -132,6 +132,10 @@ def test_evaluate_accepts_one_dimensional_probabilities() -> None:
     assert metrics["brier"] == pytest.approx(np.mean((probabilities - targets) ** 2))
 
 
+def _logistic_regression_factory() -> LogisticRegression:
+    return LogisticRegression(max_iter=500, solver="lbfgs")
+
+
 def test_tstr_and_trtr_workflow() -> None:
     X_syn = np.array([[0.0], [0.1], [1.0], [1.1]])
     y_syn = np.array([0, 0, 1, 1])
@@ -140,12 +144,11 @@ def test_tstr_and_trtr_workflow() -> None:
     X_real_test = np.array([[0.02], [0.12], [0.98], [1.08]])
     y_real_test = np.array([0, 0, 1, 1])
 
-    def factory() -> LogisticRegression:
-        return LogisticRegression(max_iter=500, solver="lbfgs")
-
-    tstr_metrics = evaluate_tstr((X_syn, y_syn), (X_real_test, y_real_test), factory)
+    tstr_metrics = evaluate_tstr(
+        (X_syn, y_syn), (X_real_test, y_real_test), _logistic_regression_factory
+    )
     trtr_metrics = evaluate_trtr(
-        (X_real_train, y_real_train), (X_real_test, y_real_test), factory
+        (X_real_train, y_real_train), (X_real_test, y_real_test), _logistic_regression_factory
     )
 
     assert tstr_metrics["accuracy"] >= 0.75
