@@ -872,6 +872,130 @@ class SUAVE:
         normaliser[normaliser == 0.0] = 1.0
         return probabilities / normaliser
 
+    def impute(self, X: pd.DataFrame, *, only_missing: bool = True) -> pd.DataFrame:
+        """Fill missing entries in ``X`` using the trained HI-VAE decoder.
+
+        Parameters
+        ----------
+        X:
+            DataFrame containing the features declared in the training schema.
+            Missing entries (``NaN``) are imputed using the posterior mean of
+            the latent representation followed by a single decoder pass.  The
+            method works in both ``behaviour="suave"`` and
+            ``behaviour="hivae"`` modes.
+        only_missing:
+            When ``True`` (default) only the originally missing entries are
+            replaced by their reconstructions.  When ``False`` the returned
+            dataframe contains the full decoder output for all features.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Copy of ``X`` where the missing entries have been replaced by the
+            decoded reconstructions.  Observed values are preserved.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pandas as pd
+        >>> from suave.model import SUAVE
+        >>> from suave.types import Schema
+        >>> data = pd.DataFrame({"real": [1.0, np.nan, 3.0], "cat": [0, 1, 0]})
+        >>> schema = Schema({"real": {"type": "real"}, "cat": {"type": "cat", "n_classes": 2}})
+        >>> model = SUAVE(schema=schema, behaviour="hivae")
+        >>> _ = model.fit(data, epochs=1, batch_size=3)
+        >>> imputed = model.impute(data)
+        >>> imputed.isna().sum().sum()
+        0
+        """
+
+        if not self._is_fitted or self._encoder is None or self._decoder is None:
+            raise RuntimeError("Model must be fitted before calling impute")
+        if self.schema is None:
+            raise RuntimeError("Schema must be defined for imputation")
+
+        missing_columns = [
+            column for column in self.schema.feature_names if column not in X.columns
+        ]
+        if missing_columns:
+            raise KeyError(
+                "Input is missing required columns: " + ", ".join(missing_columns)
+            )
+
+        original_index = X.index
+        aligned = X.loc[:, self.schema.feature_names].copy()
+        aligned_reset = aligned.reset_index(drop=True)
+
+        mask = data_utils.build_missing_mask(aligned_reset)
+        normalised = self._apply_training_normalization(aligned_reset)
+        mask = (mask | normalised.isna()).reset_index(drop=True)
+
+        _, data_tensors, mask_tensors = self._prepare_training_tensors(
+            normalised, mask, update_layout=False
+        )
+
+        device = self._select_device()
+        encoder_inputs = self._prepare_inference_inputs(aligned_reset).to(device)
+        for feature_type in data_tensors:
+            for column in data_tensors[feature_type]:
+                data_tensors[feature_type][column] = data_tensors[feature_type][
+                    column
+                ].to(device)
+                mask_tensors[feature_type][column] = mask_tensors[feature_type][
+                    column
+                ].to(device)
+
+        with torch.no_grad():
+            encoder_state = self._encoder.training
+            decoder_state = self._decoder.training
+            self._encoder.eval()
+            self._decoder.eval()
+            logits_enc, mu_enc, logvar_enc = self._encoder(encoder_inputs)
+            posterior_mean, _, _ = self._mixture_posterior_statistics(
+                logits_enc, mu_enc, logvar_enc
+            )
+            decoder_out = self._decoder(
+                posterior_mean, data_tensors, self._norm_stats_per_col, mask_tensors
+            )
+            if encoder_state:
+                self._encoder.train()
+            if decoder_state:
+                self._decoder.train()
+
+        reconstruction = sampling_utils.decoder_outputs_to_frame(
+            decoder_out["per_feature"], self.schema, self._norm_stats_per_col
+        )
+
+        if only_missing:
+            missing_mask = data_utils.build_missing_mask(aligned_reset)
+            original_aligned = aligned_reset.copy()
+            for column in reconstruction.columns:
+                column_data = reconstruction[column]
+                if isinstance(column_data.dtype, CategoricalDtype):
+                    original_aligned[column] = pd.Categorical(
+                        original_aligned[column],
+                        categories=column_data.cat.categories,
+                        ordered=column_data.cat.ordered,
+                    )
+            imputed = reconstruction.where(missing_mask, original_aligned)
+        else:
+            imputed = reconstruction
+
+        imputed.index = original_index
+        extra_columns = [
+            column for column in X.columns if column not in self.schema.feature_names
+        ]
+        if extra_columns:
+            extras = X.loc[:, extra_columns].copy()
+            extras.index = original_index
+            imputed = pd.concat([imputed, extras], axis=1)
+        return imputed.loc[:, X.columns]
+
     def _infer_latent_statistics(self, X: pd.DataFrame) -> tuple[Tensor, Tensor]:
         """Return posterior parameters for ``X`` using the trained encoder."""
 

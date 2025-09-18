@@ -17,10 +17,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import torch
 
-from suave import data as data_utils
-from suave import sampling as sampling_utils
 from suave.model import SUAVE
 from suave.types import Schema
 
@@ -68,43 +65,7 @@ def _reconstruction_error(original: pd.DataFrame, reconstructed: pd.DataFrame) -
 
 
 def _reconstruct(model: SUAVE, X: pd.DataFrame) -> pd.DataFrame:
-    if not model._is_fitted:
-        raise RuntimeError("Model must be fitted before calling _reconstruct")
-    aligned = X.loc[:, model.schema.feature_names].reset_index(drop=True)
-    mask = data_utils.build_missing_mask(aligned)
-    normalised = model._apply_training_normalization(aligned)
-    mask = (mask | normalised.isna()).reset_index(drop=True)
-    _, data_tensors, mask_tensors = model._prepare_training_tensors(
-        normalised, mask, update_layout=False
-    )
-
-    device = model._select_device()
-    encoder_inputs = model._prepare_inference_inputs(X).to(device)
-    for feature_type in data_tensors:
-        for column in data_tensors[feature_type]:
-            data_tensors[feature_type][column] = data_tensors[feature_type][column].to(
-                device
-            )
-            mask_tensors[feature_type][column] = mask_tensors[feature_type][column].to(
-                device
-            )
-
-    with torch.no_grad():
-        encoder_state = model._encoder.training
-        decoder_state = model._decoder.training
-        model._encoder.eval()
-        model._decoder.eval()
-        mu, _ = model._encoder(encoder_inputs)
-        decoder_out = model._decoder(
-            mu, data_tensors, model._norm_stats_per_col, mask_tensors
-        )
-        if encoder_state:
-            model._encoder.train()
-        if decoder_state:
-            model._decoder.train()
-    return sampling_utils.decoder_outputs_to_frame(
-        decoder_out["per_feature"], model.schema, model._norm_stats_per_col
-    )
+    return model.impute(X, only_missing=False)
 
 
 def _maybe_run_tensorflow_baseline(
