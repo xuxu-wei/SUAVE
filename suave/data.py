@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -101,13 +101,8 @@ def standardize(
 ) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float | list[object]]]]:
     """Standardise the dataframe using schema information.
 
-    ``real`` columns are z-scored. ``pos`` columns are log transformed (using
-    ``log1p``) and normalised with mean/standard deviation of the transformed
-    values. ``count`` columns are log transformed (adding a one-offset when the
-    observed minimum is zero). ``cat`` columns are cast to categorical dtype
-    and ``ordinal`` columns are validated to fall inside the configured class
-    range. The function returns the transformed dataframe alongside the
-    metadata required to reconstruct the original values.
+    ``real`` columns are z-scored. ``cat`` columns are cast to categorical
+    dtype; their categories are recorded but left untouched.
 
     Returns
     -------
@@ -131,65 +126,12 @@ def standardize(
         transformed[column] = (values - mean) / max(std, _EPS)
         stats[column] = {"type": "real", "mean": mean, "std": std}
 
-    for column in schema.positive_features:
-        if column not in transformed:
-            continue
-        values = pd.to_numeric(transformed[column], errors="coerce")
-        finite = values[values.notna()]
-        if not finite.empty and (finite < -1.0 + _EPS).any():
-            raise ValueError(
-                f"Column '{column}' of type 'pos' must be >= -1 to apply log1p"
-            )
-        log_values = np.log1p(values)
-        mean = float(np.nanmean(log_values)) if log_values.size else 0.0
-        std = float(np.nanstd(log_values, ddof=0)) if log_values.size else 1.0
-        if not np.isfinite(std) or std < _EPS:
-            std = 1.0
-        normalised = (log_values - mean) / max(std, _EPS)
-        transformed[column] = normalised
-        stats[column] = {"type": "pos", "mean_log": mean, "std_log": std}
-
-    for column in schema.count_features:
-        if column not in transformed:
-            continue
-        values = pd.to_numeric(transformed[column], errors="coerce")
-        finite = values[values.notna()]
-        if not finite.empty and (finite < 0).any():
-            raise ValueError(f"Column '{column}' of type 'count' must be non-negative")
-        offset = 1.0 if (not finite.empty and (finite <= 0).any()) else 0.0
-        shifted = values + offset
-        log_values = np.log(shifted)
-        transformed[column] = log_values
-        stats[column] = {"type": "count", "offset": offset}
-
     for column in schema.categorical_features:
         if column not in transformed:
             continue
         transformed[column] = transformed[column].astype("category")
         categories = transformed[column].cat.categories.tolist()
         stats[column] = {"type": "cat", "categories": categories}
-
-    for column in schema.ordinal_features:
-        if column not in transformed:
-            continue
-        spec = schema[column]
-        n_classes = int(spec.n_classes or 0)
-        series = pd.to_numeric(transformed[column], errors="coerce")
-        if not series.dropna().between(0, n_classes - 1).all():
-            raise ValueError(
-                f"Column '{column}' must contain values in [0, {n_classes - 1}]"
-            )
-        categories: Iterable[object]
-        if isinstance(transformed[column].dtype, pd.CategoricalDtype):
-            categories = transformed[column].cat.categories.tolist()
-        else:
-            categories = list(range(n_classes))
-        transformed[column] = series
-        stats[column] = {
-            "type": "ordinal",
-            "n_classes": n_classes,
-            "categories": list(categories),
-        }
 
     return transformed, stats
 
@@ -210,20 +152,4 @@ def inverse_standardize(
         elif meta["type"] == "cat":
             categories = meta.get("categories", [])
             restored[column] = pd.Categorical(restored[column], categories=categories)
-        elif meta["type"] == "pos":
-            mean_log = float(meta.get("mean_log", 0.0))
-            std_log = float(meta.get("std_log", 1.0))
-            values = pd.to_numeric(restored[column], errors="coerce")
-            log_values = values * std_log + mean_log
-            restored[column] = np.expm1(log_values)
-        elif meta["type"] == "count":
-            offset = float(meta.get("offset", 0.0))
-            values = pd.to_numeric(restored[column], errors="coerce")
-            restored[column] = np.exp(values) - offset
-        elif meta["type"] == "ordinal":
-            categories = meta.get("categories")
-            if categories is not None:
-                restored[column] = pd.Categorical(
-                    restored[column], categories=categories, ordered=True
-                )
     return restored

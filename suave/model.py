@@ -119,13 +119,7 @@ class SUAVE:
         self._encoder: EncoderMLP | None = None
         self._decoder: Decoder | None = None
         self._classifier: ClassificationHead | None = None
-        self._feature_layout: dict[str, dict[str, int]] = {
-            "real": {},
-            "pos": {},
-            "count": {},
-            "cat": {},
-            "ordinal": {},
-        }
+        self._feature_layout: dict[str, dict[str, int]] = {"real": {}, "cat": {}}
         self._class_to_index: dict[object, int] | None = None
         self._cached_logits: np.ndarray | None = None
         self._cached_probabilities: np.ndarray | None = None
@@ -179,6 +173,18 @@ class SUAVE:
         if self.schema is None:
             raise ValueError("A schema must be provided to fit the model")
         self.schema.require_columns(X.columns)
+        unsupported = [
+            column
+            for column in self.schema.feature_names
+            if self.schema[column].type not in {"real", "cat"}
+        ]
+        if unsupported:
+            joined = ", ".join(unsupported)
+            raise ValueError(
+                f"Columns {joined} use unsupported feature types. "
+                "Enable positive/count/ordinal heads in a future release."
+            )
+
         if self.behaviour == "suave" and y is None:
             raise ValueError("Targets must be provided when behaviour='suave'")
 
@@ -366,17 +372,11 @@ class SUAVE:
         value_parts: list[Tensor] = []
         mask_parts: list[Tensor] = []
         real_data: Dict[str, Tensor] = {}
-        pos_data: Dict[str, Tensor] = {}
-        count_data: Dict[str, Tensor] = {}
         cat_data: Dict[str, Tensor] = {}
-        ordinal_data: Dict[str, Tensor] = {}
         real_masks: Dict[str, Tensor] = {}
-        pos_masks: Dict[str, Tensor] = {}
-        count_masks: Dict[str, Tensor] = {}
         cat_masks: Dict[str, Tensor] = {}
-        ordinal_masks: Dict[str, Tensor] = {}
 
-        feature_layout = {"real": {}, "pos": {}, "count": {}, "cat": {}, "ordinal": {}}
+        feature_layout = {"real": {}, "cat": {}}
 
         for column in self.schema.real_features:
             values = pd.to_numeric(X[column], errors="coerce").to_numpy(
@@ -392,36 +392,6 @@ class SUAVE:
             value_parts.append(tensor)
             mask_parts.append(mask_tensor)
             feature_layout["real"][column] = 1
-
-        for column in self.schema.positive_features:
-            values = pd.to_numeric(X[column], errors="coerce").to_numpy(
-                dtype=np.float32
-            )
-            values = np.nan_to_num(values, nan=0.0).reshape(n_samples, 1)
-            tensor = torch.from_numpy(values)
-            missing = mask[column].to_numpy().astype(bool)
-            observed = (~missing).astype(np.float32).reshape(n_samples, 1)
-            mask_tensor = torch.from_numpy(observed)
-            pos_data[column] = tensor
-            pos_masks[column] = mask_tensor
-            value_parts.append(tensor)
-            mask_parts.append(mask_tensor)
-            feature_layout["pos"][column] = 1
-
-        for column in self.schema.count_features:
-            values = pd.to_numeric(X[column], errors="coerce").to_numpy(
-                dtype=np.float32
-            )
-            values = np.nan_to_num(values, nan=0.0).reshape(n_samples, 1)
-            tensor = torch.from_numpy(values)
-            missing = mask[column].to_numpy().astype(bool)
-            observed = (~missing).astype(np.float32).reshape(n_samples, 1)
-            mask_tensor = torch.from_numpy(observed)
-            count_data[column] = tensor
-            count_masks[column] = mask_tensor
-            value_parts.append(tensor)
-            mask_parts.append(mask_tensor)
-            feature_layout["count"][column] = 1
 
         for column in self.schema.categorical_features:
             series = X[column]
@@ -446,45 +416,12 @@ class SUAVE:
             mask_parts.append(mask_tensor)
             feature_layout["cat"][column] = n_classes
 
-        for column in self.schema.ordinal_features:
-            series = pd.to_numeric(X[column], errors="coerce")
-            n_classes = int(self.schema[column].n_classes or 0)
-            thermo = np.zeros((n_samples, n_classes), dtype=np.float32)
-            valid_mask = series.notna().to_numpy()
-            valid_indices = np.where(valid_mask)[0]
-            if valid_indices.size:
-                values = series.iloc[valid_indices].astype(int).to_numpy()
-                values = np.clip(values, 0, n_classes - 1)
-                for row, value in zip(valid_indices, values):
-                    thermo[row, : value + 1] = 1.0
-            tensor = torch.from_numpy(thermo)
-            missing = mask[column].to_numpy().astype(bool)
-            observed = (~missing).astype(np.float32).reshape(n_samples, 1)
-            mask_tensor = torch.from_numpy(observed)
-            ordinal_data[column] = tensor
-            ordinal_masks[column] = mask_tensor
-            value_parts.append(tensor)
-            mask_parts.append(mask_tensor)
-            feature_layout["ordinal"][column] = n_classes
-
         if not value_parts:
             raise ValueError("No supported features present in the training data")
 
         encoder_inputs = torch.cat(value_parts + mask_parts, dim=1).float()
-        data_tensors = {
-            "real": real_data,
-            "pos": pos_data,
-            "count": count_data,
-            "cat": cat_data,
-            "ordinal": ordinal_data,
-        }
-        mask_tensors = {
-            "real": real_masks,
-            "pos": pos_masks,
-            "count": count_masks,
-            "cat": cat_masks,
-            "ordinal": ordinal_masks,
-        }
+        data_tensors = {"real": real_data, "cat": cat_data}
+        mask_tensors = {"real": real_masks, "cat": cat_masks}
         if update_layout:
             self._feature_layout = feature_layout
         return encoder_inputs, data_tensors, mask_tensors
@@ -512,29 +449,6 @@ class SUAVE:
                 std = 1.0
             values = pd.to_numeric(normalised[column], errors="coerce")
             normalised[column] = (values - mean) / max(std, 1e-6)
-        for column in self.schema.positive_features:
-            stats = self._norm_stats_per_col.get(column, {})
-            mean_log = float(stats.get("mean_log", 0.0))
-            std_log = float(stats.get("std_log", 1.0))
-            values = pd.to_numeric(normalised[column], errors="coerce")
-            finite = values[values.notna()]
-            if not finite.empty and (finite < -1.0 + 1e-6).any():
-                raise ValueError(
-                    f"Column '{column}' of type 'pos' must be >= -1 to apply log1p"
-                )
-            log_values = np.log1p(values)
-            normalised[column] = (log_values - mean_log) / max(std_log, 1e-6)
-        for column in self.schema.count_features:
-            stats = self._norm_stats_per_col.get(column, {})
-            offset = float(stats.get("offset", 0.0))
-            values = pd.to_numeric(normalised[column], errors="coerce")
-            finite = values[values.notna()]
-            if not finite.empty and (finite < 0).any():
-                raise ValueError(
-                    f"Column '{column}' of type 'count' must be non-negative"
-                )
-            shifted = values + offset
-            normalised[column] = np.log(shifted)
         for column in self.schema.categorical_features:
             stats = self._norm_stats_per_col.get(column, {})
             categories = stats.get("categories")
@@ -544,25 +458,6 @@ class SUAVE:
                 )
             else:
                 normalised[column] = normalised[column].astype("category")
-        for column in self.schema.ordinal_features:
-            stats = self._norm_stats_per_col.get(column, {})
-            series = pd.to_numeric(normalised[column], errors="coerce")
-            n_classes = int(
-                stats.get(
-                    "n_classes",
-                    (
-                        self.schema[column].n_classes
-                        if self.schema[column].n_classes
-                        else 0
-                    ),
-                )
-            )
-            if n_classes:
-                if not series.dropna().between(0, n_classes - 1).all():
-                    raise ValueError(
-                        f"Column '{column}' must contain values in [0, {n_classes - 1}]"
-                    )
-            normalised[column] = series
         return normalised
 
     def _prepare_inference_inputs(self, X: pd.DataFrame) -> Tensor:

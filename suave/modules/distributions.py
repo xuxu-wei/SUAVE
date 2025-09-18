@@ -12,7 +12,7 @@ from typing import Optional
 
 import torch
 from torch import Tensor
-from torch.distributions import Categorical, Normal, Poisson
+from torch.distributions import Categorical, Normal
 from torch.nn import functional as F
 
 EPS = 1e-6
@@ -85,90 +85,3 @@ def make_normal(mu: Tensor, var: Tensor) -> Normal:
 
     std = torch.sqrt(torch.clamp(var, min=EPS))
     return Normal(mu, std)
-
-
-def nll_lognormal(
-    log_x: Tensor, mean_log: Tensor, var_log: Tensor, mask: Optional[Tensor]
-) -> Tensor:
-    """Return the negative log-likelihood of log-normal variables.
-
-    Parameters
-    ----------
-    log_x:
-        ``log(1 + x)`` representation of the observed data.
-    mean_log, var_log:
-        Parameters of the Gaussian distribution in log-space.
-    mask:
-        Observation mask with ones for observed entries and zeros for missing.
-    """
-
-    var_log = torch.clamp(var_log, min=EPS)
-    log_var = torch.log(var_log)
-    nll = 0.5 * (_LOG_2PI + log_var + (log_x - mean_log) ** 2 / var_log) + log_x
-    nll = _apply_mask(nll, mask)
-    return nll.sum(dim=-1)
-
-
-def sample_lognormal(mean_log: Tensor, var_log: Tensor) -> Tensor:
-    """Sample positive values from a log-normal distribution."""
-
-    std = torch.sqrt(torch.clamp(var_log, min=EPS))
-    eps = torch.randn_like(std)
-    return torch.exp(mean_log + eps * std) - 1.0
-
-
-def nll_poisson(x: Tensor, rate: Tensor, mask: Optional[Tensor]) -> Tensor:
-    """Return the negative log-likelihood of count data under a Poisson model."""
-
-    rate = torch.clamp(rate, min=EPS)
-    distribution = Poisson(rate)
-    nll = -distribution.log_prob(x)
-    nll = _apply_mask(nll, mask)
-    return nll.sum(dim=-1)
-
-
-def sample_poisson(rate: Tensor) -> Tensor:
-    """Sample from a Poisson distribution with intensity ``rate``."""
-
-    distribution = Poisson(rate)
-    return distribution.sample()
-
-
-def ordinal_probabilities(partition: Tensor, mean: Tensor) -> tuple[Tensor, Tensor]:
-    """Return class probabilities and ordered thresholds for ordinal variables."""
-
-    epsilon = EPS
-    spacings = F.softplus(partition) + epsilon
-    thresholds = torch.cumsum(spacings, dim=-1)
-    mean_expanded = mean
-    if mean_expanded.dim() < thresholds.dim():
-        mean_expanded = mean_expanded.unsqueeze(-1)
-    logits = thresholds - mean_expanded
-    sigmoid = torch.sigmoid(logits)
-    probs = torch.cat([sigmoid, torch.ones_like(sigmoid[..., :1])], dim=-1)
-    probs = probs - torch.cat([torch.zeros_like(sigmoid[..., :1]), sigmoid], dim=-1)
-    probs = torch.clamp(probs, min=EPS, max=1.0)
-    return probs, thresholds
-
-
-def nll_ordinal(probs: Tensor, targets: Tensor, mask: Optional[Tensor]) -> Tensor:
-    """Negative log-likelihood for ordinal observations."""
-
-    log_probs = torch.log(torch.clamp(probs, min=EPS))
-    gathered = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-    nll = -gathered
-    if mask is not None:
-        if mask.shape != nll.shape:
-            mask = mask.expand_as(nll)
-        nll = nll * mask
-    return nll
-
-
-def sample_ordinal(probs: Tensor) -> Tensor:
-    """Sample thermometer-encoded ordinal observations from ``probs``."""
-
-    distribution = Categorical(probs=probs)
-    indices = distribution.sample()
-    n_classes = probs.size(-1)
-    arange = torch.arange(n_classes, device=probs.device)
-    return (arange.unsqueeze(0) <= indices.unsqueeze(-1)).float()
