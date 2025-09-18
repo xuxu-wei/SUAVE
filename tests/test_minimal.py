@@ -132,3 +132,21 @@ def test_hivae_behaviour_persists_after_save(tmp_path: Path):
     assert loaded.behaviour == "hivae"
     with pytest.raises(RuntimeError):
         loaded.predict_proba(X)
+
+
+def test_hivae_temperature_without_annealing_is_reproducible():
+    X, _, schema = make_dataset()
+    model = SUAVE(
+        schema=schema,
+        behaviour="hivae",
+        n_components=2,
+        tau_start=1.0,
+        tau_min=1.0,
+        tau_decay=0.0,
+    )
+    model.fit(X, epochs=1)
+    assert model._gumbel_temperature_for_epoch(0) == pytest.approx(1.0)
+    assert model._inference_tau == pytest.approx(1.0)
+    latents_first = model.encode(X)
+    latents_second = model.encode(X)
+    np.testing.assert_allclose(latents_first, latents_second)
