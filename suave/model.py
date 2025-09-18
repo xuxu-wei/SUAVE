@@ -22,7 +22,7 @@ from .modules.decoder import Decoder
 from .modules.encoder import EncoderMLP
 from .modules.heads import ClassificationHead
 from .modules import losses
-from .sampling import sample as sampling_stub
+from . import sampling as sampling_utils
 from .types import Schema
 
 LOGGER = logging.getLogger(__name__)
@@ -72,6 +72,8 @@ class SUAVE:
     >>> proba.shape
     (2, 2)
     """
+
+    _CONDITIONAL_SAMPLE_CANDIDATES = 32
 
     def __init__(
         self,
@@ -578,8 +580,8 @@ class SUAVE:
         Returns
         -------
         numpy.ndarray
-            Array of shape ``(n_samples, latent_dim)`` containing the latent
-            posterior means produced by the trained encoder.
+            Latent posterior means with shape ``(n_samples, latent_dim)``
+            produced by the trained encoder.
 
         Examples
         --------
@@ -615,15 +617,96 @@ class SUAVE:
 
         return torch.cat(latent_batches, dim=0).numpy()
 
+    def _sample_latents(
+        self,
+        n_samples: int,
+        *,
+        conditional: bool,
+        y: Optional[np.ndarray],
+        device: torch.device,
+    ) -> Tensor:
+        """Draw latent samples from the prior or conditionally on ``y``."""
+
+        if n_samples == 0:
+            return torch.empty((0, self.latent_dim), device=device)
+        if not conditional:
+            return torch.randn(n_samples, self.latent_dim, device=device)
+
+        if y is None:
+            raise ValueError("Targets 'y' must be provided for conditional sampling")
+        if self._classifier is None or self._classes is None:
+            raise RuntimeError("Classifier must be trained for conditional sampling")
+
+        targets = np.asarray(y).reshape(-1)
+        if targets.size != n_samples:
+            raise ValueError(
+                "y must have the same number of entries as requested samples"
+            )
+
+        target_indices = self._map_targets_to_indices(targets)
+        candidate_count = max(1, self._CONDITIONAL_SAMPLE_CANDIDATES)
+        latents: list[Tensor] = []
+        was_training = self._classifier.training
+        self._classifier.eval()
+        with torch.no_grad():
+            for target_idx in target_indices:
+                candidates = torch.randn(
+                    candidate_count, self.latent_dim, device=device
+                )
+                logits = self._classifier(candidates)
+                probs = torch.softmax(logits, dim=-1)[:, target_idx]
+                best_idx = int(probs.argmax())
+                latents.append(candidates[best_idx])
+        if was_training:
+            self._classifier.train()
+        return torch.stack(latents, dim=0)
+
     def sample(
         self, n_samples: int, conditional: bool = False, y: Optional[np.ndarray] = None
     ) -> pd.DataFrame:
-        """Generate placeholder samples using :mod:`suave.sampling`."""
+        """Generate synthetic samples by decoding latent draws."""
 
-        if not self._is_fitted:
+        if not self._is_fitted or self._decoder is None:
             raise RuntimeError("Model must be fitted before sampling")
-        n_features = len(self.schema.feature_names) if self.schema else 0
-        return sampling_stub(n_samples, n_features, conditional=conditional, y=y)
+        if self.schema is None:
+            raise RuntimeError("Schema information is required for sampling")
+        if n_samples < 0:
+            raise ValueError("n_samples must be non-negative")
+        if conditional and y is None:
+            raise ValueError("Targets 'y' are required when conditional=True")
+
+        y_array: Optional[np.ndarray] = None
+        if conditional and y is not None:
+            y_array = np.asarray(y).reshape(-1)
+            if y_array.size != n_samples:
+                raise ValueError(
+                    "Provided labels must match the requested sample count"
+                )
+
+        device = self._select_device()
+        latents = self._sample_latents(
+            n_samples,
+            conditional=conditional,
+            y=y_array,
+            device=device,
+        )
+
+        was_training = self._decoder.training
+        self._decoder.eval()
+        with torch.no_grad():
+            samples = sampling_utils.decode_from_latents(
+                decoder=self._decoder,
+                latents=latents,
+                schema=self.schema,
+                norm_stats=self._norm_stats_per_col,
+            )
+        if was_training:
+            self._decoder.train()
+
+        if conditional and y_array is not None:
+            samples = samples.copy()
+            samples["condition"] = y_array
+        return samples
 
     # ------------------------------------------------------------------
     # Persistence helpers

@@ -17,6 +17,15 @@ class LikelihoodHead(nn.Module):
 
     param_dim: int
 
+    def sample_from_params(
+        self,
+        params: Tensor,
+        norm_stats: Mapping[str, float | Iterable[object]] | None,
+    ) -> Dict[str, Tensor]:
+        """Return samples drawn from the likelihood defined by ``params``."""
+
+        raise NotImplementedError
+
     def forward(
         self,
         x: Tensor,
@@ -60,6 +69,23 @@ class RealHead(LikelihoodHead):
             "sample": sample,
         }
 
+    def sample_from_params(
+        self,
+        params: Tensor,
+        norm_stats: Mapping[str, float | Iterable[object]] | None,
+    ) -> Dict[str, Tensor]:
+        mean_raw, var_raw = params.split(1, dim=-1)
+        var = F.softplus(var_raw) + distributions.EPS
+        mean_scale = float(norm_stats.get("mean", 0.0)) if norm_stats else 0.0
+        std_scale = float(norm_stats.get("std", 1.0)) if norm_stats else 1.0
+        params_out = {
+            "mean": mean_raw * std_scale + mean_scale,
+            "var": var * (std_scale**2),
+        }
+        sample = distributions.sample_gaussian(mean_raw, var)
+        sample = sample * std_scale + mean_scale
+        return {"params": params_out, "sample": sample}
+
 
 class CatHead(LikelihoodHead):
     """Categorical head producing logits for the discrete features."""
@@ -94,6 +120,20 @@ class CatHead(LikelihoodHead):
             "sample": sample_codes,
         }
 
+    def sample_from_params(
+        self,
+        params: Tensor,
+        norm_stats: Mapping[str, float | Iterable[object]] | None,
+    ) -> Dict[str, Tensor]:
+        logits = params
+        sample_onehot = distributions.sample_categorical(logits)
+        params_out = {
+            "logits": logits,
+            "probs": torch.softmax(logits, dim=-1),
+        }
+        sample_codes = sample_onehot.argmax(dim=-1)
+        return {"params": params_out, "sample": sample_codes}
+
 
 class PosHead(LikelihoodHead):
     """Placeholder for the positive (log-normal) likelihood head."""
@@ -101,6 +141,11 @@ class PosHead(LikelihoodHead):
     param_dim = 2
 
     def forward(self, *args, **kwargs):  # pragma: no cover - future work
+        raise NotImplementedError(
+            "Positive-valued head is not implemented in the warm-start release"
+        )
+
+    def sample_from_params(self, *args, **kwargs):  # pragma: no cover - future work
         raise NotImplementedError(
             "Positive-valued head is not implemented in the warm-start release"
         )
@@ -116,6 +161,11 @@ class CountHead(LikelihoodHead):
             "Count head is not implemented in the warm-start release"
         )
 
+    def sample_from_params(self, *args, **kwargs):  # pragma: no cover - future work
+        raise NotImplementedError(
+            "Count head is not implemented in the warm-start release"
+        )
+
 
 class OrdinalHead(LikelihoodHead):
     """Placeholder for the ordinal cumulative link head."""
@@ -125,6 +175,11 @@ class OrdinalHead(LikelihoodHead):
         self.param_dim = n_classes
 
     def forward(self, *args, **kwargs):  # pragma: no cover - future work
+        raise NotImplementedError(
+            "Ordinal head is not implemented in the warm-start release"
+        )
+
+    def sample_from_params(self, *args, **kwargs):  # pragma: no cover - future work
         raise NotImplementedError(
             "Ordinal head is not implemented in the warm-start release"
         )
@@ -221,3 +276,21 @@ class Decoder(nn.Module):
             "log_px": log_px_terms,
             "log_px_missing": log_px_missing_terms,
         }
+
+    def sample(
+        self,
+        latents: Tensor,
+        norm_stats: Mapping[str, Mapping[str, float | Iterable[object]]],
+    ) -> Dict[str, Dict[str, Tensor]]:
+        """Generate samples for every feature given ``latents``."""
+
+        hidden = self.backbone(latents)
+        samples: dict[str, Tensor] = {}
+        params: dict[str, Dict[str, Tensor]] = {}
+        for column, head in self.heads.items():
+            params_tensor = self.param_projections[column](hidden)
+            stats = norm_stats.get(column, {})
+            generated = head.sample_from_params(params_tensor, stats)
+            samples[column] = generated["sample"]
+            params[column] = generated["params"]
+        return {"samples": samples, "params": params}

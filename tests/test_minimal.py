@@ -65,3 +65,29 @@ def test_encode_returns_latent_means():
     assert latents.dtype == np.float32
     assert model._encoder is not None
     assert model._encoder.training == was_training
+
+
+def test_sample_decodes_latents_to_dataframe():
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, latent_dim=3, batch_size=2)
+    model.fit(X, y)
+    samples = model.sample(4)
+    assert isinstance(samples, pd.DataFrame)
+    assert list(samples.columns) == list(schema.feature_names)
+    assert samples.shape == (4, len(schema.feature_names))
+    assert samples["age"].dtype == np.float32
+    assert samples["gender"].dtype.name == "category"
+    assert not np.allclose(samples["age"].to_numpy(), 0.0)
+
+
+def test_conditional_sampling_appends_requested_labels():
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, latent_dim=3, batch_size=2)
+    model.fit(X, y)
+    requested = np.array([0, 1, 1, 0])
+    samples = model.sample(len(requested), conditional=True, y=requested)
+    assert "condition" in samples.columns
+    assert samples.shape[0] == len(requested)
+    assert np.array_equal(samples["condition"].to_numpy(), requested)
+    feature_columns = [col for col in samples.columns if col != "condition"]
+    assert feature_columns == list(schema.feature_names)
