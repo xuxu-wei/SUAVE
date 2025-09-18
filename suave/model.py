@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from pandas import CategoricalDtype
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module, Parameter
 from torch.distributions import Categorical
@@ -70,6 +71,18 @@ class SUAVE:
         Selects the feature set exposed by the estimator. Use ``"suave"`` to
         enable the extended classification stack or ``"hivae"`` to match the
         baseline HI-VAE behaviour (generative modelling only).
+    tau_start:
+        Initial temperature for the Gumbel-Softmax component sampler when
+        ``behaviour="hivae"``. Default is ``1.0`` to mirror the TensorFlow
+        reference implementation.
+    tau_min:
+        Minimum temperature reached after annealing when
+        ``behaviour="hivae"``. Default is ``1e-3`` which corresponds to the
+        evaluation phase of the original HI-VAE experiments.
+    tau_decay:
+        Linear decay applied to the temperature at each epoch when
+        ``behaviour="hivae"``. Default is ``0.01`` so that the temperature
+        reaches ``tau_min`` after roughly one hundred epochs.
 
     Examples
     --------
@@ -102,6 +115,9 @@ class SUAVE:
         stratify: bool = True,
         random_state: int = 0,
         behaviour: Literal["suave", "hivae"] = "suave",
+        tau_start: float = 1.0,
+        tau_min: float = 1e-3,
+        tau_decay: float = 0.01,
     ) -> None:
         self.schema = schema
         self.latent_dim = latent_dim
@@ -121,6 +137,24 @@ class SUAVE:
         if behaviour_normalised not in {"suave", "hivae"}:
             raise ValueError("behaviour must be either 'suave' or 'hivae'")
         self.behaviour = behaviour_normalised
+
+        self._tau_start: float | None = None
+        self._tau_min: float | None = None
+        self._tau_decay: float | None = None
+        self._inference_tau: float = 1.0
+        if self.behaviour == "hivae":
+            if tau_start <= 0.0:
+                raise ValueError("tau_start must be positive for HI-VAE mode")
+            if tau_min <= 0.0:
+                raise ValueError("tau_min must be positive for HI-VAE mode")
+            if tau_min > tau_start:
+                raise ValueError("tau_min cannot exceed tau_start")
+            if tau_decay < 0.0:
+                raise ValueError("tau_decay must be non-negative")
+            self._tau_start = float(tau_start)
+            self._tau_min = float(tau_min)
+            self._tau_decay = float(tau_decay)
+            self._inference_tau = float(tau_min)
 
         self._is_fitted = False
         self._is_calibrated = False
@@ -237,6 +271,19 @@ class SUAVE:
         if self._prior_component_logvar is None:
             raise RuntimeError("Prior log-variance is not initialised")
         return self._prior_component_logvar
+
+    def _gumbel_temperature_for_epoch(self, epoch: int) -> float:
+        """Return the annealed Gumbel-Softmax temperature for ``epoch``."""
+
+        if self.behaviour != "hivae" or self._tau_start is None:
+            return 1.0
+        tau_start = float(self._tau_start)
+        tau_min = float(self._tau_min) if self._tau_min is not None else tau_start
+        tau_decay = float(self._tau_decay) if self._tau_decay is not None else 0.0
+        temperature = tau_start - tau_decay * float(epoch)
+        if temperature < tau_min:
+            return tau_min
+        return temperature
 
     # ------------------------------------------------------------------
     # Training utilities
@@ -396,7 +443,11 @@ class SUAVE:
         warmup_steps = max(1, kl_warmup_epochs * n_batches)
         global_step = 0
         progress = tqdm(range(epochs), desc="Training", leave=False)
+        final_temperature = self._gumbel_temperature_for_epoch(0)
         for epoch in progress:
+            temperature = self._gumbel_temperature_for_epoch(epoch)
+            use_gumbel = self.behaviour == "hivae" and self._tau_start is not None
+            final_temperature = temperature
             permutation = torch.randperm(n_samples, device=device)
             epoch_loss = 0.0
             for start in range(0, n_samples, effective_batch):
@@ -420,7 +471,13 @@ class SUAVE:
                 component_logits, component_mu, component_logvar = self._encoder(
                     batch_input
                 )
-                posterior_probs = torch.softmax(component_logits, dim=-1)
+                component_probs = torch.softmax(component_logits, dim=-1)
+                if use_gumbel:
+                    posterior_weights = F.gumbel_softmax(
+                        component_logits, tau=temperature, hard=False, dim=-1
+                    )
+                else:
+                    posterior_weights = component_probs
                 z_samples = self._reparameterize(component_mu, component_logvar)
                 component_log_px: list[Tensor] = []
                 for component_idx in range(self.n_components):
@@ -446,12 +503,14 @@ class SUAVE:
                     posterior_probs,
                 )
                 total_kl = beta_scale * (categorical_kl + gaussian_kl)
-                weighted_recon = (posterior_probs * component_log_px_tensor).sum(dim=-1)
+                weighted_recon = (posterior_weights * component_log_px_tensor).sum(
+                    dim=-1
+                )
                 elbo_value = weighted_recon - total_kl
                 loss = -elbo_value.mean()
-                latent_for_classifier = (posterior_probs.unsqueeze(-1) * z_samples).sum(
-                    dim=1
-                )
+                latent_for_classifier = (
+                    posterior_weights.unsqueeze(-1) * z_samples
+                ).sum(dim=1)
                 if self._classifier is not None and y_train_tensor is not None:
                     logits = self._classifier(latent_for_classifier)
                     batch_targets = y_train_tensor[batch_indices]
@@ -466,6 +525,9 @@ class SUAVE:
 
             progress.set_postfix({"loss": epoch_loss / n_batches})
 
+        if self.behaviour == "hivae" and self._tau_start is not None:
+            self._inference_tau = float(final_temperature)
+
         with torch.no_grad():
             encoder_training_state = self._encoder.training
             self._encoder.eval()
@@ -479,6 +541,7 @@ class SUAVE:
                 component_logits_all,
                 component_mu_all,
                 component_logvar_all,
+                temperature=self._inference_tau if self.behaviour == "hivae" else None,
             )
         )
         self._train_latent_mu = posterior_mean.detach().cpu()
@@ -666,11 +729,18 @@ class SUAVE:
 
     @staticmethod
     def _mixture_posterior_statistics(
-        logits: Tensor, mu: Tensor, logvar: Tensor
+        logits: Tensor, mu: Tensor, logvar: Tensor, *, temperature: float | None = None
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Return mean, log-variance and component probabilities for a mixture."""
 
-        probs = torch.softmax(logits, dim=-1)
+        if temperature is not None:
+            if temperature <= 0.0:
+                raise ValueError("temperature must be positive")
+            scale = max(float(temperature), 1e-6)
+            scaled_logits = logits / scale
+        else:
+            scaled_logits = logits
+        probs = torch.softmax(scaled_logits, dim=-1)
         weighted_mu = (probs.unsqueeze(-1) * mu).sum(dim=1)
         second_moment = (probs.unsqueeze(-1) * (torch.exp(logvar) + mu.pow(2))).sum(
             dim=1
@@ -898,7 +968,10 @@ class SUAVE:
         with torch.no_grad():
             logits_enc, mu_enc, logvar_enc = self._encoder(encoder_inputs)
             posterior_mean, _, _ = self._mixture_posterior_statistics(
-                logits_enc, mu_enc, logvar_enc
+                logits_enc,
+                mu_enc,
+                logvar_enc,
+                temperature=self._inference_tau if self.behaviour == "hivae" else None,
             )
             logits_tensor = self._classifier(posterior_mean)
         if was_encoder_training:
@@ -1007,7 +1080,10 @@ class SUAVE:
             self._decoder.eval()
             logits_enc, mu_enc, logvar_enc = self._encoder(encoder_inputs)
             posterior_mean, _, _ = self._mixture_posterior_statistics(
-                logits_enc, mu_enc, logvar_enc
+                logits_enc,
+                mu_enc,
+                logvar_enc,
+                temperature=self._inference_tau if self.behaviour == "hivae" else None,
             )
             decoder_out = self._decoder(
                 posterior_mean, data_tensors, self._norm_stats_per_col, mask_tensors
@@ -1060,7 +1136,10 @@ class SUAVE:
         if was_training:
             self._encoder.train()
         posterior_mean, posterior_logvar, _ = self._mixture_posterior_statistics(
-            logits_enc, mu_enc, logvar_enc
+            logits_enc,
+            mu_enc,
+            logvar_enc,
+            temperature=self._inference_tau if self.behaviour == "hivae" else None,
         )
         return posterior_mean, posterior_logvar
 
@@ -1172,7 +1251,12 @@ class SUAVE:
                 batch_inputs = encoder_inputs[start:end]
                 logits_enc, mu_enc, logvar_enc = self._encoder(batch_inputs)
                 posterior_mean, _, _ = self._mixture_posterior_statistics(
-                    logits_enc, mu_enc, logvar_enc
+                    logits_enc,
+                    mu_enc,
+                    logvar_enc,
+                    temperature=(
+                        self._inference_tau if self.behaviour == "hivae" else None
+                    ),
                 )
                 latent_batches.append(posterior_mean.cpu())
         if was_training:
@@ -1280,6 +1364,10 @@ class SUAVE:
             "val_split": self.val_split,
             "stratify": self.stratify,
             "random_state": self.random_state,
+            "tau_start": self._tau_start,
+            "tau_min": self._tau_min,
+            "tau_decay": self._tau_decay,
+            "inference_tau": self._inference_tau,
         }
         classifier_state: dict[str, Any] | None = None
         if self._classifier is not None:
@@ -1374,13 +1462,22 @@ class SUAVE:
             "val_split",
             "stratify",
             "random_state",
+            "tau_start",
+            "tau_min",
+            "tau_decay",
         ):
             if key in metadata and metadata[key] is not None:
                 value = metadata[key]
                 if key == "hidden_dims":
                     value = tuple(int(v) for v in value)
+                elif key in {"tau_start", "tau_min", "tau_decay"}:
+                    value = float(value)
                 init_kwargs[key] = value
         model = cls(schema=schema, behaviour=behaviour, **init_kwargs)
+
+        inference_tau = metadata.get("inference_tau")
+        if inference_tau is not None:
+            model._inference_tau = float(inference_tau)
 
         model._norm_stats_per_col = artefacts.get("normalization", {})
         feature_layout = artefacts.get("feature_layout") or model._feature_layout
