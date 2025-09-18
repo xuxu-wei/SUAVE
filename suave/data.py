@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, Tuple
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -174,11 +176,24 @@ def standardize(
             continue
         spec = schema[column]
         n_classes = int(spec.n_classes or 0)
-        series = pd.to_numeric(transformed[column], errors="coerce")
-        if not series.dropna().between(0, n_classes - 1).all():
-            raise ValueError(
-                f"Column '{column}' must contain values in [0, {n_classes - 1}]"
+        original = transformed[column]
+        series = pd.to_numeric(original, errors="coerce")
+        invalid_coercion = original.notna() & series.isna()
+        out_of_range = series.notna() & ~series.between(0, n_classes - 1)
+        if invalid_coercion.any() or out_of_range.any():
+            range_text = (
+                f"[0, {n_classes - 1}]" if n_classes else "the configured ordinal range"
             )
+            warnings.warn(
+                (
+                    f"Column '{column}' contains ordinal values outside {range_text} "
+                    "or non-numeric entries; they will be treated as missing."
+                ),
+                UserWarning,
+                stacklevel=2,
+            )
+            series[invalid_coercion] = np.nan
+            series[out_of_range] = np.nan
         categories: Iterable[object]
         if isinstance(transformed[column].dtype, pd.CategoricalDtype):
             categories = transformed[column].cat.categories.tolist()

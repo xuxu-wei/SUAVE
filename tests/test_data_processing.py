@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from suave.data import inverse_standardize, standardize
 from suave.types import Schema
@@ -45,3 +46,15 @@ def test_standardize_inverse_handles_mixed_types():
         list(restored["ordinal"].astype(float))
         == frame["ordinal"].astype(float).tolist()
     )
+
+
+def test_standardize_marks_invalid_ordinal_as_missing():
+    schema = Schema({"ordinal": {"type": "ordinal", "n_classes": 3}})
+    frame = pd.DataFrame({"ordinal": [0, "bad", 4]})
+
+    with pytest.warns(UserWarning):
+        transformed, _ = standardize(frame, schema)
+
+    assert transformed.loc[0, "ordinal"] == 0
+    assert pd.isna(transformed.loc[1, "ordinal"])
+    assert pd.isna(transformed.loc[2, "ordinal"])
