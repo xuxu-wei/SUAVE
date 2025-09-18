@@ -67,6 +67,28 @@ def test_encode_returns_latent_means():
     assert model._encoder.training == was_training
 
 
+def test_hivae_behaviour_disables_classifier():
+    X, _, schema = make_dataset()
+    model = SUAVE(schema=schema, behaviour="hivae")
+    model.fit(X, epochs=1)
+    latent = model.encode(X)
+    assert latent.shape[0] == len(X)
+    with pytest.raises(RuntimeError):
+        model.predict_proba(X)
+
+
+def test_hivae_behaviour_persists_after_save(tmp_path: Path):
+    X, _, schema = make_dataset()
+    model = SUAVE(schema=schema, behaviour="hivae")
+    model.fit(X, epochs=1)
+    save_path = tmp_path / "model.json"
+    model.save(save_path)
+    loaded = SUAVE.load(save_path)
+    assert loaded.behaviour == "hivae"
+    with pytest.raises(RuntimeError):
+        loaded.predict_proba(X)
+
+
 def test_sample_decodes_latents_to_dataframe():
     X, y, schema = make_dataset()
     model = SUAVE(schema=schema, latent_dim=3, batch_size=2)

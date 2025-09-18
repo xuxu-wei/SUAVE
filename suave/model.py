@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -57,6 +57,10 @@ class SUAVE:
         Whether to preserve class balance when creating the validation split.
     random_state:
         Seed controlling deterministic behaviour in helper utilities.
+    behaviour:
+        Selects the feature set exposed by the estimator. Use ``"suave"`` to
+        enable the extended classification stack or ``"hivae"`` to match the
+        baseline HI-VAE behaviour (generative modelling only).
 
     Examples
     --------
@@ -89,6 +93,7 @@ class SUAVE:
         val_split: float = 0.2,
         stratify: bool = True,
         random_state: int = 0,
+        behaviour: Literal["suave", "hivae"] = "suave",
     ) -> None:
         self.schema = schema
         self.latent_dim = latent_dim
@@ -101,6 +106,10 @@ class SUAVE:
         self.val_split = val_split
         self.stratify = stratify
         self.random_state = random_state
+        behaviour_normalised = behaviour.lower()
+        if behaviour_normalised not in {"suave", "hivae"}:
+            raise ValueError("behaviour must be either 'suave' or 'hivae'")
+        self.behaviour = behaviour_normalised
 
         self._is_fitted = False
         self._is_calibrated = False
@@ -123,7 +132,7 @@ class SUAVE:
     def fit(
         self,
         X: pd.DataFrame,
-        y: pd.Series | pd.DataFrame | np.ndarray,
+        y: Optional[pd.Series | pd.DataFrame | np.ndarray] = None,
         *,
         schema: Optional[Schema] = None,
         epochs: int = 1,
@@ -137,7 +146,9 @@ class SUAVE:
         X:
             Training features with shape ``(n_samples, n_features)``.
         y:
-            Training targets with shape ``(n_samples,)``.
+            Training targets with shape ``(n_samples,)``. Optional when
+            ``behaviour="hivae"`` because the baseline HI-VAE objective does not
+            consume labels.
         schema:
             Optional schema overriding the instance-level schema.
         epochs:
@@ -176,9 +187,19 @@ class SUAVE:
                 "Enable positive/count/ordinal heads in a future release."
             )
 
+        if self.behaviour == "suave" and y is None:
+            raise ValueError("Targets must be provided when behaviour='suave'")
+
         LOGGER.info("Starting fit: n_samples=%s, n_features=%s", len(X), X.shape[1])
+        stratify_split = self.stratify and self.behaviour == "suave" and y is not None
+        split_targets = y
+        if split_targets is None:
+            split_targets = np.zeros(len(X), dtype=np.int64)
         X_train, X_val, y_train, y_val = data_utils.split_train_val(
-            X, y, val_split=self.val_split, stratify=self.stratify
+            X,
+            split_targets,
+            val_split=self.val_split,
+            stratify=stratify_split,
         )
         LOGGER.info("Train/val split: %s/%s", len(X_train), len(X_val))
 
@@ -191,21 +212,28 @@ class SUAVE:
         self._norm_stats_per_col = stats
         _ = data_utils.standardize(X_val, self.schema)
 
-        y_train_array = np.asarray(y_train)
-        self._classes = np.unique(y_train_array)
-        if self._classes.size == 0:
-            raise ValueError("Training targets must contain at least one class")
-        self._class_to_index = {
-            cls: idx for idx, cls in enumerate(self._classes.tolist())
-        }
-        train_target_indices = self._map_targets_to_indices(y_train_array)
-        class_counts = np.bincount(
-            train_target_indices, minlength=self._classes.size
-        ).astype(np.float32)
-        total_count = float(class_counts.sum())
-        if total_count <= 0:
-            raise ValueError("Training targets must contain at least one class")
-        class_weights = total_count / (len(class_counts) * class_counts)
+        class_weights: np.ndarray | None = None
+        y_train_tensor: Tensor | None = None
+        if self.behaviour == "suave":
+            y_train_array = np.asarray(y_train)
+            self._classes = np.unique(y_train_array)
+            if self._classes.size == 0:
+                raise ValueError("Training targets must contain at least one class")
+            self._class_to_index = {
+                cls: idx for idx, cls in enumerate(self._classes.tolist())
+            }
+            train_target_indices = self._map_targets_to_indices(y_train_array)
+            class_counts = np.bincount(
+                train_target_indices, minlength=self._classes.size
+            ).astype(np.float32)
+            total_count = float(class_counts.sum())
+            if total_count <= 0:
+                raise ValueError("Training targets must contain at least one class")
+            class_weights = total_count / (len(class_counts) * class_counts)
+            y_train_tensor = torch.from_numpy(train_target_indices.astype(np.int64))
+        else:
+            self._classes = None
+            self._class_to_index = None
 
         batch_size = batch_size or self.batch_size
         kl_warmup_epochs = kl_warmup_epochs or self.kl_warmup_epochs
@@ -235,21 +263,22 @@ class SUAVE:
             hidden=self.hidden_dims,
             dropout=self.dropout,
         ).to(device)
-        self._classifier = ClassificationHead(
-            self.latent_dim,
-            self._classes.size,
-            class_weight=class_weights,
-        ).to(device)
-        parameters = (
-            list(self._encoder.parameters())
-            + list(self._decoder.parameters())
-            + list(self._classifier.parameters())
-        )
+        if self.behaviour == "suave":
+            assert self._classes is not None
+            self._classifier = ClassificationHead(
+                self.latent_dim,
+                self._classes.size,
+                class_weight=class_weights,
+            ).to(device)
+        else:
+            self._classifier = None
+        parameters = list(self._encoder.parameters()) + list(self._decoder.parameters())
+        if self._classifier is not None:
+            parameters.extend(self._classifier.parameters())
         optimizer = Adam(parameters, lr=self.learning_rate)
 
-        y_train_tensor = torch.from_numpy(train_target_indices.astype(np.int64)).to(
-            device
-        )
+        if y_train_tensor is not None:
+            y_train_tensor = y_train_tensor.to(device)
 
         n_samples = encoder_inputs.size(0)
         effective_batch = min(batch_size, n_samples)
@@ -289,10 +318,12 @@ class SUAVE:
                 beta_scale = losses.kl_warmup(global_step, warmup_steps, self.beta)
                 kl = losses.kl_normal(mu_z, logvar_z) * beta_scale
                 elbo_value = losses.elbo(recon_terms, kl)
-                logits = self._classifier(z)
-                batch_targets = y_train_tensor[batch_indices]
-                classification_loss = self._classifier.loss(logits, batch_targets)
-                loss = -elbo_value.mean() + classification_loss
+                loss = -elbo_value.mean()
+                if self._classifier is not None and y_train_tensor is not None:
+                    logits = self._classifier(z)
+                    batch_targets = y_train_tensor[batch_indices]
+                    classification_loss = self._classifier.loss(logits, batch_targets)
+                    loss = loss + classification_loss
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -457,9 +488,19 @@ class SUAVE:
             indices.append(self._class_to_index[value])
         return np.asarray(indices, dtype=np.int64)
 
+    def _ensure_classifier_available(self, caller: str) -> None:
+        """Raise an informative error if classifier-dependent APIs are used."""
+
+        if self.behaviour == "hivae":
+            raise RuntimeError(
+                f"{caller} is unavailable when behaviour='hivae'; this mode matches "
+                "the baseline HI-VAE and does not expose classifier outputs."
+            )
+
     def _compute_logits(self, X: pd.DataFrame) -> np.ndarray:
         """Run the classifier head on ``X`` and cache the logits."""
 
+        self._ensure_classifier_available("Logit computation")
         if not self._is_fitted or self._encoder is None or self._classifier is None:
             raise RuntimeError("Model must be fitted before computing logits")
         device = self._select_device()
@@ -531,6 +572,7 @@ class SUAVE:
         array([1., 1.])
         """
 
+        self._ensure_classifier_available("predict_proba")
         if not self._is_fitted or self._classes is None:
             raise RuntimeError("Model must be fitted before calling predict_proba")
         logits = self._compute_logits(X)
@@ -543,6 +585,7 @@ class SUAVE:
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """Return the most likely class for each sample."""
 
+        self._ensure_classifier_available("predict")
         probabilities = self.predict_proba(X)
         indices = probabilities.argmax(axis=1)
         return self._classes[indices]
@@ -553,6 +596,7 @@ class SUAVE:
     def calibrate(self, X: pd.DataFrame, y: pd.Series | np.ndarray) -> "SUAVE":
         """Fit the temperature scaler using logits from ``X``."""
 
+        self._ensure_classifier_available("calibrate")
         if not self._is_fitted or self._classes is None:
             raise RuntimeError("Fit must be called before calibrate")
         if len(X) != len(y):
@@ -722,6 +766,7 @@ class SUAVE:
             "classes": self._classes.tolist() if self._classes is not None else None,
             "normalization": self._norm_stats_per_col,
             "temperature_scaler": self._temperature_scaler_state,
+            "behaviour": self.behaviour,
         }
         path.write_text(json.dumps(state))
         return path
@@ -733,7 +778,8 @@ class SUAVE:
         data = json.loads(Path(path).read_text())
         schema_dict = data.get("schema") or {}
         schema = Schema(schema_dict) if schema_dict else None
-        model = cls(schema=schema)
+        behaviour = data.get("behaviour", "suave")
+        model = cls(schema=schema, behaviour=behaviour)
         classes = data.get("classes")
         if classes is not None:
             model._classes = np.array(classes)
