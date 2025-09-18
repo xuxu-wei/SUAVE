@@ -105,6 +105,7 @@ class SUAVE:
         self._classes: np.ndarray | None = None
         self._norm_stats_per_col: dict[str, dict[str, float | list[str]]] = {}
         self._temperature_scaler = TemperatureScaler()
+        self._temperature_scaler_state: dict[str, float | bool] | None = None
         self._device: torch.device | None = None
         self._encoder: EncoderMLP | None = None
         self._decoder: Decoder | None = None
@@ -112,6 +113,7 @@ class SUAVE:
         self._feature_layout: dict[str, dict[str, int]] = {"real": {}, "cat": {}}
         self._class_to_index: dict[object, int] | None = None
         self._cached_logits: np.ndarray | None = None
+        self._cached_probabilities: np.ndarray | None = None
 
     # ------------------------------------------------------------------
     # Training utilities
@@ -301,7 +303,9 @@ class SUAVE:
         self._is_fitted = True
         self._is_calibrated = False
         self._temperature_scaler = TemperatureScaler()
+        self._temperature_scaler_state = None
         self._cached_logits = None
+        self._cached_probabilities = None
         LOGGER.info("Fit complete")
         return self
 
@@ -473,6 +477,19 @@ class SUAVE:
         self._cached_logits = logits
         return logits
 
+    @staticmethod
+    def _logits_to_probabilities(logits: np.ndarray) -> np.ndarray:
+        """Convert logits to probabilities with numerical stability."""
+
+        logits = np.asarray(logits, dtype=np.float32)
+        if logits.ndim != 2:
+            raise ValueError("logits must be a 2D array")
+        stabilised = logits - logits.max(axis=1, keepdims=True)
+        probabilities = np.exp(stabilised)
+        normaliser = probabilities.sum(axis=1, keepdims=True)
+        normaliser[normaliser == 0.0] = 1.0
+        return probabilities / normaliser
+
     def _infer_latent_statistics(self, X: pd.DataFrame) -> tuple[Tensor, Tensor]:
         """Return posterior parameters for ``X`` using the trained encoder."""
 
@@ -516,12 +533,9 @@ class SUAVE:
             raise RuntimeError("Model must be fitted before calling predict_proba")
         logits = self._compute_logits(X)
         if self._is_calibrated:
-            logits = self._temperature_scaler(logits)
-        logits = logits - logits.max(axis=1, keepdims=True)
-        probabilities = np.exp(logits)
-        normaliser = probabilities.sum(axis=1, keepdims=True)
-        normaliser[normaliser == 0.0] = 1.0
-        probabilities /= normaliser
+            logits = self._temperature_scaler.transform(logits)
+        probabilities = self._logits_to_probabilities(logits)
+        self._cached_probabilities = probabilities
         return probabilities
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -542,9 +556,12 @@ class SUAVE:
         if len(X) != len(y):
             raise ValueError("X and y must have matching first dimensions")
         logits = self._compute_logits(X)
+        probabilities = self._logits_to_probabilities(logits)
         target_indices = self._map_targets_to_indices(y)
         self._temperature_scaler.fit(logits, target_indices)
+        self._temperature_scaler_state = self._temperature_scaler.state_dict()
         self._is_calibrated = True
+        self._cached_probabilities = probabilities
         return self
 
     # ------------------------------------------------------------------
@@ -579,6 +596,7 @@ class SUAVE:
             "schema": self.schema.to_dict() if self.schema else None,
             "classes": self._classes.tolist() if self._classes is not None else None,
             "normalization": self._norm_stats_per_col,
+            "temperature_scaler": self._temperature_scaler_state,
         }
         path.write_text(json.dumps(state))
         return path
@@ -596,6 +614,11 @@ class SUAVE:
             model._classes = np.array(classes)
             model._is_fitted = True
         model._norm_stats_per_col = data.get("normalization", {})
+        scaler_state = data.get("temperature_scaler")
+        if scaler_state:
+            model._temperature_scaler_state = scaler_state
+            model._temperature_scaler.load_state_dict(scaler_state)
+            model._is_calibrated = True
         return model
 
     # ------------------------------------------------------------------
