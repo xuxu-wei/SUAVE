@@ -540,7 +540,9 @@ class SUAVE:
         if targets is None:
             raise ValueError("Targets must be provided when conditional=True")
         if self._train_latent_mu is None or self._train_latent_logvar is None:
-            raise RuntimeError("Latent posterior statistics are unavailable for sampling")
+            raise RuntimeError(
+                "Latent posterior statistics are unavailable for sampling"
+            )
         if self._class_to_index is None or self._train_target_indices is None:
             raise RuntimeError(
                 "Conditional sampling requires supervised targets from the training data"
@@ -548,7 +550,9 @@ class SUAVE:
 
         target_array = np.asarray(targets).reshape(-1)
         if target_array.shape[0] != n_samples:
-            raise ValueError("y must have length equal to n_samples when conditional=True")
+            raise ValueError(
+                "y must have length equal to n_samples when conditional=True"
+            )
 
         latents = torch.zeros((n_samples, self.latent_dim), device=device)
         rng = np.random.default_rng()

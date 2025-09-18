@@ -37,7 +37,9 @@ def build_placeholder_batches(
             else:
                 shape = (n_samples, int(width))
             data_tensors[feature_type][column] = torch.zeros(shape, device=device)
-            mask_tensors[feature_type][column] = torch.ones((n_samples, 1), device=device)
+            mask_tensors[feature_type][column] = torch.ones(
+                (n_samples, 1), device=device
+            )
     return data_tensors, mask_tensors
 
 
