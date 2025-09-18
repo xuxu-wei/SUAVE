@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import warnings
 from pathlib import Path
 from typing import Dict, Iterable, Literal, Optional, Tuple
 
@@ -201,6 +202,7 @@ class SUAVE:
         )
 
         X_train_std, stats = data_utils.standardize(X_train, self.schema)
+        missing_mask = missing_mask | X_train_std.isna()
         self._norm_stats_per_col = stats
         _ = data_utils.standardize(X_val, self.schema)
 
@@ -546,7 +548,8 @@ class SUAVE:
                 normalised[column] = normalised[column].astype("category")
         for column in self.schema.ordinal_features:
             stats = self._norm_stats_per_col.get(column, {})
-            series = pd.to_numeric(normalised[column], errors="coerce")
+            original = normalised[column]
+            series = pd.to_numeric(original, errors="coerce")
             n_classes = int(
                 stats.get(
                     "n_classes",
@@ -558,10 +561,26 @@ class SUAVE:
                 )
             )
             if n_classes:
-                if not series.dropna().between(0, n_classes - 1).all():
-                    raise ValueError(
-                        f"Column '{column}' must contain values in [0, {n_classes - 1}]"
-                    )
+                out_of_range = series.notna() & ~series.between(0, n_classes - 1)
+            else:
+                out_of_range = pd.Series(False, index=series.index)
+            invalid_coercion = original.notna() & series.isna()
+            if invalid_coercion.any() or out_of_range.any():
+                range_text = (
+                    f"[0, {n_classes - 1}]"
+                    if n_classes
+                    else "the configured ordinal range"
+                )
+                warnings.warn(
+                    (
+                        f"Column '{column}' contains ordinal values outside {range_text} "
+                        "or non-numeric entries; they will be treated as missing."
+                    ),
+                    UserWarning,
+                    stacklevel=2,
+                )
+                series[invalid_coercion] = np.nan
+                series[out_of_range] = np.nan
             normalised[column] = series
         return normalised
 
@@ -573,6 +592,7 @@ class SUAVE:
         aligned = X.reset_index(drop=True)
         mask = data_utils.build_missing_mask(aligned)
         normalised = self._apply_training_normalization(aligned)
+        mask = mask | normalised.isna()
         encoder_inputs, _, _ = self._prepare_training_tensors(
             normalised, mask, update_layout=False
         )
