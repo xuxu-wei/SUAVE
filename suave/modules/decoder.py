@@ -41,15 +41,22 @@ class RealHead(LikelihoodHead):
     ) -> Dict[str, Tensor]:
         mean_raw, var_raw = params.split(1, dim=-1)
         var = F.softplus(var_raw) + distributions.EPS
-        log_px = -distributions.nll_gaussian(x, mean_raw, var, mask)
-        mask_missing = None if mask is None else 1.0 - mask
-        log_px_missing = -distributions.nll_gaussian(x, mean_raw, var, mask_missing)
 
         mean_scale = float(norm_stats.get("mean", 0.0)) if norm_stats else 0.0
         std_scale = float(norm_stats.get("std", 1.0)) if norm_stats else 1.0
+        mean = mean_raw * std_scale + mean_scale
+        var_scaled = var * (std_scale**2)
+
+        x_raw = x * std_scale + mean_scale
+        log_px = -distributions.nll_gaussian(x_raw, mean, var_scaled, mask)
+        mask_missing = None if mask is None else 1.0 - mask
+        log_px_missing = -distributions.nll_gaussian(
+            x_raw, mean, var_scaled, mask_missing
+        )
+
         params_out = {
-            "mean": mean_raw * std_scale + mean_scale,
-            "var": var * (std_scale**2),
+            "mean": mean,
+            "var": var_scaled,
         }
         sample = distributions.sample_gaussian(mean_raw, var)
         sample = sample * std_scale + mean_scale
@@ -96,38 +103,111 @@ class CatHead(LikelihoodHead):
 
 
 class PosHead(LikelihoodHead):
-    """Placeholder for the positive (log-normal) likelihood head."""
+    """Log-normal reconstruction head for strictly positive features."""
 
     param_dim = 2
 
-    def forward(self, *args, **kwargs):  # pragma: no cover - future work
-        raise NotImplementedError(
-            "Positive-valued head is not implemented in the warm-start release"
+    def forward(
+        self,
+        x: Tensor,
+        params: Tensor,
+        norm_stats: Mapping[str, float | Iterable[object]] | None,
+        mask: Tensor | None,
+    ) -> Dict[str, Tensor]:
+        mean_raw, var_raw = params.split(1, dim=-1)
+        var = F.softplus(var_raw) + distributions.EPS
+        mean_log = float(norm_stats.get("mean_log", 0.0)) if norm_stats else 0.0
+        std_log = float(norm_stats.get("std_log", 1.0)) if norm_stats else 1.0
+
+        log_x = x * std_log + mean_log
+        mean = mean_raw * std_log + mean_log
+        var_scaled = var * (std_log**2)
+
+        log_px = -distributions.nll_lognormal(log_x, mean, var_scaled, mask)
+        mask_missing = None if mask is None else 1.0 - mask
+        log_px_missing = -distributions.nll_lognormal(
+            log_x, mean, var_scaled, mask_missing
         )
+
+        params_out = {
+            "mean_log": mean,
+            "var_log": var_scaled,
+            "mean": torch.exp(mean + 0.5 * torch.clamp(var_scaled, min=0.0)) - 1.0,
+        }
+        sample = distributions.sample_lognormal(mean, var_scaled)
+        return {
+            "log_px": log_px,
+            "log_px_missing": log_px_missing,
+            "params": params_out,
+            "sample": sample,
+        }
 
 
 class CountHead(LikelihoodHead):
-    """Placeholder for the count (Poisson) likelihood head."""
+    """Poisson reconstruction head for count-valued features."""
 
     param_dim = 1
 
-    def forward(self, *args, **kwargs):  # pragma: no cover - future work
-        raise NotImplementedError(
-            "Count head is not implemented in the warm-start release"
-        )
+    def forward(
+        self,
+        x: Tensor,
+        params: Tensor,
+        norm_stats: Mapping[str, float | Iterable[object]] | None,
+        mask: Tensor | None,
+    ) -> Dict[str, Tensor]:
+        rate_raw = params
+        rate = F.softplus(rate_raw) + distributions.EPS
+        offset = float(norm_stats.get("offset", 0.0)) if norm_stats else 0.0
+        counts = torch.exp(x) - offset
+        counts = torch.clamp(counts, min=0.0)
+        log_px = -distributions.nll_poisson(counts, rate, mask)
+        mask_missing = None if mask is None else 1.0 - mask
+        log_px_missing = -distributions.nll_poisson(counts, rate, mask_missing)
+        sample = distributions.sample_poisson(rate)
+        params_out = {"rate": rate}
+        return {
+            "log_px": log_px,
+            "log_px_missing": log_px_missing,
+            "params": params_out,
+            "sample": sample,
+        }
 
 
 class OrdinalHead(LikelihoodHead):
-    """Placeholder for the ordinal cumulative link head."""
+    """Cumulative link reconstruction head for ordinal features."""
 
     def __init__(self, n_classes: int) -> None:
         super().__init__()
+        if n_classes <= 1:
+            raise ValueError("Ordinal features require at least two classes")
+        self.n_classes = n_classes
         self.param_dim = n_classes
 
-    def forward(self, *args, **kwargs):  # pragma: no cover - future work
-        raise NotImplementedError(
-            "Ordinal head is not implemented in the warm-start release"
-        )
+    def forward(
+        self,
+        x: Tensor,
+        params: Tensor,
+        norm_stats: Mapping[str, float | Iterable[object]] | None,
+        mask: Tensor | None,
+    ) -> Dict[str, Tensor]:
+        n_thresholds = self.n_classes - 1
+        partition, mean_param = params.split([n_thresholds, 1], dim=-1)
+        probs, thresholds = distributions.ordinal_probabilities(partition, mean_param)
+        thermometer = x
+        levels = torch.round(thermometer.sum(dim=-1)).long()
+        targets = torch.clamp(levels - 1, min=0)
+        mask_vector = None if mask is None else mask.squeeze(-1)
+        log_px = -distributions.nll_ordinal(probs, targets, mask_vector)
+        mask_missing = None if mask_vector is None else 1.0 - mask_vector
+        log_px_missing = -distributions.nll_ordinal(probs, targets, mask_missing)
+        samples = distributions.sample_ordinal(probs)
+        params_out = {"probs": probs, "thresholds": thresholds, "mean": mean_param}
+        return {
+            "log_px": log_px,
+            "log_px_missing": log_px_missing,
+            "params": params_out,
+            "sample": samples,
+        }
 
 
 class Decoder(nn.Module):
@@ -197,9 +277,18 @@ class Decoder(nn.Module):
             if feature_type == "real":
                 x = data["real"][column]
                 mask = masks["real"][column]
+            elif feature_type == "pos":
+                x = data["pos"][column]
+                mask = masks["pos"][column]
+            elif feature_type == "count":
+                x = data["count"][column]
+                mask = masks["count"][column]
             elif feature_type == "cat":
                 x = data["cat"][column]
                 mask = masks["cat"][column]
+            elif feature_type == "ordinal":
+                x = data["ordinal"][column]
+                mask = masks["ordinal"][column]
             else:
                 # Heads for the unsupported types are placeholders; the forward
                 # pass should never reach this branch in the current release.
