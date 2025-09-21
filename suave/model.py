@@ -1584,6 +1584,7 @@ class SUAVE:
         prior_state: dict[str, Any] = {
             "logits": self._prior_component_logits_tensor().detach().cpu(),
             "logvar": self._prior_component_logvar_tensor().detach().cpu(),
+            "mu": self._prior_component_means_tensor().detach().cpu(),
         }
         if self.behaviour == "hivae":
             if self._prior_mean_layer is None:
@@ -1591,8 +1592,6 @@ class SUAVE:
             prior_state["mean_state_dict"] = self._state_dict_to_cpu(
                 self._prior_mean_layer
             )
-        else:
-            prior_state["mu"] = self._prior_component_means_tensor().detach().cpu()
         modules = {
             "encoder": self._state_dict_to_cpu(self._encoder),
             "decoder": self._state_dict_to_cpu(self._decoder),
@@ -1634,8 +1633,12 @@ class SUAVE:
             payload = torch.load(path, map_location="cpu")
         except (RuntimeError, pickle.UnpicklingError, EOFError):
             payload = None
-        if isinstance(payload, dict) and "metadata" in payload:
-            return cls._load_from_payload(payload)
+        if isinstance(payload, dict):
+            if "metadata" in payload:
+                return cls._load_from_payload(payload)
+            legacy_keys = {"schema", "prior", "behaviour", "classes", "artefacts", "modules"}
+            if legacy_keys.intersection(payload.keys()):
+                return cls._load_from_legacy_json(payload)
         if payload is not None:
             raise ValueError("Unexpected model archive format")
         data = json.loads(path.read_text())
@@ -1851,71 +1854,174 @@ class SUAVE:
     def _load_from_legacy_json(cls, data: dict[str, Any]) -> "SUAVE":
         """Fallback loader for the legacy JSON serialisation format."""
 
-        schema_dict = data.get("schema") or {}
-        schema = Schema(schema_dict) if schema_dict else None
-        behaviour = data.get("behaviour", "suave")
-        prior_state = data.get("prior") or {}
-        latent_dim = data.get("latent_dim")
-        n_components = data.get("n_components")
-        mu_state = prior_state.get("mu")
-        if n_components is None and isinstance(mu_state, list) and mu_state:
-            n_components = len(mu_state)
-        if latent_dim is None and isinstance(mu_state, list) and mu_state:
-            first_row = mu_state[0]
-            if isinstance(first_row, list):
-                latent_dim = len(first_row)
-        init_kwargs: dict[str, object] = {}
-        if latent_dim is not None:
-            init_kwargs["latent_dim"] = int(latent_dim)
-        if n_components is not None:
-            init_kwargs["n_components"] = int(n_components)
-        model = cls(schema=schema, behaviour=behaviour, **init_kwargs)
-        classes = data.get("classes")
-        if classes is not None:
-            model._classes = np.array(classes)
-            model._is_fitted = True
-        model._norm_stats_per_col = data.get("normalization", {})
-        scaler_state = data.get("temperature_scaler")
-        if scaler_state:
-            model._temperature_scaler_state = scaler_state
-            model._temperature_scaler.load_state_dict(scaler_state)
-            model._is_calibrated = True
-        if prior_state:
-            logits_state = prior_state.get("logits")
-            mu_state = prior_state.get("mu")
-            logvar_state = prior_state.get("logvar")
-            if logits_state is not None:
-                logits_tensor = torch.tensor(logits_state, dtype=torch.float32)
-                logits_param = model._prior_component_logits_tensor()
-                if logits_tensor.shape != logits_param.shape:
-                    raise ValueError(
-                        "Saved prior logits do not match the model configuration"
-                    )
-                with torch.no_grad():
-                    logits_param.copy_(logits_tensor)
-            if logvar_state is not None:
-                logvar_tensor = torch.tensor(logvar_state, dtype=torch.float32)
-                logvar_param = model._prior_component_logvar_tensor()
-                if logvar_tensor.shape != logvar_param.shape:
-                    raise ValueError(
-                        "Saved prior log-variances do not match the model configuration"
-                    )
-                with torch.no_grad():
-                    logvar_param.copy_(logvar_tensor)
-            if mu_state is not None:
-                mu_tensor = torch.tensor(mu_state, dtype=torch.float32)
-                if model.behaviour == "hivae":
-                    if model._prior_mean_layer is None:
-                        raise RuntimeError("Prior mean layer is not initialised")
-                    model._prior_mean_layer.load_component_means(mu_tensor)
-                elif model._prior_component_mu is not None:
-                    if mu_tensor.shape != model._prior_component_mu.shape:
-                        raise ValueError(
-                            "Saved prior means do not match the model configuration"
-                        )
-                    with torch.no_grad():
-                        model._prior_component_mu.copy_(mu_tensor)
-        return model
+        if not isinstance(data, dict):
+            raise TypeError("Legacy payload must be a mapping")
+
+        metadata = dict(data.get("metadata") or {})
+        top_level_metadata_keys = {
+            "schema",
+            "behaviour",
+            "latent_dim",
+            "n_components",
+            "hidden_dims",
+            "dropout",
+            "learning_rate",
+            "batch_size",
+            "kl_warmup_epochs",
+            "val_split",
+            "stratify",
+            "random_state",
+            "tau_start",
+            "tau_min",
+            "tau_decay",
+            "inference_tau",
+        }
+        for key in top_level_metadata_keys:
+            if key not in metadata and key in data:
+                metadata[key] = data[key]
+        metadata.setdefault("schema", data.get("schema"))
+        behaviour_value = metadata.get("behaviour", data.get("behaviour", "suave"))
+        metadata["behaviour"] = str(behaviour_value)
+
+        prior_payload = data.get("prior") or data.get("modules", {}).get("prior")
+        inferred_latent_dim: int | None = None
+        inferred_components: int | None = None
+        if isinstance(prior_payload, dict):
+            mu_value = prior_payload.get("mu")
+            if mu_value is not None:
+                mu_tensor: Tensor | None
+                if isinstance(mu_value, Tensor):
+                    mu_tensor = mu_value
+                else:
+                    try:
+                        mu_tensor = torch.as_tensor(mu_value)
+                    except (TypeError, ValueError):
+                        mu_tensor = None
+                if mu_tensor is not None and mu_tensor.ndim > 0:
+                    if mu_tensor.ndim == 1:
+                        inferred_latent_dim = int(mu_tensor.shape[0])
+                        inferred_components = 1
+                    else:
+                        inferred_components = int(mu_tensor.shape[0])
+                        inferred_latent_dim = int(mu_tensor.shape[-1])
+        if inferred_latent_dim is not None:
+            if "latent_dim" not in metadata or metadata["latent_dim"] is None:
+                metadata["latent_dim"] = inferred_latent_dim
+        if inferred_components is not None:
+            if "n_components" not in metadata or metadata["n_components"] is None:
+                metadata["n_components"] = inferred_components
+
+        modules = dict(data.get("modules") or {})
+        for key in ("encoder", "decoder", "classifier", "temperature_scaler", "prior"):
+            if key not in modules and key in data:
+                modules[key] = data[key]
+
+        artefact_keys = [
+            "classes",
+            "class_to_index",
+            "normalization",
+            "feature_layout",
+            "temperature_scaler_state",
+            "is_calibrated",
+            "train_latent_mu",
+            "train_latent_logvar",
+            "train_component_logits",
+            "train_component_mu",
+            "train_component_logvar",
+            "train_component_probs",
+            "train_target_indices",
+            "cached_logits",
+            "cached_probabilities",
+        ]
+        artefacts = dict(data.get("artefacts") or {})
+        for key in artefact_keys:
+            if key not in artefacts and key in data:
+                artefacts[key] = data[key]
+
+        payload: dict[str, Any] = {
+            "metadata": metadata,
+            "modules": modules,
+            "artefacts": artefacts,
+        }
+
+        def _coerce_tensor(value: Any) -> Tensor:
+            if value is None:
+                raise TypeError("Cannot convert None to tensor")
+            if isinstance(value, Tensor):
+                tensor = value.detach().clone()
+            else:
+                try:
+                    tensor = torch.as_tensor(value)
+                except (TypeError, ValueError) as exc:
+                    if isinstance(value, dict):
+                        try:
+                            ordered_values = [value[key] for key in sorted(value.keys())]
+                        except Exception as inner_exc:  # pragma: no cover - defensive
+                            raise TypeError("Cannot interpret legacy tensor payload") from inner_exc
+                        tensor = torch.as_tensor(ordered_values)
+                    else:
+                        raise TypeError("Cannot interpret legacy tensor payload") from exc
+            tensor = tensor.clone().detach()
+            if tensor.is_floating_point():
+                tensor = tensor.to(dtype=torch.float32)
+            return tensor.cpu()
+
+        def _convert_state_dict(state: Any) -> OrderedDict[str, Tensor] | None:
+            if state is None:
+                return None
+            if isinstance(state, (OrderedDict, dict)):
+                items = list(state.items())
+            elif isinstance(state, list):
+                items = []
+                for entry in state:
+                    if isinstance(entry, dict) and {"key", "value"} <= entry.keys():
+                        items.append((entry["key"], entry["value"]))
+                    elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                        items.append((entry[0], entry[1]))
+                    else:  # pragma: no cover - defensive
+                        raise ValueError("Unsupported legacy state dict entry format")
+            else:  # pragma: no cover - defensive
+                raise ValueError("Unsupported legacy state dict format")
+            converted = OrderedDict()
+            for key, value in items:
+                if value is None:
+                    continue
+                converted[key] = _coerce_tensor(value)
+            return converted
+
+        for module_key in ("encoder", "decoder"):
+            state = modules.get(module_key)
+            converted_state = _convert_state_dict(state)
+            if converted_state is not None:
+                modules[module_key] = converted_state
+
+        classifier_payload = modules.get("classifier")
+        if isinstance(classifier_payload, dict):
+            classifier_state = classifier_payload.get("state_dict")
+            converted_state = _convert_state_dict(classifier_state)
+            if converted_state is not None:
+                classifier_payload["state_dict"] = converted_state
+            class_weight = classifier_payload.get("class_weight")
+            if class_weight is not None:
+                try:
+                    classifier_payload["class_weight"] = _coerce_tensor(class_weight)
+                except TypeError:
+                    pass
+
+        prior_state = modules.get("prior")
+        if isinstance(prior_state, dict):
+            for key in ("logits", "logvar", "mu"):
+                if key in prior_state and prior_state[key] is not None:
+                    try:
+                        prior_state[key] = _coerce_tensor(prior_state[key])
+                    except TypeError:
+                        pass
+            mean_state = prior_state.get("mean_state_dict")
+            converted_mean = _convert_state_dict(mean_state)
+            if converted_mean is not None:
+                prior_state["mean_state_dict"] = converted_mean
+
+        return cls._load_from_payload(payload)
 
     @staticmethod
     def _encoder_input_dim_from_layout(
