@@ -197,43 +197,54 @@ class SUAVE:
     def _reset_prior_parameters(self) -> None:
         """Initialise trainable tensors for the mixture prior parameters."""
 
+        zeros_logits = torch.zeros(self.n_components, dtype=torch.float32)
+        zeros_full = torch.zeros(
+            self.n_components, self.latent_dim, dtype=torch.float32
+        )
+
         if self.behaviour == "hivae":
             self._prior_component_logits = Parameter(
-                torch.zeros(self.n_components, dtype=torch.float32),
-                requires_grad=False,
+                zeros_logits, requires_grad=False
             )
             self._prior_component_mu = None
             self._prior_component_logvar = Parameter(
-                torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32),
-                requires_grad=False,
+                zeros_full, requires_grad=False
             )
             self._prior_mean_layer = PriorMean(self.n_components, self.latent_dim)
         else:
             self._prior_component_logits = Parameter(
-                torch.zeros(self.n_components, dtype=torch.float32)
+                zeros_logits.clone(), requires_grad=True
             )
             self._prior_component_mu = Parameter(
-                torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32)
+                zeros_full.clone(), requires_grad=True
             )
             self._prior_component_logvar = Parameter(
-                torch.zeros(self.n_components, self.latent_dim, dtype=torch.float32)
+                zeros_full.clone(), requires_grad=True
             )
             self._prior_mean_layer = None
 
     def _move_prior_parameters_to_device(self, device: torch.device) -> None:
         """Ensure mixture prior parameters live on ``device`` as trainable tensors."""
 
-        def _wrap(tensor: Tensor | Parameter | None) -> Parameter | None:
+        def _wrap(
+            tensor: Tensor | Parameter | None, *, trainable: bool
+        ) -> Parameter | None:
             if tensor is None:
                 return None
-            requires_grad = bool(getattr(tensor, "requires_grad", False))
             data = tensor.detach().to(device=device, dtype=torch.float32)
-            return Parameter(data, requires_grad=requires_grad)
+            return Parameter(data, requires_grad=trainable)
 
-        self._prior_component_logits = _wrap(self._prior_component_logits)
-        self._prior_component_logvar = _wrap(self._prior_component_logvar)
+        trainable = self.behaviour == "suave"
+        self._prior_component_logits = _wrap(
+            self._prior_component_logits, trainable=trainable
+        )
+        self._prior_component_logvar = _wrap(
+            self._prior_component_logvar, trainable=trainable
+        )
         if self._prior_component_mu is not None:
-            self._prior_component_mu = _wrap(self._prior_component_mu)
+            self._prior_component_mu = _wrap(
+                self._prior_component_mu, trainable=trainable
+            )
         if self._prior_mean_layer is not None:
             self._prior_mean_layer.to(device)
 
@@ -250,7 +261,7 @@ class SUAVE:
             self._prior_component_mu,
             self._prior_component_logvar,
         ):
-            if isinstance(param, Parameter):
+            if isinstance(param, Parameter) and param.requires_grad:
                 params.append(param)
         return params
 
