@@ -1303,7 +1303,10 @@ class SUAVE:
         self._ensure_classifier_available("predict_proba")
         if not self._is_fitted or self._classes is None:
             raise RuntimeError("Model must be fitted before calling predict_proba")
-        logits = self._compute_logits(X)
+        _ = self._compute_logits(X)
+        if self._cached_logits is None:
+            raise RuntimeError("Logits cache was not populated")
+        logits = self._cached_logits
         if self._is_calibrated:
             logits = self._temperature_scaler.transform(logits)
         probabilities = self._logits_to_probabilities(logits)

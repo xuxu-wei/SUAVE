@@ -134,13 +134,21 @@ def test_save_load_predict_round_trip(tmp_path: Path):
 
 
 def test_hivae_behaviour_disables_classifier():
-    X, _, schema = make_dataset()
+    X, y, schema = make_dataset()
     model = SUAVE(schema=schema, behaviour="hivae", n_components=2)
     model.fit(X, epochs=1)
     latent = model.encode(X)
     assert latent.shape[0] == len(X)
     with pytest.raises(RuntimeError):
+        model._ensure_classifier_available("test")
+    with pytest.raises(RuntimeError):
+        model._compute_logits(X)
+    with pytest.raises(RuntimeError):
         model.predict_proba(X)
+    with pytest.raises(RuntimeError):
+        model.predict(X)
+    with pytest.raises(RuntimeError):
+        model.calibrate(X, y)
 
 
 def test_hivae_behaviour_persists_after_save(tmp_path: Path):
