@@ -1081,7 +1081,13 @@ class SUAVE:
         normaliser[normaliser == 0.0] = 1.0
         return probabilities / normaliser
 
-    def impute(self, X: pd.DataFrame, *, only_missing: bool = True) -> pd.DataFrame:
+    def impute(
+        self,
+        X: pd.DataFrame,
+        *,
+        only_missing: bool = True,
+        assignment_strategy: Literal["soft", "hard", "sample"] | None = None,
+    ) -> pd.DataFrame:
         """Fill missing entries in ``X`` using the trained HI-VAE decoder.
 
         Parameters
@@ -1096,6 +1102,16 @@ class SUAVE:
             When ``True`` (default) only the originally missing entries are
             replaced by their reconstructions.  When ``False`` the returned
             dataframe contains the full decoder output for all features.
+        assignment_strategy:
+            Strategy used to map posterior mixture responsibilities to decoder
+            assignments.  ``"soft"`` (default in HI-VAE mode) uses posterior
+            probabilities as continuous weights, providing smooth but potentially
+            over-smoothed imputations.  ``"hard"`` (default in SUAVE mode)
+            selects the argmax component and mirrors
+            :meth:`_gather_component_parameters`, yielding sharper but less
+            uncertainty-aware reconstructions.  ``"sample"`` draws a relaxed
+            Gumbel-Softmax sample which preserves stochasticity between calls
+            while still supplying soft weights to the decoder.
 
         Returns
         -------
@@ -1159,6 +1175,15 @@ class SUAVE:
                     column
                 ].to(device)
 
+        if assignment_strategy is None:
+            assignment_strategy = "hard" if self.behaviour == "suave" else "soft"
+        strategy_normalised = assignment_strategy.lower()
+        valid_strategies = {"soft", "hard", "sample"}
+        if strategy_normalised not in valid_strategies:
+            raise ValueError(
+                "assignment_strategy must be one of 'soft', 'hard' or 'sample'"
+            )
+
         with torch.no_grad():
             encoder_state = self._encoder.training
             decoder_state = self._decoder.training
@@ -1171,7 +1196,7 @@ class SUAVE:
                 logvar_enc,
                 temperature=self._inference_tau if self.behaviour == "hivae" else None,
             )
-            if self.behaviour == "suave":
+            if strategy_normalised == "hard":
                 component_indices = posterior_probs.argmax(dim=-1)
                 assignments = F.one_hot(
                     component_indices, num_classes=self.n_components
@@ -1179,9 +1204,16 @@ class SUAVE:
                 selected_mu = self._gather_component_parameters(
                     mu_enc, component_indices
                 )
-            else:
+            elif strategy_normalised == "soft":
                 assignments = posterior_probs
                 selected_mu = posterior_mean
+            else:  # sample
+                if self.behaviour == "hivae":
+                    tau = max(float(self._inference_tau), 1e-6)
+                else:
+                    tau = max(float(self.gumbel_temperature), 1e-6)
+                assignments = F.gumbel_softmax(logits_enc, tau=tau, hard=False, dim=-1)
+                selected_mu = (assignments.unsqueeze(-1) * mu_enc).sum(dim=1)
             decoder_out = self._decoder(
                 selected_mu,
                 assignments,

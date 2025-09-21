@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import pandas as pd
 import pytest
+import torch
+import torch.nn.functional as F
 
 from suave import SUAVE, Schema
 
@@ -206,10 +209,72 @@ def test_hivae_prior_mean_layer_trains_and_samples():
     assert isinstance(samples, pd.DataFrame)
     assert len(samples) == 3
     updated_params = [
-        param.detach().cpu().numpy()
-        for param in model._prior_mean_layer.parameters()
+        param.detach().cpu().numpy() for param in model._prior_mean_layer.parameters()
     ]
     assert any(
         not np.allclose(initial, updated)
         for initial, updated in zip(initial_params, updated_params)
+    )
+
+
+def test_hivae_impute_assignment_modes_route_expected_weights():
+    X, _, schema = make_dataset()
+    model = SUAVE(
+        schema=schema,
+        behaviour="hivae",
+        n_components=2,
+        latent_dim=4,
+        batch_size=2,
+    )
+    model.fit(X, epochs=1)
+    assert model._decoder is not None
+
+    aligned = X.loc[:, schema.feature_names].reset_index(drop=True)
+    device = model._select_device()
+    encoder_inputs = model._prepare_inference_inputs(aligned).to(device)
+    with torch.no_grad():
+        encoder_state = model._encoder.training
+        model._encoder.eval()
+        logits, mu, logvar = model._encoder(encoder_inputs)
+        _, _, posterior_probs = model._mixture_posterior_statistics(
+            logits,
+            mu,
+            logvar,
+            temperature=model._inference_tau,
+        )
+        if encoder_state:
+            model._encoder.train()
+    hard_expected = F.one_hot(
+        posterior_probs.argmax(dim=-1), num_classes=model.n_components
+    ).float()
+
+    def _capture(strategy: str) -> torch.Tensor:
+        assert model._decoder is not None
+        with patch.object(
+            model._decoder, "forward", wraps=model._decoder.forward
+        ) as spy:
+            torch.manual_seed(0)
+            model.impute(
+                X,
+                only_missing=False,
+                assignment_strategy=strategy,
+            )
+            spy.assert_called_once()
+            captured = spy.call_args[0][1].detach().cpu()
+        return captured
+
+    assignments_hard = _capture("hard")
+    assert torch.allclose(assignments_hard, hard_expected.cpu())
+
+    assignments_soft = _capture("soft")
+    assert torch.allclose(assignments_soft, posterior_probs.cpu(), atol=1e-6)
+
+    assignments_sample = _capture("sample")
+    assert not torch.allclose(assignments_sample, hard_expected.cpu())
+    assert not torch.allclose(assignments_sample, posterior_probs.cpu())
+    assert torch.all(assignments_sample > 0.0)
+    assert torch.allclose(
+        assignments_sample.sum(dim=-1),
+        torch.ones(assignments_sample.size(0)),
+        atol=1e-6,
     )
