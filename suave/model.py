@@ -137,13 +137,24 @@ class SUAVE:
         self.val_split = val_split
         self.stratify = stratify
         self.random_state = random_state
-        if gumbel_temperature <= 0:
-            raise ValueError("gumbel_temperature must be positive")
-        self.gumbel_temperature = float(gumbel_temperature)
         behaviour_normalised = behaviour.lower()
         if behaviour_normalised not in {"suave", "hivae"}:
             raise ValueError("behaviour must be either 'suave' or 'hivae'")
         self.behaviour = behaviour_normalised
+        if self.behaviour == "hivae":
+            if gumbel_temperature <= 0:
+                raise ValueError("gumbel_temperature must be positive")
+            self.gumbel_temperature = float(gumbel_temperature)
+        else:
+            if gumbel_temperature != 1.0:
+                warnings.warn(
+                    "gumbel_temperature is ignored when behaviour='suave' and will "
+                    "default to 1.0 during training.",
+                    RuntimeWarning,
+                )
+            if gumbel_temperature <= 0:
+                raise ValueError("gumbel_temperature must be positive")
+            self.gumbel_temperature = 1.0
 
         self._tau_start: float | None = None
         self._tau_min: float | None = None
@@ -519,11 +530,10 @@ class SUAVE:
                 )
 
                 if self.behaviour == "suave":
-                    assignment_tau = max(float(self.gumbel_temperature), 1e-6)
-                    assignments = F.gumbel_softmax(
-                        component_logits, tau=assignment_tau, hard=True
-                    )
-                    component_indices = assignments.argmax(dim=-1)
+                    component_indices = posterior_weights.argmax(dim=-1)
+                    assignments = F.one_hot(
+                        component_indices, num_classes=self.n_components
+                    ).float()
                     selected_mu = self._gather_component_parameters(
                         component_mu, component_indices
                     )
@@ -1222,7 +1232,7 @@ class SUAVE:
                 if self.behaviour == "hivae":
                     tau = max(float(self._inference_tau), 1e-6)
                 else:
-                    tau = max(float(self.gumbel_temperature), 1e-6)
+                    tau = 1.0
                 assignments = F.gumbel_softmax(logits_enc, tau=tau, hard=False, dim=-1)
                 selected_mu = (assignments.unsqueeze(-1) * mu_enc).sum(dim=1)
             decoder_out = self._decoder(
