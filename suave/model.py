@@ -1869,6 +1869,34 @@ class SUAVE:
         behaviour_value = metadata.get("behaviour", data.get("behaviour", "suave"))
         metadata["behaviour"] = str(behaviour_value)
 
+        prior_payload = data.get("prior") or data.get("modules", {}).get("prior")
+        inferred_latent_dim: int | None = None
+        inferred_components: int | None = None
+        if isinstance(prior_payload, dict):
+            mu_value = prior_payload.get("mu")
+            if mu_value is not None:
+                mu_tensor: Tensor | None
+                if isinstance(mu_value, Tensor):
+                    mu_tensor = mu_value
+                else:
+                    try:
+                        mu_tensor = torch.as_tensor(mu_value)
+                    except (TypeError, ValueError):
+                        mu_tensor = None
+                if mu_tensor is not None and mu_tensor.ndim > 0:
+                    if mu_tensor.ndim == 1:
+                        inferred_latent_dim = int(mu_tensor.shape[0])
+                        inferred_components = 1
+                    else:
+                        inferred_components = int(mu_tensor.shape[0])
+                        inferred_latent_dim = int(mu_tensor.shape[-1])
+        if inferred_latent_dim is not None:
+            if "latent_dim" not in metadata or metadata["latent_dim"] is None:
+                metadata["latent_dim"] = inferred_latent_dim
+        if inferred_components is not None:
+            if "n_components" not in metadata or metadata["n_components"] is None:
+                metadata["n_components"] = inferred_components
+
         modules = dict(data.get("modules") or {})
         for key in ("encoder", "decoder", "classifier", "temperature_scaler", "prior"):
             if key not in modules and key in data:
