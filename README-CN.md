@@ -1,0 +1,167 @@
+# SUAVE
+
+SUAVE 是一款以 Schema 为核心的变分自编码器，面向混合类型表格数据，同时支持生成式建模与有监督预测。项目直接受到 HI-VAE 及其后续层次潜变量研究的启发，并在此基础上强化了显式 Schema、分阶段训练以及概率校准等现代化工作流。
+
+## 设计理念
+
+- **Schema 驱动的输入。** 用户需通过 :class:`~suave.types.Schema` 明确声明每一列特征，使模型在训练前即可获知数据类型与类别数量。【F:suave/types.py†L22-L115】
+- **分阶段优化。** 训练流程遵循“预热 → 分类头 → 联合微调”的阶段式调度，并配合 KL 退火以复刻 HI-VAE 风格目标的稳定收敛特性。【F:suave/model.py†L889-L1010】
+- **透明的自动化。** 可选的 ``auto_parameters`` 启发式会依据数据统计量自适应批大小与训练时长，同时所有超参仍可在方法签名中被显式覆盖。【F:suave/model.py†L73-L128】【F:suave/model.py†L1039-L1091】
+- **缺失值感知的生成解码。** 标准化工具与解码器头会在实数、分类、正数、计数与序数特征上持续传递逐列掩码，从而一致地处理缺失数据。【F:suave/data.py†L15-L143】【F:suave/model.py†L1123-L1244】
+- **内置校准与评估。** 模型提供温度缩放、Brier 得分、ECE 等评估指标，帮助在下游场景中生成可靠概率。【F:suave/model.py†L2603-L2682】【F:suave/evaluate.py†L1-L200】
+
+## 安装
+
+```bash
+pip install -r requirements.txt
+```
+
+SUAVE 依赖 Python 3.9+ 与 PyTorch。
+
+## 快速上手
+
+```python
+import pandas as pd
+from suave import SUAVE, Schema
+
+# 1. 声明 schema
+schema = Schema(
+    {
+        "age": {"type": "real"},
+        "sofa": {"type": "count"},
+        "gender": {"type": "cat", "n_classes": 2},
+    }
+)
+
+# 2. 读取数据并训练模型
+train_X = pd.read_csv("data/train_features.csv")
+train_y = pd.read_csv("data/train_labels.csv")["label"]
+model = SUAVE(schema=schema)
+model.fit(train_X, train_y)
+
+# 3. 获取预测结果
+probabilities = model.predict_proba(train_X.tail(5))
+labels = model.predict(train_X.tail(5))
+```
+
+完整示例可参考 [`examples/sepsis_minimal.py`](examples/sepsis_minimal.py)。
+
+## API 概览
+
+### Schema 定义
+
+```python
+from suave.types import Schema
+
+schema = Schema(
+    {
+        "age": {"type": "real"},
+        "gender": {"type": "cat", "n_classes": 2},
+        "lactate": {"type": "pos"},
+        "icu_visits": {"type": "count"},
+    }
+)
+```
+
+Schema 支持动态更新并校验数据列：
+
+```python
+schema.update({"qsofa": {"type": "ordinal", "n_classes": 4}})
+schema.require_columns(["age", "gender", "qsofa"])
+```
+
+### 模型训练
+
+```python
+from suave import SUAVE
+
+model = SUAVE(schema=schema, latent_dim=32, beta=1.5)
+model.fit(train_X, train_y, warmup_epochs=20, head_epochs=5, finetune_epochs=10)
+```
+
+当 ``behaviour="unsupervised"`` 时可省略 ``y``，训练仅包含预热阶段：
+
+```python
+unsupervised = SUAVE(schema=schema, behaviour="unsupervised")
+unsupervised.fit(train_X, epochs=50)
+```
+
+### 概率预测
+
+```python
+proba = model.predict_proba(test_X)
+preds = model.predict(test_X)
+```
+
+模型会基于输入指纹缓存 logits，从而避免重复的编码计算。
+
+### 概率校准
+
+```python
+model.calibrate(val_X, val_y)
+calibrated = model.predict_proba(test_X)
+```
+
+温度缩放在保留集 logits 上训练，并在后续预测中自动复用。
+
+### 潜变量编码
+
+```python
+z = model.encode(test_X)
+components = model.encode(test_X, return_components=True)
+```
+
+后者会额外返回混合分量分配及对应的后验统计量。
+
+### 数据采样
+
+```python
+synthetic = model.sample(100)
+conditional = model.sample(50, conditional=True, y=preds[:50])
+```
+
+生成结果会自动反标准化，并恢复分类特征的原始取值。
+
+### 缺失值填补
+
+```python
+# 仅填补在标准化阶段被标记为缺失的单元格
+completed = model.impute(test_X, only_missing=True)
+
+# 无监督模式同样复用该接口
+unsup_completed = unsupervised.impute(test_X, only_missing=True)
+```
+
+``impute`` 会在掩码单元上运行解码器（包括未见过的分类取值与越界的序数编码），并将重建结果合并回原始
+DataFrame，确保下游流程接收到完整特征。
+
+### 持久化
+
+```python
+path = model.save("artifacts/sepsis.suave")
+restored = SUAVE.load(path)
+restored.predict_proba(test_X)
+```
+
+保存的模型文件包含 schema 信息、参数权重与校准状态，可直接复现部署推理。
+
+### 评估工具
+
+```python
+from suave.evaluate import compute_auroc, compute_auprc, compute_brier, compute_ece
+
+auroc = compute_auroc(proba, val_y.to_numpy())
+auprc = compute_auprc(proba, val_y.to_numpy())
+brier = compute_brier(proba, val_y.to_numpy())
+ece = compute_ece(proba, val_y.to_numpy(), n_bins=15)
+```
+
+各指标函数会自动校验概率矩阵的形状，在输入退化时返回 ``numpy.nan``。
+
+## 规划
+
+- 在保持显式控制的同时扩展自动 Schema 工具。
+- 引入基于后验分量分配的反事实采样接口。
+- 将模型可解释性报告整合到训练流程中。
+
+欢迎社区反馈与贡献！
