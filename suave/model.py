@@ -71,81 +71,86 @@ class SUAVE:
 
     Parameters
     ----------
-    schema:
-        Optional :class:`Schema` describing the dataset. If not provided during
-        initialisation it must be supplied to :meth:`fit`.
-    latent_dim:
-        Dimensionality of the latent representation. Default is ``32``.
-    n_components:
-        Number of mixture components in the hierarchical latent prior.
-        Default is ``1`` which recovers a single Gaussian encoder.
-    beta:
-        Weighting factor for the KL term. Default is ``1.5``.
-    hidden_dims:
-        Shape of the encoder and decoder multilayer perceptrons. Default is
-        ``(256, 128)``.
-    dropout:
-        Dropout probability applied inside neural modules. Default is ``0.1``.
-    learning_rate:
-        Optimiser learning rate. Default is ``1e-3``.
-    batch_size:
-        Mini-batch size used inside :meth:`fit`. Default is ``128``.
-    kl_warmup_epochs:
-        Number of epochs over which to linearly anneal the KL term.
-    val_split:
-        Validation split ratio used inside :meth:`fit`. Default is ``0.2``.
-    stratify:
-        Whether to preserve class balance when creating the validation split.
-    random_state:
-        Seed controlling deterministic behaviour in helper utilities.
-    gumbel_temperature:
-        Temperature parameter used when sampling mixture assignments through the
-        straight-through Gumbel-Softmax estimator. Default is ``1.0``.
-    behaviour:
-        Selects the feature set exposed by the estimator. Use ``"supervised"`` to
-        enable the extended classification stack or ``"unsupervised"`` for the
+    schema : Schema, optional
+        Dataset description including column types and cardinalities.  When not
+        supplied during initialisation, a schema must be provided to
+        :meth:`fit`.
+    latent_dim : int, default 32
+        Dimensionality of the latent representation shared between the encoder
+        and decoder networks.
+    n_components : int, default 1
+        Number of mixture components parameterising the hierarchical latent
+        prior.  ``1`` corresponds to a standard Gaussian encoder.
+    beta : float, default 1.5
+        Weight applied to the KL divergence term in the evidence lower bound
+        objective.
+    hidden_dims : Iterable[int], default (256, 128)
+        Width of each hidden layer used in the encoder and decoder multilayer
+        perceptrons.
+    dropout : float, default 0.1
+        Dropout probability applied inside the neural modules.
+    learning_rate : float, default 1e-3
+        Learning rate for the Adam optimiser driving all optimisation stages.
+    batch_size : int, default 128
+        Mini-batch size consumed by :meth:`fit` and downstream inference
+        utilities.
+    kl_warmup_epochs : int, default 10
+        Number of epochs used to linearly anneal the KL divergence weight during
+        the warm-up phase.
+    val_split : float, default 0.2
+        Ratio of samples assigned to the internal validation split constructed
+        inside :meth:`fit`.
+    stratify : bool, default True
+        Whether to preserve label balance when generating the validation split.
+    random_state : int, default 0
+        Deterministic seed used by helper utilities that rely on randomness.
+    gumbel_temperature : float, default 1.0
+        Temperature applied by the straight-through Gumbel-Softmax estimator
+        when sampling mixture assignments during training.
+    behaviour : {"supervised", "unsupervised"}, default "supervised"
+        Selects the feature set exposed by the estimator.  ``"supervised"``
+        enables the classification head whereas ``"unsupervised"`` activates the
         generative-only workflow.
-    tau_start:
-        Initial temperature for the Gumbel-Softmax component sampler when
-        ``behaviour="unsupervised"``. Default is ``1.0`` which offers a stable
-        starting point for mixture exploration.
-    tau_min:
-        Minimum temperature reached after annealing when
-        ``behaviour="unsupervised"``. Default is ``1e-3`` so the sampler becomes
-        nearly deterministic by the end of training.
-    tau_decay:
-        Linear decay applied to the temperature at each epoch when
-        ``behaviour="unsupervised"``. Default is ``0.01`` so that the temperature
-        reaches ``tau_min`` after roughly one hundred epochs.
-    warmup_epochs:
-        Number of epochs dedicated to ELBO-only optimisation before training the
-        classification head. Default is ``10``.
-    head_epochs:
-        Number of epochs used to optimise the classification head with frozen
-        decoder parameters. Default is ``5``.
-    finetune_epochs:
-        Number of epochs used for the final joint fine-tuning stage. Default is
-        ``10``.
-    joint_decoder_lr_scale:
-        Multiplicative factor applied to the decoder (and prior) learning rate
-        during joint fine-tuning. Default is ``0.1`` which slows decoder updates
-        relative to the encoder and classifier.
-    early_stop_patience:
-        Number of epochs without improvement on validation metrics tolerated
-        during the joint fine-tuning stage before restoring the best checkpoint.
-        Default is ``5``.
-    auto_parameters:
-        When ``True`` (default) the estimator adapts core hyperparameters using
-        lightweight heuristics derived from the training data.  Users that wish
-        to keep manual control over every setting can disable the behaviour by
-        setting ``auto_parameters=False``.
+    tau_start : float, default 1.0
+        Initial temperature used by the unsupervised mixture sampler prior to
+        annealing.
+    tau_min : float, default 1e-3
+        Final temperature reached after annealing in the unsupervised branch,
+        leading to near-deterministic component assignments.
+    tau_decay : float, default 0.01
+        Linear decrement applied to the temperature at each epoch when
+        ``behaviour="unsupervised"``.
+    warmup_epochs : int, default 10
+        Number of epochs dedicated to ELBO-only optimisation before the
+        classifier head is trained.
+    head_epochs : int, default 5
+        Number of epochs allocated to the classifier-head-only optimisation
+        stage.
+    finetune_epochs : int, default 10
+        Duration of the joint fine-tuning phase performed after the head stage.
+    joint_decoder_lr_scale : float, default 0.1
+        Multiplicative factor applied to the decoder and prior learning rates
+        during joint fine-tuning relative to the encoder rate.
+    early_stop_patience : int, default 5
+        Patience of the validation early-stopping monitor used during joint
+        fine-tuning before the best checkpoint is restored.
+    auto_parameters : bool, default True
+        When ``True`` the estimator adapts selected hyperparameters using
+        heuristics derived from the training data.  Disable to retain full
+        manual control over optimisation settings.
 
     Attributes
     ----------
-    auto_hyperparameters_:
-        Dictionary describing the automatically selected hyperparameters after
-        calling :meth:`fit`.  Set to ``None`` when ``auto_parameters`` is
-        disabled or before fitting.
+    auto_hyperparameters_ : dict[str, object] or None
+        Description of automatically tuned hyperparameters after calling
+        :meth:`fit`.  ``None`` when :paramref:`auto_parameters` is ``False`` or
+        before training commences.
+
+    See Also
+    --------
+    SUAVE.fit : Optimise the encoder/decoder and optional classifier head.
+    SUAVE.predict_proba : Produce calibrated class probabilities.
+    SUAVE.sample : Generate synthetic samples from the learned model.
 
     Examples
     --------
@@ -901,51 +906,61 @@ class SUAVE:
         joint_decoder_lr_scale: Optional[float] = None,
         early_stop_patience: Optional[int] = None,
     ) -> "SUAVE":
-        """Optimise the encoder/decoder using the staged schedule.
+        """Optimise the encoder, decoder and optional classifier head.
 
         Parameters
         ----------
-        X:
-            Training features with shape ``(n_samples, n_features)``.
-        y:
-            Training targets with shape ``(n_samples,)``. Optional when
-            ``behaviour="unsupervised"`` because the generative-only branch does not
-            consume labels.
-        schema:
-            Optional schema overriding the instance-level schema.
-        epochs:
-            Deprecated alias for ``warmup_epochs`` kept for backwards
-            compatibility. When provided alongside explicit schedule overrides
-            the latter take precedence. When ``behaviour="unsupervised"`` the warm-up
-            phase is the only optimisation stage and ``epochs`` therefore
-            controls the total number of training passes.
-        batch_size:
-            Overrides the batch size specified during initialisation.
-        kl_warmup_epochs:
-            Overrides the KL warm-up epochs specified during initialisation.
-        warmup_epochs:
-            Overrides the warm-start phase duration. Falls back to the instance
-            configuration when omitted. When ``behaviour="unsupervised"`` this value
-            corresponds to the full training duration.
-        head_epochs:
-            Overrides the classifier head phase duration. Defaults to the
-            instance configuration when omitted. Ignored when
-            ``behaviour="unsupervised"``.
-        finetune_epochs:
-            Overrides the joint fine-tuning phase duration. Defaults to the
-            instance configuration when omitted. Ignored when
-            ``behaviour="unsupervised"``.
-        joint_decoder_lr_scale:
-            Optional override for the decoder/prior learning-rate multiplier
-            used during joint fine-tuning.
-        early_stop_patience:
-            Optional override for the patience used by the early-stopping
-            monitor during joint fine-tuning.
+        X : pandas.DataFrame
+            Training features with shape ``(n_samples, n_features)``. Columns
+            must align with the schema provided at construction or supplied via
+            :paramref:`schema`.
+        y : pandas.Series or pandas.DataFrame or numpy.ndarray, optional
+            Target labels aligned with ``X``. Required when
+            ``behaviour='supervised'``; ignored by the unsupervised workflow.
+        schema : Schema, optional
+            Schema overriding the instance-level schema. Useful when the model
+            was instantiated without a schema and the information becomes
+            available only during fitting.
+        epochs : int, optional
+            Deprecated alias for :paramref:`warmup_epochs`. Retained for
+            backwards compatibility. When provided alongside explicit schedule
+            overrides, the specific overrides take precedence.
+        batch_size : int, optional
+            Overrides the batch size specified at initialisation time.
+        kl_warmup_epochs : int, optional
+            Number of epochs spent annealing the KL divergence weight.
+        warmup_epochs : int, optional
+            Duration of the ELBO-only warm start. Defaults to the instance
+            configuration. In unsupervised mode this value controls the entire
+            training duration.
+        head_epochs : int, optional
+            Length of the classifier-head-only stage. Ignored when
+            ``behaviour='unsupervised'``.
+        finetune_epochs : int, optional
+            Duration of the joint fine-tuning stage. Ignored in unsupervised
+            mode.
+        joint_decoder_lr_scale : float, optional
+            Decoder/prior learning-rate multiplier to use during joint
+            fine-tuning.
+        early_stop_patience : int, optional
+            Override for the validation early-stopping patience used during the
+            joint fine-tuning phase.
 
         Returns
         -------
         SUAVE
-            The fitted model (``self``) for fluent-style chaining.
+            The fitted estimator (``self``) to support method chaining.
+
+        Raises
+        ------
+        ValueError
+            If the schema is missing, targets are omitted in supervised mode or
+            schedule overrides are invalid.
+
+        See Also
+        --------
+        SUAVE.calibrate : Fit the temperature scaler using held-out logits.
+        SUAVE.predict_proba : Produce calibrated probabilities after fitting.
 
         Examples
         --------
@@ -2623,26 +2638,24 @@ class SUAVE:
 
         Parameters
         ----------
-        X:
+        X : pandas.DataFrame
             DataFrame containing the features declared in the training schema.
             Missing entries (``NaN``) are imputed using the posterior mean of
             the latent representation followed by a single decoder pass.  The
             method works in both ``behaviour="supervised"`` and
             ``behaviour="unsupervised"`` modes.
-        only_missing:
-            When ``True`` (default) only the originally missing entries are
-            replaced by their reconstructions.  When ``False`` the returned
-            dataframe contains the full decoder output for all features.
-        assignment_strategy:
+        only_missing : bool, default True
+            When ``True`` only the originally missing entries are replaced by
+            their reconstructions.  When ``False`` the returned dataframe
+            contains the full decoder output for all features.
+        assignment_strategy : {"soft", "hard", "sample"}, optional
             Strategy used to map posterior mixture responsibilities to decoder
-            assignments.  ``"soft"`` (default in the unsupervised branch) uses posterior
-            probabilities as continuous weights, providing smooth but potentially
-            over-smoothed imputations.  ``"hard"`` (default in the supervised branch)
-            selects the argmax component and mirrors
-            :meth:`_gather_component_parameters`, yielding sharper but less
-            uncertainty-aware reconstructions.  ``"sample"`` draws a relaxed
-            Gumbel-Softmax sample which preserves stochasticity between calls
-            while still supplying soft weights to the decoder.
+            assignments.  ``"soft"`` (default in the unsupervised branch) uses
+            posterior probabilities as continuous weights. ``"hard"`` (default in
+            the supervised branch) selects the argmax component, yielding
+            sharper but less uncertainty-aware reconstructions. ``"sample"`` draws
+            a relaxed Gumbel-Softmax sample which preserves stochasticity while
+            still supplying soft weights to the decoder.
 
         Returns
         -------
@@ -2828,7 +2841,7 @@ class SUAVE:
         attr: str | int | None = None,
         *,
         mask: pd.DataFrame | np.ndarray | Tensor | None = None,
-        L: int = 50,
+        L: int = 100,
     ) -> np.ndarray | Tensor:
         r"""Return posterior predictive probabilities.
 
@@ -2837,31 +2850,54 @@ class SUAVE:
         ``attr`` identifies a categorical or ordinal schema attribute the
         method estimates the Monte Carlo posterior predictive distribution
         :math:`p(x_{attr} \mid x^o)` by masking the target column and decoding
-        samples from :math:`q(s, z \mid x^o)`.
-
+        samples from :math:`q(s, z \mid x^o)`.  In
+        ``behaviour="unsupervised"`` mode the classifier head is disabled, so
+        ``attr`` must be provided and the method only operates in the
+        generative regime described above.
+        
         Parameters
         ----------
-        X:
-            Input features with shape ``(n_samples, n_features)``.
-        attr:
-            Optional attribute name or index.  When provided, the returned
-            tensor contains posterior predictive probabilities for the
-            specified categorical/ordinal column.
-        mask:
-            Optional boolean mask marking missing entries (``True`` for
-            missing).  Only used when ``attr`` is provided.
-        L:
-            Number of Monte Carlo samples used for the posterior predictive
-            estimate when ``attr`` is provided.  Must be positive.
+        X : pandas.DataFrame
+            Feature matrix whose columns match the training schema.
+        attr : str or int, optional
+            Name or positional index of a categorical or ordinal attribute to
+            evaluate.  When omitted, classifier probabilities for the target
+            label are returned.
+        mask : pandas.DataFrame or numpy.ndarray or torch.Tensor, optional
+            Boolean mask that marks observed values as ``False`` and missing
+            entries as ``True``.  When ``attr`` is provided the corresponding
+            column is always treated as missing while decoding.  Provide
+            ``mask`` when ``X`` has been imputed or otherwise lacks explicit
+            ``NaN`` markers so that the original missingness pattern (for
+            example the mask returned by :func:`suave.data.build_missing_mask`)
+            can be respected during decoding.  If ``mask`` is omitted the
+            method infers missingness directly from ``X``.
+        L : int, default 100
+            Number of Monte Carlo samples used to approximate the posterior
+            predictive distribution when ``attr`` is specified.
 
         Returns
         -------
         numpy.ndarray or torch.Tensor
-            When ``attr`` is ``None`` the return value is an ``(n_samples,
-            n_classes)`` :class:`numpy.ndarray` with calibrated classifier
-            probabilities.  Otherwise a ``torch.FloatTensor`` with shape
-            ``(n_samples, n_classes_attr)`` containing posterior predictive
-            probabilities is returned.
+            Calibrated classifier probabilities with shape ``(n_samples,
+            n_classes)`` when ``attr`` is ``None``.  Otherwise a
+            ``torch.FloatTensor`` with shape ``(n_samples, n_attr_classes)``
+            containing posterior predictive probabilities for the requested
+            attribute.
+
+        Raises
+        ------
+        RuntimeError
+            If the estimator or classifier head has not been fitted when
+            ``attr`` is ``None``.
+        ValueError
+            If ``attr`` does not reference a categorical or ordinal feature, or
+            when ``L`` is not a positive integer.
+
+        See Also
+        --------
+        SUAVE.predict : Convert probabilities into deterministic predictions.
+
 
         Examples
         --------
@@ -2871,6 +2907,8 @@ class SUAVE:
         >>> gender_probs = model.predict_proba(X, attr="gender")
         >>> torch.allclose(gender_probs.sum(dim=1), torch.ones(len(X)))
         True
+        >>> mask = suave.data.build_missing_mask(X_raw)
+        >>> model.predict_proba(X_imputed, attr="gender", mask=mask)
         """
 
         if attr is None:
@@ -2964,7 +3002,9 @@ class SUAVE:
         returned dictionary includes the requested point estimate, percentile
         confidence interval bounds and the sample standard deviation.  When
         ``return_samples`` is ``True`` the raw predictive samples are also
-        returned with shape ``(n_samples, L)``.
+        returned with shape ``(n_samples, L)``.  ``mask`` can be supplied to
+        preserve externally tracked missingness patterns that are not encoded
+        as ``NaN`` values in ``X``.
 
         Parameters
         ----------
@@ -2976,7 +3016,10 @@ class SUAVE:
         mask:
             Optional boolean mask marking missing entries (``True`` for
             missing).  The specified attribute is always treated as missing
-            regardless of ``mask``.
+            regardless of ``mask``.  Pass the mask used during training (for
+            example from :func:`suave.data.build_missing_mask`) when ``X`` has
+            been imputed so that the decoder can preserve the original
+            missingness pattern while conditioning on ``x^o``.
         L:
             Number of Monte Carlo samples used to approximate the predictive
             distribution.  Must be positive.
@@ -3004,6 +3047,8 @@ class SUAVE:
         >>> stats = model.predict_confidence_interval(X, "age", L=256)
         >>> stats["lower"].shape
         torch.Size([len(X)])
+        >>> mask = suave.data.build_missing_mask(X_raw)
+        >>> model.predict_confidence_interval(X_imputed, "age", mask=mask)
         """
 
         if not self._is_fitted or self._encoder is None or self._decoder is None:
@@ -3094,14 +3139,60 @@ class SUAVE:
         L: int = 50,
         mode: Literal["point", "sample"] = "point",
     ) -> np.ndarray | Tensor:
-        """Return point predictions or samples for the requested target.
+        """Return class labels or attribute predictions for ``X``.
 
-        When ``attr`` is ``None`` the classifier argmax is returned.  Otherwise
-        the method routes to the posterior predictive utilities for the
-        specified attribute.  ``mode="point"`` returns the default point
-        estimate (mean or median depending on the attribute type) while
-        ``mode="sample"`` draws a stochastic sample from the predictive
-        distribution.
+        Parameters
+        ----------
+        X : pandas.DataFrame
+            Feature matrix with the same columns used during training.
+        attr : str or int, optional
+            Name or positional index of the attribute to infer.  When omitted,
+            class labels from the supervised head are returned.  In
+            ``behaviour="unsupervised"`` mode the classifier head is not
+            available, so ``attr`` must be supplied and only attribute-level
+            predictions are produced.
+        mask : pandas.DataFrame or numpy.ndarray or torch.Tensor, optional
+            Boolean mask indicating observed (``False``) and missing (``True``)
+            entries.  Used when requesting attribute predictions so the
+            original missingness pattern can be respected.  Supply the same
+            mask used during training (for example from
+            :func:`suave.data.build_missing_mask`) when ``X`` no longer contains
+            ``NaN`` placeholders for missing inputs; otherwise the method infers
+            missingness directly from ``X``.
+        L : int, default 50
+            Number of Monte Carlo samples drawn when ``mode='sample'`` or when
+            summarising posterior predictive statistics for non-class targets.
+        mode : {"point", "sample"}, default "point"
+            Controls whether the deterministic summary (mean/median) or raw
+            posterior predictive samples are returned for attribute-level
+            predictions.
+
+        Returns
+        -------
+        numpy.ndarray or torch.Tensor
+            One-dimensional array of class labels when ``attr`` is ``None``.
+            Otherwise a tensor containing either posterior predictive samples
+            or point estimates for the requested attribute.
+
+        Raises
+        ------
+        RuntimeError
+            If the model is not fitted or the classifier head is unavailable
+            when requesting label predictions.
+        ValueError
+            If ``mode`` is invalid or the requested attribute is unsupported by
+            the decoder.
+
+        Examples
+        --------
+        >>> labels = model.predict(X)
+        >>> labels.shape
+        (len(X),)
+        >>> glucose = model.predict(X, attr="glucose")
+        >>> glucose_samples = model.predict(X, attr="glucose", mode="sample")
+        >>> mask = suave.data.build_missing_mask(X_raw)
+        >>> model.predict(X_imputed, attr="glucose", mask=mask)
+
         """
 
         if attr is None:
@@ -3147,7 +3238,34 @@ class SUAVE:
     # Calibration utilities
     # ------------------------------------------------------------------
     def calibrate(self, X: pd.DataFrame, y: pd.Series | np.ndarray) -> "SUAVE":
-        """Fit the temperature scaler using logits from ``X``."""
+        """Fit the temperature scaler using logits from ``X``.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame
+            Feature matrix used to compute logits for calibration.
+        y : pandas.Series or numpy.ndarray
+            True target labels aligned with ``X``. The array must use the same
+            label encoding observed during :meth:`fit`.
+
+        Returns
+        -------
+        SUAVE
+            The calibrated estimator (``self``).
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted or the classifier head is missing.
+        ValueError
+            If ``X`` and ``y`` do not contain the same number of samples.
+
+        Examples
+        --------
+        >>> _ = model.fit(X_train, y_train)
+        >>> model.calibrate(X_val, y_val)
+        SUAVE(...)
+        """
 
         self._ensure_classifier_available("calibrate")
         if not self._is_fitted or self._classes is None:
@@ -3174,26 +3292,28 @@ class SUAVE:
     def encode(
         self, X: pd.DataFrame, *, return_components: bool = False
     ) -> np.ndarray | Dict[str, np.ndarray]:
-        """Return posterior means of the latent representation for ``X``.
+        """Return posterior statistics of the latent representation.
 
         Parameters
         ----------
-        X:
+        X : pandas.DataFrame
             Input features with shape ``(n_samples, n_features)``.
-        return_components:
-            When ``True``, also return a dictionary containing the sampled
-            component assignments and the component-specific posterior
-            parameters ``mu``/``logvar``.
+        return_components : bool, default False
+            When ``True`` also return mixture assignment information and
+            component-specific statistics.
 
         Returns
         -------
-        numpy.ndarray
-            Float32 array with shape ``(n_samples, latent_dim)`` containing the
-            latent posterior means produced by the trained encoder.
-        dict, optional
-            When ``return_components`` is ``True`` the returned dictionary
-            includes the posterior mean, sampled assignments and
-            component-specific statistics.
+        numpy.ndarray or dict
+            ``numpy.ndarray`` containing the latent posterior means when
+            :paramref:`return_components` is ``False``.  Otherwise a dictionary
+            with keys ``"mean"``, ``"assignments"``, ``"component_mu"`` and
+            ``"component_logvar"``.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted.
 
         Examples
         --------
@@ -3286,21 +3406,28 @@ class SUAVE:
 
         Parameters
         ----------
-        n_samples:
+        n_samples : int
             Number of synthetic rows to generate.
-        conditional:
-            If ``True`` the latent variables are drawn from posterior
+        conditional : bool, default False
+            When ``True`` the latent variables are drawn from posterior
             approximations of the training data whose labels match ``y``.
-        y:
-            Sequence of class labels used when ``conditional=True``.  The array
-            must have length ``n_samples`` and contain values observed during
-            :meth:`fit`.
+        y : numpy.ndarray, optional
+            Sequence of class labels used when :paramref:`conditional` is
+            ``True``.  The array must have length ``n_samples`` and contain
+            values observed during :meth:`fit`.
 
         Returns
         -------
         pandas.DataFrame
             DataFrame with shape ``(n_samples, n_features)`` whose columns match
             the training schema.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted.
+        ValueError
+            If conditional sampling is requested without valid labels.
 
         Examples
         --------
@@ -3365,7 +3492,29 @@ class SUAVE:
         return tensor.detach().cpu()
 
     def save(self, path: str | Path) -> Path:
-        """Serialise minimal model state to ``path``."""
+        """Serialise minimal model state to ``path``.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Destination file where the torch archive will be written.
+
+        Returns
+        -------
+        pathlib.Path
+            Path to the written archive.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted.
+
+        Examples
+        --------
+        >>> output = model.save("suave_model.pt")
+        >>> output.exists()
+        True
+        """
 
         if not self._is_fitted:
             raise RuntimeError("Model must be fitted before saving")
@@ -3458,7 +3607,29 @@ class SUAVE:
 
     @classmethod
     def load(cls, path: str | Path) -> "SUAVE":
-        """Load a model saved with :meth:`save`."""
+        """Load a model saved with :meth:`save`.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Location of the serialised model archive.
+
+        Returns
+        -------
+        SUAVE
+            Fully reconstructed estimator ready for inference.
+
+        Raises
+        ------
+        ValueError
+            If the archive format is unrecognised.
+
+        Examples
+        --------
+        >>> restored = SUAVE.load("suave_model.pt")
+        >>> isinstance(restored, SUAVE)
+        True
+        """
 
         path = Path(path)
         try:

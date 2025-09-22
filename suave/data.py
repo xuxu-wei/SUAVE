@@ -25,25 +25,38 @@ def split_train_val(
     pd.Series | pd.DataFrame | np.ndarray,
     pd.Series | pd.DataFrame | np.ndarray,
 ]:
-    """Split training data into train and validation subsets.
+    """Split a dataset into training and validation subsets.
 
     Parameters
     ----------
-    X:
+    X : pandas.DataFrame
         Feature matrix with shape ``(n_samples, n_features)``.
-    y:
-        Targets aligned with ``X``. Accepts :class:`pandas.Series`,
-        :class:`pandas.DataFrame`, or :class:`numpy.ndarray`.
-    val_split:
-        Proportion of samples that should end up in the validation split.  Must
-        satisfy ``0 < val_split < 1``.
-    stratify:
-        If ``True`` the split preserves label frequencies using ``y``.
+    y : pandas.Series or pandas.DataFrame or numpy.ndarray
+        Targets aligned with ``X``.
+    val_split : float
+        Proportion of samples assigned to the validation split. Must satisfy
+        ``0 < val_split < 1``.
+    stratify : bool
+        Whether to preserve label frequencies when splitting.
 
     Returns
     -------
-    (X_train, X_val, y_train, y_val)
-        Tuple of training and validation subsets.
+    tuple of pandas.DataFrame and pandas.Series or numpy.ndarray
+        Tuple ``(X_train, X_val, y_train, y_val)`` containing the split data.
+
+    Raises
+    ------
+    ValueError
+        If ``val_split`` is outside ``(0, 1)`` or stratification is requested
+        without targets.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> X = pd.DataFrame({"a": range(6)})
+    >>> y = pd.Series([0, 0, 0, 1, 1, 1])
+    >>> split_train_val(X, y, val_split=0.33, stratify=True)[0].shape[0]
+    4
     """
 
     if not 0 < val_split < 1:
@@ -92,7 +105,27 @@ def split_train_val(
 
 
 def build_missing_mask(X: pd.DataFrame) -> pd.DataFrame:
-    """Return a boolean mask indicating missing entries in ``X``."""
+    """Return a boolean mask indicating missing entries in ``X``.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        DataFrame for which to compute the missing-value mask.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame of booleans with the same shape as ``X`` where ``True`` marks
+        missing entries.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> build_missing_mask(pd.DataFrame({"a": [1.0, None]}))
+           a
+    0  False
+    1   True
+    """
 
     return X.isna()
 
@@ -101,21 +134,45 @@ def standardize(
     X: pd.DataFrame,
     schema: Schema,
 ) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float | list[object]]]]:
-    """Standardise the dataframe using schema information.
+    """Standardise a dataframe using schema information.
 
     ``real`` columns are z-scored. ``pos`` columns are log transformed (using
-    ``log1p``) and normalised with mean/standard deviation of the transformed
-    values. ``count`` columns are log transformed (adding a one-offset when the
-    observed minimum is zero). ``cat`` columns are cast to categorical dtype
-    and ``ordinal`` columns are validated to fall inside the configured class
-    range. The function returns the transformed dataframe alongside the
-    metadata required to reconstruct the original values.
+    ``log1p``) and normalised by the mean and standard deviation of the
+    transformed values. ``count`` columns are log transformed (adding a
+    one-offset when the observed minimum is zero). ``cat`` columns are cast to a
+    categorical dtype and ``ordinal`` columns are validated to fall inside the
+    configured class range.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Input dataframe to be standardised.
+    schema : Schema
+        Schema describing column types and any auxiliary metadata.
 
     Returns
     -------
-    transformed, stats
-        ``transformed`` is the normalised dataframe and ``stats`` contains
-        per-column metadata for :func:`inverse_standardize`.
+    tuple of pandas.DataFrame and dict
+        ``(transformed, stats)`` where ``transformed`` is the normalised
+        dataframe and ``stats`` contains per-column metadata required by
+        :func:`inverse_standardize`.
+
+    Raises
+    ------
+    ValueError
+        If positive or count columns contain invalid values.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> from suave.types import Schema
+    >>> frame = pd.DataFrame({"real": [1.0, 2.0], "count": [0, 3]})
+    >>> schema = Schema({"real": {"type": "real"}, "count": {"type": "count"}})
+    >>> normalised, stats = standardize(frame, schema)
+    >>> normalised.round(3)
+       real  count
+    0  -1.0  0.000
+    1   1.0  1.386
     """
 
     schema.require_columns(X.columns)
@@ -214,7 +271,32 @@ def inverse_standardize(
     schema: Schema,
     stats: Dict[str, Dict[str, float | list[object]]],
 ) -> pd.DataFrame:
-    """Undo :func:`standardize` using the stored statistics."""
+    """Undo :func:`standardize` using the stored statistics.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Normalised dataframe produced by :func:`standardize`.
+    schema : Schema
+        Schema describing the target column types.
+    stats : dict
+        Per-column metadata returned by :func:`standardize`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Dataframe in the original data space.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> from suave.types import Schema
+    >>> frame = pd.DataFrame({"real": [1.0, 2.0]})
+    >>> schema = Schema({"real": {"type": "real"}})
+    >>> normalised, stats = standardize(frame, schema)
+    >>> inverse_standardize(normalised, schema, stats).equals(frame)
+    True
+    """
 
     restored = X.copy()
     for column, meta in stats.items():
