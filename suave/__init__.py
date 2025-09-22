@@ -7,5 +7,12 @@ implementation will iterate on top of these public entry points.
 
 from .model import SUAVE
 from .types import Schema
+from .schema_inference import SchemaInferenceMode, SchemaInferenceResult, SchemaInferencer
 
-__all__ = ["SUAVE", "Schema"]
+__all__ = [
+    "SUAVE",
+    "Schema",
+    "SchemaInferencer",
+    "SchemaInferenceMode",
+    "SchemaInferenceResult",
+]
