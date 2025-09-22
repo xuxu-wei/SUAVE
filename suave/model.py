@@ -29,10 +29,10 @@ from .modules.calibrate import TemperatureScaler
 from .modules.decoder import Decoder
 from .modules.encoder import EncoderMLP
 from .modules.heads import ClassificationHead
-from .modules import losses
+from .modules import losses, distributions as dist_utils
 from .modules.prior import PriorMean
 from . import sampling as sampling_utils
-from .types import Schema
+from .types import Schema, ColumnSpec
 from .evaluate import compute_brier, compute_ece
 
 LOGGER = logging.getLogger(__name__)
@@ -1940,6 +1940,12 @@ class SUAVE:
             self._device = torch.device("cpu")
         return self._device
 
+    @property
+    def device(self) -> torch.device:
+        """Expose the computation device used by the estimator."""
+
+        return self._select_device()
+
     def _prepare_training_tensors(
         self,
         X: pd.DataFrame,
@@ -2309,6 +2315,214 @@ class SUAVE:
         )
         return encoder_inputs.float()
 
+    def _resolve_attribute(self, attr: str | int) -> tuple[str, ColumnSpec, int]:
+        """Return the schema specification for ``attr`` and its positional index."""
+
+        if self.schema is None:
+            raise RuntimeError("Schema must be defined to resolve attributes")
+        feature_names = list(self.schema.feature_names)
+        if not feature_names:
+            raise RuntimeError("Schema does not define any features")
+        if isinstance(attr, str):
+            if attr not in self.schema:
+                raise KeyError(f"Attribute '{attr}' not present in the schema")
+            name = attr
+            index = feature_names.index(name)
+        else:
+            try:
+                index = int(attr)
+            except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+                raise TypeError("attr must be a string name or integer index") from exc
+            if index < 0 or index >= len(feature_names):
+                raise IndexError(
+                    "attr index out of range for schema with "
+                    f"{len(feature_names)} features"
+                )
+            name = feature_names[index]
+        spec = self.schema[name]
+        return name, spec, index
+
+    @staticmethod
+    def _feature_bucket(feature_type: str) -> str:
+        """Return the decoder bucket key associated with ``feature_type``."""
+
+        mapping = {
+            "real": "real",
+            "pos": "pos",
+            "count": "count",
+            "cat": "cat",
+            "ordinal": "ordinal",
+        }
+        if feature_type not in mapping:
+            raise ValueError(f"Unsupported feature type '{feature_type}'")
+        return mapping[feature_type]
+
+    def _normalize_inputs(
+        self,
+        X: pd.DataFrame,
+        attr_name: str,
+        mask: pd.DataFrame | np.ndarray | Tensor | None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Return encoder inputs and attribute tensors with ``attr_name`` masked."""
+
+        if self.schema is None:
+            raise RuntimeError("Schema must be defined before normalisation")
+        feature_names = list(self.schema.feature_names)
+        aligned = X.loc[:, feature_names].copy()
+        aligned_reset = aligned.reset_index(drop=True)
+
+        if mask is None:
+            mask_frame = data_utils.build_missing_mask(aligned_reset)
+        elif isinstance(mask, pd.DataFrame):
+            missing_cols = [col for col in feature_names if col not in mask.columns]
+            if missing_cols:
+                raise KeyError(
+                    "Mask dataframe missing required columns: "
+                    + ", ".join(missing_cols)
+                )
+            mask_frame = mask.loc[:, feature_names].astype(bool).reset_index(drop=True)
+        else:
+            mask_array = np.asarray(mask)
+            if mask_array.shape != aligned_reset.shape:
+                raise ValueError("mask must have the same shape as the feature matrix")
+            mask_frame = pd.DataFrame(mask_array, columns=feature_names).astype(bool)
+
+        mask_frame[attr_name] = True
+        aligned_reset[attr_name] = np.nan
+        normalised = self._apply_training_normalization(aligned_reset)
+        mask_frame = (mask_frame | normalised.isna()).reset_index(drop=True)
+
+        encoder_inputs, data_tensors, mask_tensors = self._prepare_training_tensors(
+            normalised, mask_frame, update_layout=False
+        )
+
+        feature_type = self.schema[attr_name].type
+        bucket = self._feature_bucket(feature_type)
+        attr_data = data_tensors[bucket][attr_name].float()
+        attr_mask = mask_tensors[bucket][attr_name].float()
+        if attr_mask.numel():
+            attr_mask.zero_()
+        return encoder_inputs.float(), attr_data, attr_mask
+
+    def _posterior_draws(
+        self,
+        component_logits: Tensor,
+        component_mu: Tensor,
+        component_logvar: Tensor,
+        L: int,
+    ) -> tuple[Tensor, Tensor]:
+        """Sample mixture assignments and latent variables from the posterior."""
+
+        if L <= 0:
+            raise ValueError("L must be a positive integer")
+        if component_logits.ndim != 2:
+            raise ValueError("component_logits must have shape (batch, components)")
+        batch, components = component_logits.shape
+        if components != self.n_components:
+            raise ValueError(
+                "component dimension mismatch between encoder outputs and model"
+            )
+        categorical = Categorical(logits=component_logits)
+        indices = categorical.sample((L,))
+        assignments = F.one_hot(indices, num_classes=self.n_components).float()
+
+        mu_expanded = component_mu.unsqueeze(0).expand(L, -1, -1, -1)
+        logvar_expanded = component_logvar.unsqueeze(0).expand(L, -1, -1, -1)
+        gather_idx = (
+            indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, self.latent_dim)
+        )
+        selected_mu = mu_expanded.gather(2, gather_idx).squeeze(2)
+        selected_logvar = logvar_expanded.gather(2, gather_idx).squeeze(2)
+        std = torch.exp(0.5 * selected_logvar)
+        eps = torch.randn_like(std)
+        z_samples = selected_mu + eps * std
+        return assignments, z_samples
+
+    @staticmethod
+    def _expand_observation(tensor: Tensor, L: int) -> Tensor:
+        """Tile ``tensor`` ``L`` times along the batch dimension."""
+
+        if tensor.dim() == 1:
+            tensor = tensor.unsqueeze(-1)
+        batch = tensor.size(0)
+        trailing = tensor.size()[1:]
+        expanded = tensor.unsqueeze(0).expand((L, batch, *trailing))
+        return expanded.reshape(L * batch, -1)
+
+    def _posterior_predictive_params(
+        self,
+        encoder_inputs: Tensor,
+        attr_name: str,
+        attr_type: str,
+        attr_data: Tensor,
+        attr_mask: Tensor,
+        L: int,
+    ) -> dict[str, Tensor]:
+        """Return decoder parameters for ``attr_name`` under posterior sampling."""
+
+        batch = encoder_inputs.size(0)
+        if batch == 0:
+            return {"params": {}, "probs": torch.empty(0)}
+
+        component_logits, component_mu, component_logvar = self._encoder(encoder_inputs)
+        assignments, z_samples = self._posterior_draws(
+            component_logits, component_mu, component_logvar, L
+        )
+        latents = z_samples.view(L * batch, self.latent_dim)
+        assignments_flat = assignments.view(L * batch, self.n_components)
+        hidden = self._decoder.backbone(latents)
+        y_full = self._decoder.y_projection(hidden)
+        y_slice = y_full[:, self._decoder._y_slices[attr_name]]
+        data_expanded = self._expand_observation(attr_data, L)
+        mask_expanded = self._expand_observation(attr_mask, L)
+        stats = self._norm_stats_per_col.get(attr_name, {})
+        head = self._decoder.heads[attr_name]
+        head_out = head(
+            y=y_slice,
+            s=assignments_flat,
+            x=data_expanded,
+            norm_stats=stats,
+            mask=mask_expanded,
+        )
+        params = head_out.get("params", {})
+        probs = params.get("probs") if isinstance(params, dict) else None
+        return {"params": params, "probs": probs, "L": L, "batch": batch}
+
+    def _draw_predictive_samples(
+        self,
+        attr_type: str,
+        params: dict[str, Tensor],
+        L: int,
+        batch: int,
+        device: torch.device,
+    ) -> Tensor:
+        """Sample from the attribute decoder given posterior draws."""
+
+        if batch == 0:
+            return torch.empty((L, 0), device=device)
+        if attr_type == "real":
+            mean = params.get("mean")
+            var = params.get("var")
+            if mean is None or var is None:
+                raise RuntimeError("Gaussian head did not provide mean/var")
+            samples_flat = dist_utils.sample_gaussian(mean, var)
+        elif attr_type == "pos":
+            mean_log = params.get("mean_log")
+            var_log = params.get("var_log")
+            if mean_log is None or var_log is None:
+                raise RuntimeError(
+                    "Log-normal head did not provide mean/var parameters"
+                )
+            samples_flat = dist_utils.sample_lognormal(mean_log, var_log)
+        elif attr_type == "count":
+            rate = params.get("rate")
+            if rate is None:
+                raise RuntimeError("Poisson head did not provide rate parameters")
+            samples_flat = dist_utils.sample_poisson(rate)
+        else:
+            raise ValueError(f"Unsupported attribute type '{attr_type}' for sampling")
+        return samples_flat.view(L, batch, -1).squeeze(-1)
+
     def _map_targets_to_indices(self, targets: Iterable[object]) -> np.ndarray:
         """Convert raw targets into class indices."""
 
@@ -2600,53 +2814,326 @@ class SUAVE:
     # ------------------------------------------------------------------
     # Prediction utilities
     # ------------------------------------------------------------------
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Return calibrated class probabilities for ``X``.
+    def predict_proba(
+        self,
+        X: pd.DataFrame,
+        attr: str | int | None = None,
+        *,
+        mask: pd.DataFrame | np.ndarray | Tensor | None = None,
+        L: int = 50,
+    ) -> np.ndarray | Tensor:
+        r"""Return posterior predictive probabilities.
+
+        When ``attr`` is ``None`` the method preserves the previous behaviour
+        and returns the calibrated classifier probabilities for ``X``.  When
+        ``attr`` identifies a categorical or ordinal schema attribute the
+        method estimates the Monte Carlo posterior predictive distribution
+        :math:`p(x_{attr} \mid x^o)` by masking the target column and decoding
+        samples from :math:`q(s, z \mid x^o)`.
 
         Parameters
         ----------
         X:
             Input features with shape ``(n_samples, n_features)``.
+        attr:
+            Optional attribute name or index.  When provided, the returned
+            tensor contains posterior predictive probabilities for the
+            specified categorical/ordinal column.
+        mask:
+            Optional boolean mask marking missing entries (``True`` for
+            missing).  Only used when ``attr`` is provided.
+        L:
+            Number of Monte Carlo samples used for the posterior predictive
+            estimate when ``attr`` is provided.  Must be positive.
 
         Returns
         -------
-        numpy.ndarray
-            Array of shape ``(n_samples, n_classes)`` containing the calibrated
-            probabilities produced by the classifier head.
+        numpy.ndarray or torch.Tensor
+            When ``attr`` is ``None`` the return value is an ``(n_samples,
+            n_classes)`` :class:`numpy.ndarray` with calibrated classifier
+            probabilities.  Otherwise a ``torch.FloatTensor`` with shape
+            ``(n_samples, n_classes_attr)`` containing posterior predictive
+            probabilities is returned.
 
         Examples
         --------
         >>> proba = model.predict_proba(X)
         >>> proba.sum(axis=1)
         array([1., 1.])
+        >>> gender_probs = model.predict_proba(X, attr="gender")
+        >>> torch.allclose(gender_probs.sum(dim=1), torch.ones(len(X)))
+        True
         """
 
-        self._ensure_classifier_available("predict_proba")
-        if not self._is_fitted or self._classes is None:
-            raise RuntimeError("Model must be fitted before calling predict_proba")
-        cache_key = self._fingerprint_inputs(X)
-        if (
-            self._cached_probabilities is not None
-            and self._probability_cache_key == cache_key
+        if attr is None:
+            self._ensure_classifier_available("predict_proba")
+            if not self._is_fitted or self._classes is None:
+                raise RuntimeError("Model must be fitted before calling predict_proba")
+            cache_key = self._fingerprint_inputs(X)
+            if (
+                self._cached_probabilities is not None
+                and self._probability_cache_key == cache_key
+            ):
+                return self._cached_probabilities
+            logits = self._compute_logits(X, cache_key=cache_key)
+            if self._cached_logits is None:
+                raise RuntimeError("Logits cache was not populated")
+            if self._is_calibrated:
+                logits = self._temperature_scaler.transform(logits)
+            probabilities = self._logits_to_probabilities(logits)
+            self._cached_probabilities = probabilities
+            self._probability_cache_key = cache_key
+            return probabilities
+
+        if not self._is_fitted or self._encoder is None or self._decoder is None:
+            raise RuntimeError(
+                "Model must be fitted before requesting attribute probabilities"
+            )
+        attr_name, spec, _ = self._resolve_attribute(attr)
+        if spec.type not in {"cat", "ordinal"}:
+            raise ValueError(
+                "predict_proba is only defined for categorical or ordinal attributes"
+            )
+        if L <= 0:
+            raise ValueError("L must be a positive integer")
+
+        encoder_inputs, attr_data, attr_mask = self._normalize_inputs(
+            X, attr_name, mask
+        )
+        batch = encoder_inputs.size(0)
+        n_classes = int(spec.n_classes or attr_data.size(-1))
+        if batch == 0:
+            return torch.empty((0, n_classes), dtype=torch.float32)
+
+        device = self.device
+        encoder_inputs = encoder_inputs.to(device)
+        attr_data = attr_data.to(device)
+        attr_mask = attr_mask.to(device)
+
+        encoder_state = self._encoder.training
+        decoder_state = self._decoder.training
+        self._encoder.eval()
+        self._decoder.eval()
+        with torch.no_grad():
+            info = self._posterior_predictive_params(
+                encoder_inputs, attr_name, spec.type, attr_data, attr_mask, L
+            )
+        if encoder_state:
+            self._encoder.train()
+        if decoder_state:
+            self._decoder.train()
+
+        probs = info.get("probs")
+        if probs is None:
+            params = info.get("params", {})
+            logits = params.get("logits")
+            if logits is None:
+                raise RuntimeError(
+                    "Decoder head did not expose logits for attribute probabilities"
+                )
+            probs = torch.softmax(logits, dim=-1)
+        probs = probs.view(L, batch, -1).mean(dim=0)
+        probs = torch.clamp(probs, min=1e-8)
+        normaliser = probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        probs = probs / normaliser
+        return probs.detach().cpu()
+
+    def predict_confidence_interval(
+        self,
+        X: pd.DataFrame,
+        attr: str | int,
+        *,
+        mask: pd.DataFrame | np.ndarray | Tensor | None = None,
+        L: int = 1000,
+        ci: float = 0.95,
+        statistic: Literal["mean", "median", None] | None = None,
+        return_samples: bool = False,
+    ) -> dict[str, Tensor]:
+        r"""Return Monte Carlo posterior predictive statistics for ``attr``.
+
+        The attribute is treated as missing and the method samples ``L`` draws
+        from :math:`q(s, z \mid x^o)` followed by the decoder likelihood.  The
+        returned dictionary includes the requested point estimate, percentile
+        confidence interval bounds and the sample standard deviation.  When
+        ``return_samples`` is ``True`` the raw predictive samples are also
+        returned with shape ``(n_samples, L)``.
+
+        Parameters
+        ----------
+        X:
+            Input features with shape ``(n_samples, n_features)``.
+        attr:
+            Attribute name or positional index referring to a real, positive or
+            count feature.
+        mask:
+            Optional boolean mask marking missing entries (``True`` for
+            missing).  The specified attribute is always treated as missing
+            regardless of ``mask``.
+        L:
+            Number of Monte Carlo samples used to approximate the predictive
+            distribution.  Must be positive.
+        ci:
+            Central confidence interval mass.  Must lie strictly between ``0``
+            and ``1``.
+        statistic:
+            Optional override for the point estimate.  When ``None`` the mean
+            is used for ``real``/``count`` attributes and the median for
+            ``pos`` (log-normal) attributes.
+        return_samples:
+            When ``True`` the returned dictionary includes the raw predictive
+            samples in ``result["samples"]``.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys ``point``, ``lower`` and ``upper`` (and
+            optionally ``std`` and ``samples``) containing :class:`torch.Tensor`
+            objects of shape ``(n_samples,)`` (``samples`` has shape
+            ``(n_samples, L)``).
+
+        Examples
+        --------
+        >>> stats = model.predict_confidence_interval(X, "age", L=256)
+        >>> stats["lower"].shape
+        torch.Size([len(X)])
+        """
+
+        if not self._is_fitted or self._encoder is None or self._decoder is None:
+            raise RuntimeError(
+                "Model must be fitted before computing confidence intervals"
+            )
+        attr_name, spec, _ = self._resolve_attribute(attr)
+        if spec.type in {"cat", "ordinal"}:
+            raise ValueError(
+                "predict_confidence_interval is only available for real, pos or count attributes"
+            )
+        if L <= 0:
+            raise ValueError("L must be a positive integer")
+        if not (0.0 < ci < 1.0):
+            raise ValueError("ci must lie strictly between 0 and 1")
+        if statistic not in {None, "mean", "median"}:
+            raise ValueError("statistic must be one of None, 'mean' or 'median'")
+
+        encoder_inputs, attr_data, attr_mask = self._normalize_inputs(
+            X, attr_name, mask
+        )
+        batch = encoder_inputs.size(0)
+        device = self.device
+        if batch == 0:
+            empty = torch.empty(0, dtype=torch.float32)
+            result: dict[str, Tensor] = {
+                "point": empty,
+                "lower": empty,
+                "upper": empty,
+            }
+            if return_samples:
+                result["samples"] = empty.view(0, 0)
+            return result
+
+        encoder_inputs = encoder_inputs.to(device)
+        attr_data = attr_data.to(device)
+        attr_mask = attr_mask.to(device)
+
+        encoder_state = self._encoder.training
+        decoder_state = self._decoder.training
+        self._encoder.eval()
+        self._decoder.eval()
+        with torch.no_grad():
+            info = self._posterior_predictive_params(
+                encoder_inputs, attr_name, spec.type, attr_data, attr_mask, L
+            )
+            params = info.get("params", {})
+        if encoder_state:
+            self._encoder.train()
+        if decoder_state:
+            self._decoder.train()
+
+        if not params:
+            raise RuntimeError(
+                "Decoder did not return parameters for confidence interval"
+            )
+
+        samples = self._draw_predictive_samples(spec.type, params, L, batch, device)
+        samples = samples.view(L, batch)
+        lower_q = (1.0 - ci) / 2.0
+        upper_q = 1.0 - lower_q
+        lower = torch.quantile(samples, lower_q, dim=0)
+        upper = torch.quantile(samples, upper_q, dim=0)
+        if statistic == "mean" or (
+            statistic is None and spec.type in {"real", "count"}
         ):
-            return self._cached_probabilities
-        logits = self._compute_logits(X, cache_key=cache_key)
-        if self._cached_logits is None:
-            raise RuntimeError("Logits cache was not populated")
-        if self._is_calibrated:
-            logits = self._temperature_scaler.transform(logits)
-        probabilities = self._logits_to_probabilities(logits)
-        self._cached_probabilities = probabilities
-        self._probability_cache_key = cache_key
-        return probabilities
+            point = samples.mean(dim=0)
+        else:
+            point = samples.median(dim=0).values
+        std = samples.std(dim=0, unbiased=False)
 
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """Return the most likely class for each sample."""
+        result = {
+            "point": point.detach().cpu(),
+            "lower": lower.detach().cpu(),
+            "upper": upper.detach().cpu(),
+            "std": std.detach().cpu(),
+        }
+        if return_samples:
+            result["samples"] = samples.transpose(0, 1).detach().cpu()
+        return result
 
-        self._ensure_classifier_available("predict")
-        probabilities = self.predict_proba(X)
-        indices = probabilities.argmax(axis=1)
-        return self._classes[indices]
+    def predict(
+        self,
+        X: pd.DataFrame,
+        attr: str | int | None = None,
+        *,
+        mask: pd.DataFrame | np.ndarray | Tensor | None = None,
+        L: int = 50,
+        mode: Literal["point", "sample"] = "point",
+    ) -> np.ndarray | Tensor:
+        """Return point predictions or samples for the requested target.
+
+        When ``attr`` is ``None`` the classifier argmax is returned.  Otherwise
+        the method routes to the posterior predictive utilities for the
+        specified attribute.  ``mode="point"`` returns the default point
+        estimate (mean or median depending on the attribute type) while
+        ``mode="sample"`` draws a stochastic sample from the predictive
+        distribution.
+        """
+
+        if attr is None:
+            self._ensure_classifier_available("predict")
+            probabilities = self.predict_proba(X)
+            indices = probabilities.argmax(axis=1)
+            return self._classes[indices]
+
+        attr_name, spec, _ = self._resolve_attribute(attr)
+        if mode not in {"point", "sample"}:
+            raise ValueError("mode must be either 'point' or 'sample'")
+
+        if spec.type in {"cat", "ordinal"}:
+            probs = self.predict_proba(X, attr=attr_name, mask=mask, L=L)
+            if probs.numel() == 0:
+                return probs.new_empty((0,), dtype=torch.long)
+            if mode == "point":
+                return probs.argmax(dim=1)
+            categorical = Categorical(probs=probs)
+            return categorical.sample()
+
+        stats = self.predict_confidence_interval(
+            X,
+            attr=attr_name,
+            mask=mask,
+            L=max(1, L),
+            statistic=None,
+            return_samples=(mode == "sample"),
+        )
+        point = stats["point"]
+        if mode == "point":
+            return point
+        samples = stats.get("samples")
+        if samples is None or samples.size(1) == 0:
+            return point
+        indices = torch.randint(
+            0, samples.size(1), (samples.size(0),), device=samples.device
+        )
+        gathered = samples.gather(1, indices.view(-1, 1)).squeeze(1)
+        return gathered
 
     # ------------------------------------------------------------------
     # Calibration utilities
