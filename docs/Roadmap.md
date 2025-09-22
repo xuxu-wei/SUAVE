@@ -1,5 +1,3 @@
-超清晰！按你“**工程整合优先、尽快可用**”的目标，我把与 **codex** 协作的路线、准备工作、初始命令、后续工作流，以及一份可直接落库的 **AGENTS.md** 都整理好了。默认：**不做自动类型识别**；**超参都在类/方法参数**；如需配置文件，只在**数据目录**下生成与数据绑定的 `schema.json`（可选）。
-
 ## 进度快照
 
 - ✅ MVP 核心链路（HI-VAE 迁移 + SUAVE API + 三阶段训练 + 校准 + 条件采样）已跑通并落地到主干。
@@ -20,19 +18,22 @@
    - [x] `fit()` 内部完成 **train 内部切分验证集**（如 `val_split=0.1`）
    - [x] 分类头：冻结解码器 → 训练 head → **轻联合微调**（warm-start → head → light joint FT）
    - [x] 温度缩放校准 + 基础可视化（ROC/PR、可靠性图、潜变量相关热图）
-2. **低成本增强（按需启用）**
 
+2. **低成本增强（按需启用）**
    - [x] 追加似然头
    - [ ] 自动化：自动化识别数据类型和生成schema
 
    - [x] 条件生成（CVAE 开关 `conditional=True`）：`fit(..., y=...)` 时启用可控采样
 
-   - [ ] 可解释性：beta-VAE
+   - [x] 可解释性：beta-VAE
 
    - [ ] 类不平衡：`class_weight/focal` + 条件过采样（已支持 `class_weight`，`focal` 与条件过采样待补充）
 
+3. **可能需要大幅修改的增强**
    - [ ] 添加 SUAVE 半监督支持（Warmup 阶段无监督、分类训练阶段有监督）
-3. **评测闭环** ✅
+- [ ] 无监督模式下的`predict()/predict_proba()`方法实现，参考HIVAE论文
+   
+4. **评测闭环** ✅
    - [x] **TSTR/TRTR** 脚手架（独立评测器）
    - [x] 简单 **MIA**（membership inference）基线（影子模型/置信阈值法）
    - [ ] 结果打包与示例 notebook（你的研究作 example）
@@ -307,12 +308,6 @@ evaluate.mia_baseline(m, X_train)
 - `save/load()` 往返一致
 - 单测通过：`pytest -q`
 - 风格：`black . && ruff .` 零错误
-
-## TODO
-
-- 当前所有与分类有关的接口（predict_proba、predict、calibrate 及内部 logits 计算）都会在 behaviour="hivae" 时抛错；只有 behaviour="suave" 能产出或标定概率。未来考虑参考HIVAE论文实现HIVAE分支的 predict_proba、predict、calibrate功能
-- 为了添加分类头，schema可能需要更新
-- SUAVE分支训练调度策略
 
 ------
 
