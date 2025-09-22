@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pandas as pd
 
@@ -60,6 +62,27 @@ def test_interactive_mode_gracefully_falls_back(monkeypatch) -> None:
     assert any("Interactive review not available" in message for message in result.messages)
 
 
+def test_high_cardinality_float_skips_unique(monkeypatch) -> None:
+    inferencer = SchemaInferencer()
+    high_cardinality = pd.Series(np.linspace(-500.5, 499.5, num=2048) + 0.123456)
+
+    module = importlib.import_module(SchemaInferencer.__module__)
+    call_counter = {"count": 0}
+    original_unique = module.np.unique
+
+    def tracking_unique(*args, **kwargs):
+        call_counter["count"] += 1
+        return original_unique(*args, **kwargs)
+
+    monkeypatch.setattr(module.np, "unique", tracking_unique)
+
+    spec, notes = inferencer._infer_numeric_schema(high_cardinality)
+
+    assert spec == {"type": "real"}
+    assert notes == ""
+    assert call_counter["count"] == 0
+    
+    
 def test_integer_inference_handles_wide_range() -> None:
     wide_range = [0, 10_000_000, 20_000_000]
     df = pd.DataFrame({"wide_range_ints": wide_range})
