@@ -18,9 +18,8 @@ class TemperatureScaler:
 
     The scaler keeps track of the learnt temperature parameter and exposes a
     small ``state_dict`` API so that callers can persist and restore the
-    calibration state.  The implementation mirrors the legacy TensorFlow
-    reference stored under ``third_party/hivae_tf`` while using native PyTorch
-    optimisation utilities.
+    calibration state.  The implementation relies purely on native PyTorch
+    optimisation utilities and is shared across the broader SUAVE package.
     """
 
     temperature: float = 1.0

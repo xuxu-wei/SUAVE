@@ -1,4 +1,4 @@
-"""Classification heads mirroring the legacy TensorFlow unsupervised baseline."""
+"""Classification heads used by the SUAVE classifier stack."""
 
 from __future__ import annotations
 

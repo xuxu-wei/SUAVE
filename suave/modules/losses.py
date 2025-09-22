@@ -1,4 +1,4 @@
-"""Loss helpers implementing unsupervised-style objectives."""
+"""Loss helpers implementing the variational objectives used in SUAVE."""
 
 from __future__ import annotations
 

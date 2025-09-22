@@ -1,8 +1,8 @@
-"""Distribution helpers mirroring the legacy TensorFlow unsupervised implementation.
+"""Distribution helpers shared by the SUAVE decoder components.
 
-The original unsupervised code expresses reconstruction terms for every column type
-in terms of log-likelihoods under the corresponding distribution.  This module
-contains the PyTorch equivalents that are shared by the decoder heads.
+The generative module expresses reconstruction terms for every column type in
+terms of log-likelihoods under the corresponding distribution.  This module
+contains the PyTorch utilities used across the decoder heads.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ def sample_categorical(logits: Tensor) -> Tensor:
 
 
 def make_normal(mu: Tensor, var: Tensor) -> Normal:
-    """Helper mirroring the TF utility for constructing :class:`Normal` objects."""
+    """Helper constructing :class:`Normal` objects from mean and variance."""
 
     std = torch.sqrt(torch.clamp(var, min=EPS))
     return Normal(mu, std)
