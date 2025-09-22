@@ -54,7 +54,7 @@ def _apply_observed_linear(
 
 
 class RealHead(LikelihoodHead):
-    """Gaussian reconstruction head mirroring the legacy unsupervised design."""
+    """Gaussian reconstruction head for real-valued features in SUAVE."""
 
     def __init__(self, y_dim: int, n_components: int) -> None:
         super().__init__(y_dim, n_components)

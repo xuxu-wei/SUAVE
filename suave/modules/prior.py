@@ -1,4 +1,4 @@
-"""Prior modules defining unsupervised-specific parameterisations."""
+"""Prior modules defining the mixture-aware parameterisations used in SUAVE."""
 
 from __future__ import annotations
 

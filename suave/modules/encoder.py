@@ -11,11 +11,10 @@ from torch import Tensor, nn
 class EncoderMLP(nn.Module):
     r"""Multi-layer perceptron producing the mean and log-variance of ``z``.
 
-    The architecture mirrors the legacy TensorFlow unsupervised baseline: a stack of dense
+    The architecture follows the default SUAVE encoder: a stack of dense
     layers followed by two linear heads generating the parameters of the
     approximate posterior :math:`q(z \mid x)`.  The log-variance output is
-    clamped for numerical stability, matching the behaviour of the reference
-    implementation.
+    clamped for numerical stability to avoid degenerate values during training.
 
     Parameters
     ----------

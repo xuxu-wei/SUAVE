@@ -103,16 +103,16 @@ class SUAVE:
         straight-through Gumbel-Softmax estimator. Default is ``1.0``.
     behaviour:
         Selects the feature set exposed by the estimator. Use ``"supervised"`` to
-        enable the extended classification stack or ``"unsupervised"`` to mirror the
-        lightweight generative-only branch.
+        enable the extended classification stack or ``"unsupervised"`` for the
+        generative-only workflow.
     tau_start:
         Initial temperature for the Gumbel-Softmax component sampler when
-        ``behaviour="unsupervised"``. Default is ``1.0`` to mirror the legacy
-        TensorFlow reference implementation.
+        ``behaviour="unsupervised"``. Default is ``1.0`` which offers a stable
+        starting point for mixture exploration.
     tau_min:
         Minimum temperature reached after annealing when
-        ``behaviour="unsupervised"``. Default is ``1e-3`` which corresponds to the
-        evaluation phase of the original unsupervised experiments.
+        ``behaviour="unsupervised"``. Default is ``1e-3`` so the sampler becomes
+        nearly deterministic by the end of training.
     tau_decay:
         Linear decay applied to the temperature at each epoch when
         ``behaviour="unsupervised"``. Default is ``0.01`` so that the temperature
@@ -2331,8 +2331,8 @@ class SUAVE:
             self._logits_cache_key = None
             self._probability_cache_key = None
             raise RuntimeError(
-                f"{caller} is unavailable when behaviour='unsupervised'; this mode matches "
-                "the baseline unsupervised branch and does not expose classifier outputs."
+                f"{caller} is unavailable when behaviour='unsupervised'; this mode focuses "
+                "on generative modelling and does not expose classifier outputs."
             )
 
     def _compute_logits(
