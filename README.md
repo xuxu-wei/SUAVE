@@ -1,14 +1,27 @@
 # SUAVE
 
-SUAVE is a schema-first variational autoencoder for mixed tabular data that unifies generative modeling and supervised prediction. The project draws direct inspiration from HI-VAE and related research on hierarchical latent variable models while modernising the workflow around explicit schemas, staged training, and probability calibration.
+SUAVE is a schema-first variational autoencoder for mixed tabular data that unifies generative modelling and supervised prediction. The project draws direct inspiration from HI-VAE and related research on hierarchical latent variable models while modernising the workflow around explicit schemas, staged training, and probability calibration.
 
-## Design philosophy
+## Key features
 
-- **Schema-driven inputs.** Users must declare every feature through :class:`~suave.types.Schema`, ensuring the model has explicit knowledge of mixed data types and category counts before training.【F:suave/types.py†L22-L115】
-- **Staged optimisation.** Training follows a warm-up → classifier head → joint fine-tuning schedule with KL annealing, mirroring best practices from HI-VAE-style objectives for stable convergence.【F:suave/model.py†L889-L1010】
-- **Transparent automation.** Optional ``auto_parameters`` heuristics adapt batch sizes and schedule lengths using dataset statistics while keeping overrides explicit in method signatures.【F:suave/model.py†L73-L128】【F:suave/model.py†L1039-L1091】
-- **Mask-aware generative decoding.** Normalisation utilities and decoder heads propagate feature-wise masks so missing data is handled consistently across real, categorical, positive, count, and ordinal variables.【F:suave/data.py†L15-L143】【F:suave/model.py†L1123-L1244】
-- **Built-in calibration and evaluation.** Temperature scaling, Brier score, expected calibration error, and other metrics are exposed for reliable downstream decision making.【F:suave/model.py†L2603-L2682】【F:suave/evaluate.py†L1-L200】
+- **Schema-driven inputs.** Users declare every column through `Schema`, giving the model explicit knowledge of data types and category counts before training begins.
+- **Staged optimisation.** Training follows a warm-up → classifier head → joint fine-tuning schedule with KL annealing for stable convergence.
+- **Transparent automation.** Optional `auto_parameters` heuristics adapt batch sizes, learning rates, and schedule lengths using dataset statistics without hiding overrides.
+- **Mask-aware generative decoding.** Normalisation utilities and decoder heads propagate feature-wise masks so missing values remain consistent across real, categorical, positive, count, and ordinal variables.
+- **Built-in calibration and evaluation.** Temperature scaling, Brier score, expected calibration error, and additional metrics are available for trustworthy downstream decisions.
+
+## Core API surface
+
+| Method | Purpose |
+| ------ | ------- |
+| `fit(X, y=None, **schedule)` | Train the generative model (and classifier head when labels are supplied) using staged optimisation with internal validation splits. |
+| `predict(X)` | Return the most likely class label after optional calibration. |
+| `predict_proba(X)` | Produce calibrated class probabilities with caching to avoid repeated encoder passes. |
+| `calibrate(X, y)` | Learn temperature scaling parameters on held-out logits and reuse them for later predictions. |
+| `encode(X, return_components=False)` | Map data to the latent space; optionally expose mixture assignments and component statistics. |
+| `sample(n, conditional=False, y=None)` | Generate synthetic samples, optionally conditioned on class labels. |
+| `impute(X, only_missing=True)` | Reconstruct missing or masked cells and merge them back into the original frame. |
+| `save(path)` / `SUAVE.load(path)` | Persist and restore model weights, schema metadata, and calibration state for deployment. |
 
 ## Installation
 
@@ -47,6 +60,8 @@ labels = model.predict(train_X.tail(5))
 For an end-to-end demonstration, see [`examples/sepsis_minimal.py`](examples/sepsis_minimal.py).
 
 ## API overview
+
+The following snippets highlight the most common workflows. Each method accepts pandas DataFrames or NumPy arrays unless stated otherwise.
 
 ### Schema definition
 
@@ -95,7 +110,7 @@ preds = model.predict(test_X)
 
 Probabilities are cached per input fingerprint to avoid redundant encoder passes during repeated evaluations.
 
-### Calibration
+### Calibration and evaluation
 
 ```python
 model.calibrate(val_X, val_y)
@@ -103,6 +118,17 @@ calibrated = model.predict_proba(test_X)
 ```
 
 Temperature scaling is trained on held-out logits and automatically reused for subsequent predictions.
+
+```python
+from suave.evaluate import compute_auroc, compute_auprc, compute_brier, compute_ece
+
+auroc = compute_auroc(proba, val_y.to_numpy())
+auprc = compute_auprc(proba, val_y.to_numpy())
+brier = compute_brier(proba, val_y.to_numpy())
+ece = compute_ece(proba, val_y.to_numpy(), n_bins=15)
+```
+
+Each helper validates probability shapes, performs necessary conversions for binary tasks, and returns `numpy.nan` when inputs are degenerate.
 
 ### Latent representations
 
@@ -144,19 +170,6 @@ restored.predict_proba(test_X)
 ```
 
 Model artefacts include schema metadata, learned parameters, and calibration state for reproducible deployment.
-
-### Evaluation utilities
-
-```python
-from suave.evaluate import compute_auroc, compute_auprc, compute_brier, compute_ece
-
-auroc = compute_auroc(proba, val_y.to_numpy())
-auprc = compute_auprc(proba, val_y.to_numpy())
-brier = compute_brier(proba, val_y.to_numpy())
-ece = compute_ece(proba, val_y.to_numpy(), n_bins=15)
-```
-
-Each helper validates probability shapes, performs necessary conversions for binary tasks, and returns ``numpy.nan`` when inputs are degenerate.
 
 ## Roadmap
 
