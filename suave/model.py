@@ -2473,12 +2473,12 @@ class SUAVE:
         aligned = X.loc[:, self.schema.feature_names].copy()
         aligned_reset = aligned.reset_index(drop=True)
 
-        mask = data_utils.build_missing_mask(aligned_reset)
+        base_mask = data_utils.build_missing_mask(aligned_reset)
         normalised = self._apply_training_normalization(aligned_reset)
-        mask = (mask | normalised.isna()).reset_index(drop=True)
+        combined_mask = (base_mask | normalised.isna()).reset_index(drop=True)
 
         _, data_tensors, mask_tensors = self._prepare_training_tensors(
-            normalised, mask, update_layout=False
+            normalised, combined_mask, update_layout=False
         )
 
         device = self._select_device()
@@ -2550,17 +2550,25 @@ class SUAVE:
         )
 
         if only_missing:
-            missing_mask = data_utils.build_missing_mask(aligned_reset)
             original_aligned = aligned_reset.copy()
+            imputed = reconstruction.copy()
             for column in reconstruction.columns:
+                observed_mask = ~combined_mask[column]
+                if not observed_mask.any():
+                    continue
                 column_data = reconstruction[column]
                 if isinstance(column_data.dtype, CategoricalDtype):
-                    original_aligned[column] = pd.Categorical(
-                        original_aligned[column],
-                        categories=column_data.cat.categories,
-                        ordered=column_data.cat.ordered,
-                    )
-            imputed = reconstruction.where(missing_mask, original_aligned)
+                    aligned_values = original_aligned.loc[observed_mask, column]
+                    aligned_values = aligned_values.astype(column_data.dtype)
+                    imputed.loc[observed_mask, column] = aligned_values
+                else:
+                    aligned_values = original_aligned.loc[observed_mask, column]
+                    target_dtype = imputed[column].dtype
+                    try:
+                        aligned_values = aligned_values.astype(target_dtype, copy=False)
+                    except (TypeError, ValueError):
+                        aligned_values = aligned_values.to_numpy()
+                    imputed.loc[observed_mask, column] = aligned_values
         else:
             imputed = reconstruction
 

@@ -183,3 +183,54 @@ def test_impute_raises_when_not_fitted(_schema: Schema) -> None:
     data = _make_dataset(5, random_state=3)
     with pytest.raises(RuntimeError):
         model.impute(data)
+
+
+@pytest.mark.parametrize("behaviour", ["unsupervised", "supervised"])
+def test_impute_replaces_unseen_levels(behaviour: str) -> None:
+    schema = Schema(
+        {
+            "real": {"type": "real"},
+            "category": {"type": "cat", "n_classes": 2},
+            "ordinal": {"type": "ordinal", "n_classes": 3},
+        }
+    )
+    train = pd.DataFrame(
+        {
+            "real": [0.1, 0.2, 0.3, 0.4],
+            "category": ["a", "b", "a", "b"],
+            "ordinal": [0, 1, 2, 1],
+        }
+    )
+    model = SUAVE(
+        schema=schema,
+        behaviour=behaviour,
+        latent_dim=6,
+        hidden_dims=(16, 8),
+        batch_size=4,
+    )
+    if behaviour == "supervised":
+        targets = (train["real"] > train["real"].mean()).astype(int).to_numpy()
+        model.fit(train, targets, epochs=2, batch_size=4)
+    else:
+        model.fit(train, epochs=2, batch_size=4)
+
+    test = train.copy()
+    unseen_category = "unseen"
+    out_of_range = 5
+    test.loc[0, "category"] = unseen_category
+    test.loc[1, "ordinal"] = out_of_range
+
+    imputed = model.impute(test, only_missing=True)
+
+    categorical_output = imputed["category"]
+    assert isinstance(categorical_output.dtype, CategoricalDtype)
+    assert not pd.isna(categorical_output.iloc[0])
+    assert categorical_output.iloc[0] != unseen_category
+    assert categorical_output.iloc[0] in list(categorical_output.cat.categories)
+
+    ordinal_output = imputed.loc[1, "ordinal"]
+    assert not pd.isna(ordinal_output)
+    assert ordinal_output != out_of_range
+    assert 0 <= float(ordinal_output) < 3
+    assert categorical_output.isna().sum() == 0
+    assert imputed["ordinal"].isna().sum() == 0
