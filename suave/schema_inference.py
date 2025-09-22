@@ -200,10 +200,10 @@ class SchemaInferencer:
         if integer_like:
             int_values = np.round(numeric).astype(int)
             sorted_unique = np.sort(np.unique(int_values))
-            contiguous = bool(
-                sorted_unique.size > 0
-                and np.array_equal(sorted_unique, np.arange(sorted_unique[0], sorted_unique[-1] + 1))
-            )
+            if sorted_unique.size <= 1:
+                contiguous = bool(sorted_unique.size)
+            else:
+                contiguous = bool(np.all(np.diff(sorted_unique) == 1))
             limited_range = (
                 sorted_unique.size > 0
                 and (sorted_unique[-1] - sorted_unique[0]) <= ORDINAL_RANGE_THRESHOLD

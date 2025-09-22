@@ -81,3 +81,14 @@ def test_high_cardinality_float_skips_unique(monkeypatch) -> None:
     assert spec == {"type": "real"}
     assert notes == ""
     assert call_counter["count"] == 0
+    
+    
+def test_integer_inference_handles_wide_range() -> None:
+    wide_range = [0, 10_000_000, 20_000_000]
+    df = pd.DataFrame({"wide_range_ints": wide_range})
+
+    inferencer = SchemaInferencer()
+    result = inferencer.infer(df, mode=SchemaInferenceMode.SILENT)
+    schema_dict = result.schema.to_dict()
+
+    assert schema_dict["wide_range_ints"]["type"] == "count"
