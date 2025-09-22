@@ -299,6 +299,12 @@ evaluate.mia_baseline(m, X_train)
 - 单测通过：`pytest -q`
 - 风格：`black . && ruff .` 零错误
 
+## TODO
+
+- 当前所有与分类有关的接口（predict_proba、predict、calibrate 及内部 logits 计算）都会在 behaviour="hivae" 时抛错；只有 behaviour="suave" 能产出或标定概率。未来考虑参考HIVAE论文实现HIVAE分支的 predict_proba、predict、calibrate功能
+- 为了添加分类头，schema可能需要更新
+- SUAVE分支训练调度策略
+
 ------
 
 # 四、初始命令（从空仓开始）
