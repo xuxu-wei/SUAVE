@@ -6,11 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+from torch import Tensor
+from unittest.mock import patch
 from pandas import CategoricalDtype
 from torch.nn import functional as F
 
 from suave import data as data_utils
-from suave import sampling as sampling_utils
 from suave.model import SUAVE
 from suave.types import Schema
 
@@ -40,7 +41,9 @@ def _make_dataset(n_samples: int, *, random_state: int = 0) -> pd.DataFrame:
     return frame
 
 
-def _private_reconstruction(model: SUAVE, X: pd.DataFrame) -> pd.DataFrame:
+def _expected_latent_assignments(
+    model: SUAVE, X: pd.DataFrame, *, assignment_strategy: str | None = None
+) -> tuple[Tensor, Tensor]:
     aligned = X.loc[:, model.schema.feature_names]
     aligned_reset = aligned.reset_index(drop=True)
     mask = data_utils.build_missing_mask(aligned_reset)
@@ -63,34 +66,47 @@ def _private_reconstruction(model: SUAVE, X: pd.DataFrame) -> pd.DataFrame:
 
     with torch.no_grad():
         encoder_state = model._encoder.training
-        decoder_state = model._decoder.training
         model._encoder.eval()
-        model._decoder.eval()
-        logits_enc, mu_enc, _ = model._encoder(encoder_inputs)
-        posterior_probs = torch.softmax(logits_enc, dim=-1)
-        component_indices = posterior_probs.argmax(dim=-1)
-        assignments = F.one_hot(
-            component_indices, num_classes=model.n_components
-        ).float()
-        selected_mu = model._gather_component_parameters(mu_enc, component_indices)
-        decoder_out = model._decoder(
-            selected_mu,
-            assignments,
-            data_tensors,
-            model._norm_stats_per_col,
-            mask_tensors,
+        logits_enc, mu_enc, logvar_enc = model._encoder(encoder_inputs)
+        posterior_mean, _, posterior_probs = model._mixture_posterior_statistics(
+            logits_enc,
+            mu_enc,
+            logvar_enc,
+            temperature=model._inference_tau if model.behaviour == "hivae" else None,
         )
+        strategy = assignment_strategy
+        if strategy is None:
+            strategy = "hard" if model.behaviour == "suave" else "soft"
+        strategy = strategy.lower()
+        if strategy == "hard":
+            component_indices = posterior_probs.argmax(dim=-1)
+            assignments = F.one_hot(
+                component_indices, num_classes=model.n_components
+            ).float()
+            selected_mu = model._gather_component_parameters(mu_enc, component_indices)
+        elif strategy == "soft":
+            assignments = posterior_probs
+            selected_mu = posterior_mean
+        elif strategy == "sample":
+            tau = (
+                max(float(model._inference_tau), 1e-6)
+                if model.behaviour == "hivae"
+                else max(float(model.gumbel_temperature), 1e-6)
+            )
+            assignments = F.gumbel_softmax(logits_enc, tau=tau, hard=False, dim=-1)
+            selected_mu = (assignments.unsqueeze(-1) * mu_enc).sum(dim=1)
+        else:
+            raise AssertionError(f"Unknown assignment strategy '{strategy}'")
         if encoder_state:
             model._encoder.train()
-        if decoder_state:
-            model._decoder.train()
-    return sampling_utils.decoder_outputs_to_frame(
-        decoder_out["per_feature"], model.schema, model._norm_stats_per_col
-    )
+    return selected_mu, assignments
 
 
 @pytest.mark.parametrize("behaviour", ["hivae", "suave"])
-def test_impute_matches_private_reconstruction(_schema: Schema, behaviour: str) -> None:
+@pytest.mark.parametrize("assignment_strategy", [None, "hard", "soft", "sample"])
+def test_impute_matches_expected_latents(
+    _schema: Schema, behaviour: str, assignment_strategy: str | None
+) -> None:
     train = _make_dataset(64, random_state=42)
     test = train.copy()
     test.loc[::5, "cholesterol"] = np.nan
@@ -109,12 +125,23 @@ def test_impute_matches_private_reconstruction(_schema: Schema, behaviour: str) 
     else:
         model.fit(train, epochs=2, batch_size=32)
 
-    torch.manual_seed(0)
-    imputed = model.impute(test, only_missing=False)
-    torch.manual_seed(0)
-    manual = _private_reconstruction(model, test)
-    manual.index = test.index
-    pd.testing.assert_frame_equal(imputed, manual)
+    if assignment_strategy == "sample":
+        torch.manual_seed(0)
+    expected_latents, expected_assignments = _expected_latent_assignments(
+        model, test, assignment_strategy=assignment_strategy
+    )
+    if assignment_strategy == "sample":
+        torch.manual_seed(0)
+    kwargs = {"only_missing": False}
+    if assignment_strategy is not None:
+        kwargs["assignment_strategy"] = assignment_strategy
+    assert model._decoder is not None
+    with patch.object(model._decoder, "forward", wraps=model._decoder.forward) as spy:
+        _ = model.impute(test, **kwargs)
+        spy.assert_called_once()
+        latent_arg, assignment_arg = spy.call_args[0][:2]
+    assert torch.allclose(latent_arg, expected_latents)
+    assert torch.allclose(assignment_arg, expected_assignments)
 
 
 def test_impute_preserves_observed_entries(_schema: Schema) -> None:

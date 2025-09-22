@@ -55,11 +55,16 @@ class DummySUAVE(SUAVE):
     def set_logits(self, frame: pd.DataFrame, logits: np.ndarray) -> None:
         self._logit_lookup[id(frame)] = logits
 
-    def _compute_logits(self, X: pd.DataFrame) -> np.ndarray:  # type: ignore[override]
+    def _compute_logits(
+        self, X: pd.DataFrame, *, cache_key: str | None = None
+    ) -> np.ndarray:  # type: ignore[override]
         logits = self._logit_lookup.get(id(X))
         if logits is None:
             raise KeyError("Logits for the provided frame are not registered")
         self._cached_logits = logits
+        self._cached_probabilities = None
+        self._logits_cache_key = cache_key
+        self._probability_cache_key = None
         return logits
 
 
