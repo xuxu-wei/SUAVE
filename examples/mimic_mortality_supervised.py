@@ -9,6 +9,7 @@ import sys
 import time
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
+
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -48,6 +49,7 @@ except ImportError as exc:  # pragma: no cover - optuna provided via requirement
     ) from exc
 
 
+
 RANDOM_STATE = 42
 TARGET_COLUMNS = ("in_hospital_mortality", "28d_mortality")
 CATEGORICAL_FEATURES = ("sex", "CRRT", "Respiratory_Support")
@@ -61,11 +63,11 @@ HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, int]] = {
 }
 
 
+
 def load_dataset(path: Path) -> pd.DataFrame:
     """Load a TSV file into a :class:`pandas.DataFrame`."""
 
     return pd.read_csv(path, sep="\t")
-
 
 def define_schema(df: pd.DataFrame, feature_columns: Iterable[str]) -> Schema:
     """Create a :class:`Schema` describing ``df``'s feature columns."""
@@ -105,6 +107,7 @@ def split_train_validation_calibration(
     """Split data into train, validation, and calibration subsets."""
 
     X_model, X_calibration, y_model, y_calibration = train_test_split(
+
         features,
         targets,
         test_size=calibration_size,
@@ -149,6 +152,7 @@ def format_float(value: Optional[float]) -> str:
     if isinstance(value, float) and not np.isfinite(value):
         return "nan"
     return f"{float(value):.3f}"
+
 
 
 def compute_binary_metrics(
@@ -263,6 +267,7 @@ def run_optuna_search(
     return study, best_attributes
 
 
+
 def plot_calibration_curves(
     probability_map: Mapping[str, np.ndarray],
     label_map: Mapping[str, np.ndarray],
@@ -278,6 +283,7 @@ def plot_calibration_curves(
         [0, 1], [0, 1], linestyle="--", color="tab:gray", label="Perfect calibration"
     )
 
+
     for dataset_name, probs in probability_map.items():
         labels = label_map[dataset_name]
         if probs.ndim == 2:
@@ -292,6 +298,7 @@ def plot_calibration_curves(
         ax.plot(
             mean_pred, frac_pos, marker="o", label=f"{dataset_name} (Brier={brier:.3f})"
         )
+
 
     ax.set_xlabel("Predicted probability")
     ax.set_ylabel("Observed frequency")
@@ -338,6 +345,7 @@ def plot_latent_space(
         sharex=True,
         sharey=True,
     )
+
     if len(latent_blocks) == 1:
         axes = [axes]
 
@@ -382,6 +390,7 @@ def kolmogorov_smirnov_statistic(real: np.ndarray, synthetic: np.ndarray) -> flo
         np.searchsorted(synthetic_sorted, combined, side="right")
         / synthetic_sorted.size
     )
+
     return float(np.max(np.abs(cdf_real - cdf_synth)))
 
 
@@ -391,6 +400,7 @@ def rbf_mmd(
     *,
     max_samples: int = 1000,
     random_state: int = 42,
+
 ) -> float:
     """Compute the maximum mean discrepancy with an RBF kernel."""
 
@@ -428,6 +438,7 @@ def rbf_mmd(
 def mutual_information_feature(
     real: np.ndarray, synthetic: np.ndarray, n_bins: int = 10
 ) -> float:
+
     """Estimate mutual information between dataset indicator and feature bins."""
 
     real = np.asarray(real, dtype=float)
@@ -454,6 +465,7 @@ def mutual_information_feature(
             np.zeros(real_binned.size, dtype=int),
             np.ones(synthetic_binned.size, dtype=int),
         ]
+
     )
     feature_bins = np.concatenate([real_binned, synthetic_binned])
     if np.unique(feature_bins).size <= 1:
@@ -519,6 +531,7 @@ def main() -> None:
     """Run the full supervised mortality analysis pipeline."""
 
     args = parse_arguments()
+
     data_dir = Path(__file__).parent / "data" / "sepsis_mortality_dataset"
     output_dir = data_dir / OUTPUT_DIR_NAME
     output_dir.mkdir(exist_ok=True)
@@ -533,6 +546,7 @@ def main() -> None:
     schema = define_schema(train_df, feature_columns)
     schema_table = schema_markdown_table(schema)
 
+
     metrics_records: List[Dict[str, object]] = []
     calibration_paths: Dict[str, Path] = {}
     latent_paths: Dict[str, Path] = {}
@@ -544,6 +558,7 @@ def main() -> None:
     tstr_path: Optional[Path] = None
     distribution_df: Optional[pd.DataFrame] = None
     distribution_path: Optional[Path] = None
+
 
     for target in TARGET_COLUMNS:
         if target not in train_df.columns:
@@ -598,6 +613,7 @@ def main() -> None:
             beta=float(best_params.get("beta", 1.5)),
             random_state=RANDOM_STATE,
             auto_parameters=False,
+
         )
         model.fit(
             X_train_model,
@@ -605,6 +621,7 @@ def main() -> None:
             warmup_epochs=int(best_params.get("warmup_epochs", 3)),
             head_epochs=int(best_params.get("head_epochs", 2)),
             finetune_epochs=int(best_params.get("finetune_epochs", 2)),
+
         )
         model.calibrate(X_calibration, y_calibration)
         models[target] = model
@@ -623,6 +640,7 @@ def main() -> None:
         probability_map: Dict[str, np.ndarray] = {}
         label_map: Dict[str, np.ndarray] = {}
         dataset_metric_map: Dict[str, Dict[str, float]] = {}
+
         for dataset_name, (features, labels) in evaluation_datasets.items():
             probs = model.predict_proba(features)
             probability_map[dataset_name] = probs
@@ -660,6 +678,7 @@ def main() -> None:
 
         train_probabilities = probability_map["Train"]
         test_probabilities = probability_map["MIMIC test"]
+
         membership = simple_membership_inference(
             train_probabilities,
             np.asarray(y_train_model),
@@ -716,6 +735,7 @@ def main() -> None:
         synthetic_labels = rng.choice(
             y_train_full, size=len(y_train_full), replace=True
         )
+
         synthetic_features = in_hospital_model.sample(
             len(synthetic_labels), conditional=True, y=synthetic_labels
         )
@@ -735,6 +755,7 @@ def main() -> None:
             make_logistic_pipeline,
         )
         tstr_results = pd.DataFrame(
+
             [
                 {"setting": "TSTR", **tstr_metrics},
                 {"setting": "TRTR", **trtr_metrics},
@@ -742,6 +763,7 @@ def main() -> None:
         )
         tstr_path = output_dir / "tstr_trtr_comparison.csv"
         tstr_results.to_csv(tstr_path, index=False)
+
 
         distribution_rows: List[Dict[str, object]] = []
         for column in feature_columns:
@@ -755,6 +777,7 @@ def main() -> None:
                     "mutual_information": mutual_information_feature(
                         real_values, synthetic_values
                     ),
+
                 }
             )
         distribution_df = pd.DataFrame(distribution_rows)
@@ -873,6 +896,7 @@ def main() -> None:
     summary_path = output_dir / "summary.md"
     summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
 
+
     print("Analysis complete.")
     print(f"Metric table saved to {metrics_path}")
     for target, path in calibration_paths.items():
@@ -888,6 +912,7 @@ def main() -> None:
         print(f"TSTR/TRTR comparison saved to {tstr_path}")
         print(f"Distribution metrics saved to {distribution_path}")
     print(f"Summary written to {summary_path}")
+
 
 
 if __name__ == "__main__":
