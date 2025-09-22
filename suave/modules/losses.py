@@ -1,4 +1,4 @@
-"""Loss helpers implementing HI-VAE style objectives."""
+"""Loss helpers implementing unsupervised-style objectives."""
 
 from __future__ import annotations
 

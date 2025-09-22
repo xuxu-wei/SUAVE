@@ -11,7 +11,7 @@ from torch import Tensor, nn
 class EncoderMLP(nn.Module):
     r"""Multi-layer perceptron producing the mean and log-variance of ``z``.
 
-    The architecture mirrors the TensorFlow HI-VAE baseline: a stack of dense
+    The architecture mirrors the legacy TensorFlow unsupervised baseline: a stack of dense
     layers followed by two linear heads generating the parameters of the
     approximate posterior :math:`q(z \mid x)`.  The log-variance output is
     clamped for numerical stability, matching the behaviour of the reference

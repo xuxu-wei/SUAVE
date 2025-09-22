@@ -72,11 +72,13 @@ def _expected_latent_assignments(
             logits_enc,
             mu_enc,
             logvar_enc,
-            temperature=model._inference_tau if model.behaviour == "hivae" else None,
+            temperature=(
+                model._inference_tau if model.behaviour == "unsupervised" else None
+            ),
         )
         strategy = assignment_strategy
         if strategy is None:
-            strategy = "hard" if model.behaviour == "suave" else "soft"
+            strategy = "hard" if model.behaviour == "supervised" else "soft"
         strategy = strategy.lower()
         if strategy == "hard":
             component_indices = posterior_probs.argmax(dim=-1)
@@ -90,7 +92,7 @@ def _expected_latent_assignments(
         elif strategy == "sample":
             tau = (
                 max(float(model._inference_tau), 1e-6)
-                if model.behaviour == "hivae"
+                if model.behaviour == "unsupervised"
                 else max(float(model.gumbel_temperature), 1e-6)
             )
             assignments = F.gumbel_softmax(logits_enc, tau=tau, hard=False, dim=-1)
@@ -102,7 +104,7 @@ def _expected_latent_assignments(
     return selected_mu, assignments
 
 
-@pytest.mark.parametrize("behaviour", ["hivae", "suave"])
+@pytest.mark.parametrize("behaviour", ["unsupervised", "supervised"])
 @pytest.mark.parametrize("assignment_strategy", [None, "hard", "soft", "sample"])
 def test_impute_matches_expected_latents(
     _schema: Schema, behaviour: str, assignment_strategy: str | None
@@ -119,7 +121,7 @@ def test_impute_matches_expected_latents(
         hidden_dims=(32, 16),
         batch_size=32,
     )
-    if behaviour == "suave":
+    if behaviour == "supervised":
         targets = (train["age"] > train["age"].median()).astype(int).to_numpy()
         model.fit(train, targets, epochs=2, batch_size=32)
     else:
@@ -146,7 +148,9 @@ def test_impute_matches_expected_latents(
 
 def test_impute_preserves_observed_entries(_schema: Schema) -> None:
     train = _make_dataset(40, random_state=1)
-    model = SUAVE(schema=_schema, behaviour="hivae", latent_dim=6, hidden_dims=(16, 8))
+    model = SUAVE(
+        schema=_schema, behaviour="unsupervised", latent_dim=6, hidden_dims=(16, 8)
+    )
     model.fit(train, epochs=1, batch_size=20)
 
     test = train.copy()
@@ -175,7 +179,7 @@ def test_impute_preserves_observed_entries(_schema: Schema) -> None:
 
 
 def test_impute_raises_when_not_fitted(_schema: Schema) -> None:
-    model = SUAVE(schema=_schema, behaviour="hivae")
+    model = SUAVE(schema=_schema, behaviour="unsupervised")
     data = _make_dataset(5, random_state=3)
     with pytest.raises(RuntimeError):
         model.impute(data)

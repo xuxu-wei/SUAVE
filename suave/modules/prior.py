@@ -1,4 +1,4 @@
-"""Prior modules defining HI-VAE specific parameterisations."""
+"""Prior modules defining unsupervised-specific parameterisations."""
 
 from __future__ import annotations
 

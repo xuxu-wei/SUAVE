@@ -64,9 +64,14 @@ def _build_legacy_payload(payload: dict) -> dict:
     modules = payload.get("modules", {})
     artefacts = payload.get("artefacts", {})
 
+    behaviour = metadata.get("behaviour")
+    if isinstance(behaviour, str):
+        behaviour_aliases = {"supervised": "suave", "unsupervised": "hivae"}
+        behaviour = behaviour_aliases.get(behaviour.lower(), behaviour)
+
     legacy = {
         "schema": metadata.get("schema"),
-        "behaviour": metadata.get("behaviour"),
+        "behaviour": behaviour,
         "latent_dim": metadata.get("latent_dim"),
         "n_components": metadata.get("n_components"),
         "hidden_dims": metadata.get("hidden_dims"),
@@ -264,7 +269,7 @@ def test_save_load_predict_round_trip(tmp_path: Path):
     model.save(save_path)
 
     reloaded = SUAVE.load(save_path)
-    assert reloaded.behaviour == "suave"
+    assert reloaded.behaviour == "supervised"
     assert reloaded._classifier is not None
     assert reloaded._is_calibrated is True
     assert reloaded._temperature_scaler_state is not None
@@ -307,7 +312,7 @@ def test_save_payload_contains_classifier_temperature_and_prior(tmp_path: Path):
 
     payload = torch.load(save_path, map_location="cpu")
     metadata = payload["metadata"]
-    assert metadata["behaviour"] == "suave"
+    assert metadata["behaviour"] == "supervised"
     modules = payload["modules"]
     classifier_payload = modules["classifier"]
     assert classifier_payload is not None
@@ -370,9 +375,9 @@ def test_calibrate_updates_probability_cache_and_metrics() -> None:
     assert metrics["ece"] == pytest.approx(expected_ece)
 
 
-def test_hivae_behaviour_disables_classifier():
+def test_unsupervised_behaviour_disables_classifier():
     X, y, schema = make_dataset()
-    model = SUAVE(schema=schema, behaviour="hivae", n_components=2)
+    model = SUAVE(schema=schema, behaviour="unsupervised", n_components=2)
     model.fit(X, epochs=1)
     latent = model.encode(X)
     assert latent.shape[0] == len(X)
@@ -397,15 +402,15 @@ def test_hivae_behaviour_disables_classifier():
     assert model._cached_probabilities is None
 
 
-def test_hivae_behaviour_persists_after_save(tmp_path: Path):
+def test_unsupervised_behaviour_persists_after_save(tmp_path: Path):
     X, _, schema = make_dataset()
-    model = SUAVE(schema=schema, behaviour="hivae", n_components=2)
+    model = SUAVE(schema=schema, behaviour="unsupervised", n_components=2)
     model.fit(X, epochs=1)
     trained_tau = model._inference_tau
     save_path = tmp_path / "model.json"
     model.save(save_path)
     loaded = SUAVE.load(save_path)
-    assert loaded.behaviour == "hivae"
+    assert loaded.behaviour == "unsupervised"
     assert loaded._inference_tau == pytest.approx(trained_tau)
     assert loaded.warmup_epochs == 1
     assert loaded.head_epochs == 0
@@ -416,11 +421,11 @@ def test_hivae_behaviour_persists_after_save(tmp_path: Path):
         loaded.predict_proba(X)
 
 
-def test_hivae_temperature_without_annealing_is_reproducible():
+def test_unsupervised_temperature_without_annealing_is_reproducible():
     X, _, schema = make_dataset()
     model = SUAVE(
         schema=schema,
-        behaviour="hivae",
+        behaviour="unsupervised",
         n_components=2,
         tau_start=1.0,
         tau_min=1.0,
@@ -434,11 +439,11 @@ def test_hivae_temperature_without_annealing_is_reproducible():
     np.testing.assert_allclose(latents_first, latents_second)
 
 
-def test_hivae_inference_temperature_tracks_training_progress():
+def test_unsupervised_inference_temperature_tracks_training_progress():
     X, _, schema = make_dataset()
     model = SUAVE(
         schema=schema,
-        behaviour="hivae",
+        behaviour="unsupervised",
         n_components=2,
         tau_start=1.0,
         tau_min=0.5,
@@ -449,11 +454,11 @@ def test_hivae_inference_temperature_tracks_training_progress():
     assert model._inference_tau == pytest.approx(expected_tau)
 
 
-def test_hivae_prior_mean_layer_trains_and_samples():
+def test_unsupervised_prior_mean_layer_trains_and_samples():
     X, _, schema = make_dataset()
     model = SUAVE(
         schema=schema,
-        behaviour="hivae",
+        behaviour="unsupervised",
         n_components=2,
         latent_dim=4,
         batch_size=2,
@@ -476,11 +481,11 @@ def test_hivae_prior_mean_layer_trains_and_samples():
     )
 
 
-def test_hivae_impute_assignment_modes_route_expected_weights():
+def test_unsupervised_impute_assignment_modes_route_expected_weights():
     X, _, schema = make_dataset()
     model = SUAVE(
         schema=schema,
-        behaviour="hivae",
+        behaviour="unsupervised",
         n_components=2,
         latent_dim=4,
         batch_size=2,
@@ -542,41 +547,53 @@ def test_hivae_impute_assignment_modes_route_expected_weights():
 def test_legacy_loader_respects_behaviour_modes(tmp_path: Path):
     X, y, schema = make_dataset()
 
-    suave_model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)
-    suave_model.fit(X, y, epochs=1)
-    suave_model.calibrate(X, y)
-    expected_suave_probs = suave_model.predict_proba(X)
-    expected_suave_logits = suave_model._cached_logits.copy()
-    expected_suave_latents = suave_model.encode(X)
-    modern_suave_path = tmp_path / "modern_suave.pt"
-    suave_model.save(modern_suave_path)
-    suave_payload = torch.load(modern_suave_path, map_location="cpu")
-    legacy_suave = _build_legacy_payload(suave_payload)
-    legacy_suave_path = tmp_path / "legacy_suave.json"
-    legacy_suave_path.write_text(json.dumps(legacy_suave))
-    loaded_suave = SUAVE.load(legacy_suave_path)
-    assert loaded_suave.behaviour == "suave"
-    assert loaded_suave._classifier is not None
-    np.testing.assert_allclose(expected_suave_logits, loaded_suave._cached_logits)
-    np.testing.assert_allclose(expected_suave_probs, loaded_suave._cached_probabilities)
-    np.testing.assert_allclose(expected_suave_latents, loaded_suave.encode(X))
-    np.testing.assert_allclose(expected_suave_probs, loaded_suave.predict_proba(X))
-
-    hivae_model = SUAVE(
-        schema=schema, behaviour="hivae", latent_dim=4, batch_size=2, n_components=2
+    supervised_model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)
+    supervised_model.fit(X, y, epochs=1)
+    supervised_model.calibrate(X, y)
+    expected_supervised_probs = supervised_model.predict_proba(X)
+    expected_supervised_logits = supervised_model._cached_logits.copy()
+    expected_supervised_latents = supervised_model.encode(X)
+    modern_supervised_path = tmp_path / "modern_supervised.pt"
+    supervised_model.save(modern_supervised_path)
+    supervised_payload = torch.load(modern_supervised_path, map_location="cpu")
+    legacy_supervised = _build_legacy_payload(supervised_payload)
+    legacy_supervised_path = tmp_path / "legacy_supervised.json"
+    legacy_supervised_path.write_text(json.dumps(legacy_supervised))
+    loaded_supervised = SUAVE.load(legacy_supervised_path)
+    assert loaded_supervised.behaviour == "supervised"
+    assert loaded_supervised._classifier is not None
+    np.testing.assert_allclose(
+        expected_supervised_logits, loaded_supervised._cached_logits
     )
-    hivae_model.fit(X, epochs=1)
-    expected_hivae_latents = hivae_model.encode(X)
-    modern_hivae_path = tmp_path / "modern_hivae.pt"
-    hivae_model.save(modern_hivae_path)
-    hivae_payload = torch.load(modern_hivae_path, map_location="cpu")
-    legacy_hivae = _build_legacy_payload(hivae_payload)
-    legacy_hivae_path = tmp_path / "legacy_hivae.json"
-    legacy_hivae_path.write_text(json.dumps(legacy_hivae))
-    loaded_hivae = SUAVE.load(legacy_hivae_path)
-    assert loaded_hivae.behaviour == "hivae"
-    assert loaded_hivae._classifier is None
-    assert loaded_hivae._cached_logits is None
-    np.testing.assert_allclose(expected_hivae_latents, loaded_hivae.encode(X))
+    np.testing.assert_allclose(
+        expected_supervised_probs, loaded_supervised._cached_probabilities
+    )
+    np.testing.assert_allclose(expected_supervised_latents, loaded_supervised.encode(X))
+    np.testing.assert_allclose(
+        expected_supervised_probs, loaded_supervised.predict_proba(X)
+    )
+
+    unsupervised_model = SUAVE(
+        schema=schema,
+        behaviour="unsupervised",
+        latent_dim=4,
+        batch_size=2,
+        n_components=2,
+    )
+    unsupervised_model.fit(X, epochs=1)
+    expected_unsupervised_latents = unsupervised_model.encode(X)
+    modern_unsupervised_path = tmp_path / "modern_unsupervised.pt"
+    unsupervised_model.save(modern_unsupervised_path)
+    unsupervised_payload = torch.load(modern_unsupervised_path, map_location="cpu")
+    legacy_unsupervised = _build_legacy_payload(unsupervised_payload)
+    legacy_unsupervised_path = tmp_path / "legacy_unsupervised.json"
+    legacy_unsupervised_path.write_text(json.dumps(legacy_unsupervised))
+    loaded_unsupervised = SUAVE.load(legacy_unsupervised_path)
+    assert loaded_unsupervised.behaviour == "unsupervised"
+    assert loaded_unsupervised._classifier is None
+    assert loaded_unsupervised._cached_logits is None
+    np.testing.assert_allclose(
+        expected_unsupervised_latents, loaded_unsupervised.encode(X)
+    )
     with pytest.raises(RuntimeError):
-        loaded_hivae.predict_proba(X)
+        loaded_unsupervised.predict_proba(X)

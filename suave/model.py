@@ -56,9 +56,18 @@ _DEFAULT_FINETUNE_EPOCHS = 10
 _DEFAULT_JOINT_DECODER_LR_SCALE = 0.1
 _DEFAULT_EARLY_STOP_PATIENCE = 5
 
+_BEHAVIOUR_ALIASES = {"suave": "supervised", "hivae": "unsupervised"}
+
+
+def _normalise_behaviour(value: str) -> str:
+    """Return the canonical behaviour label for ``value``."""
+
+    normalised = value.lower()
+    return _BEHAVIOUR_ALIASES.get(normalised, normalised)
+
 
 class SUAVE:
-    """HI-VAE inspired model for mixed tabular data.
+    """Model for mixed tabular data with supervised and unsupervised branches.
 
     Parameters
     ----------
@@ -93,20 +102,20 @@ class SUAVE:
         Temperature parameter used when sampling mixture assignments through the
         straight-through Gumbel-Softmax estimator. Default is ``1.0``.
     behaviour:
-        Selects the feature set exposed by the estimator. Use ``"suave"`` to
-        enable the extended classification stack or ``"hivae"`` to match the
-        baseline HI-VAE behaviour (generative modelling only).
+        Selects the feature set exposed by the estimator. Use ``"supervised"`` to
+        enable the extended classification stack or ``"unsupervised"`` to mirror the
+        lightweight generative-only branch.
     tau_start:
         Initial temperature for the Gumbel-Softmax component sampler when
-        ``behaviour="hivae"``. Default is ``1.0`` to mirror the TensorFlow
-        reference implementation.
+        ``behaviour="unsupervised"``. Default is ``1.0`` to mirror the legacy
+        TensorFlow reference implementation.
     tau_min:
         Minimum temperature reached after annealing when
-        ``behaviour="hivae"``. Default is ``1e-3`` which corresponds to the
-        evaluation phase of the original HI-VAE experiments.
+        ``behaviour="unsupervised"``. Default is ``1e-3`` which corresponds to the
+        evaluation phase of the original unsupervised experiments.
     tau_decay:
         Linear decay applied to the temperature at each epoch when
-        ``behaviour="hivae"``. Default is ``0.01`` so that the temperature
+        ``behaviour="unsupervised"``. Default is ``0.01`` so that the temperature
         reaches ``tau_min`` after roughly one hundred epochs.
     warmup_epochs:
         Number of epochs dedicated to ELBO-only optimisation before training the
@@ -169,7 +178,7 @@ class SUAVE:
         stratify: bool = _DEFAULT_STRATIFY,
         random_state: int = _DEFAULT_RANDOM_STATE,
         gumbel_temperature: float = _DEFAULT_GUMBEL_TEMPERATURE,
-        behaviour: Literal["suave", "hivae"] = "suave",
+        behaviour: Literal["supervised", "unsupervised"] = "supervised",
         tau_start: float = 1.0,
         tau_min: float = 1e-3,
         tau_decay: float = 0.01,
@@ -197,9 +206,9 @@ class SUAVE:
         if gumbel_temperature <= 0:
             raise ValueError("gumbel_temperature must be positive")
         self.gumbel_temperature = float(gumbel_temperature)
-        behaviour_normalised = behaviour.lower()
-        if behaviour_normalised not in {"suave", "hivae"}:
-            raise ValueError("behaviour must be either 'suave' or 'hivae'")
+        behaviour_normalised = _normalise_behaviour(str(behaviour))
+        if behaviour_normalised not in {"supervised", "unsupervised"}:
+            raise ValueError("behaviour must be either 'supervised' or 'unsupervised'")
         self.behaviour = behaviour_normalised
 
         for name, value in {
@@ -255,11 +264,11 @@ class SUAVE:
         self._tau_min: float | None = None
         self._tau_decay: float | None = None
         self._inference_tau: float = 1.0
-        if self.behaviour == "hivae":
+        if self.behaviour == "unsupervised":
             if tau_start <= 0.0:
-                raise ValueError("tau_start must be positive for HI-VAE mode")
+                raise ValueError("tau_start must be positive for unsupervised mode")
             if tau_min <= 0.0:
-                raise ValueError("tau_min must be positive for HI-VAE mode")
+                raise ValueError("tau_min must be positive for unsupervised mode")
             if tau_min > tau_start:
                 raise ValueError("tau_min cannot exceed tau_start")
             if tau_decay < 0.0:
@@ -312,7 +321,7 @@ class SUAVE:
             self.n_components, self.latent_dim, dtype=torch.float32
         )
 
-        if self.behaviour == "hivae":
+        if self.behaviour == "unsupervised":
             self._prior_component_logits = Parameter(zeros_logits, requires_grad=False)
             self._prior_component_mu = None
             self._prior_component_logvar = Parameter(zeros_full, requires_grad=False)
@@ -338,7 +347,7 @@ class SUAVE:
             data = tensor.detach().to(device=device, dtype=torch.float32)
             return Parameter(data, requires_grad=trainable)
 
-        trainable = self.behaviour == "suave"
+        trainable = self.behaviour == "supervised"
         self._prior_component_logits = _wrap(
             self._prior_component_logits, trainable=trainable
         )
@@ -355,7 +364,7 @@ class SUAVE:
     def _prior_parameters_for_optimizer(self) -> list[Parameter]:
         """Return the list of trainable prior parameters."""
 
-        if self.behaviour == "hivae":
+        if self.behaviour == "unsupervised":
             if self._prior_mean_layer is None:
                 raise RuntimeError("Prior mean layer is not initialised")
             return list(self._prior_mean_layer.parameters())
@@ -379,7 +388,7 @@ class SUAVE:
     def _prior_component_means_tensor(self) -> Tensor:
         """Return the matrix of prior means for each mixture component."""
 
-        if self.behaviour == "hivae":
+        if self.behaviour == "unsupervised":
             if self._prior_mean_layer is None:
                 raise RuntimeError("Prior mean layer is not initialised")
             return self._prior_mean_layer.component_means()
@@ -397,7 +406,7 @@ class SUAVE:
     def _gumbel_temperature_for_epoch(self, epoch: int) -> float:
         """Return the annealed Gumbel-Softmax temperature for ``epoch``."""
 
-        if self.behaviour != "hivae" or self._tau_start is None:
+        if self.behaviour != "unsupervised" or self._tau_start is None:
             return 1.0
         tau_start = float(self._tau_start)
         tau_min = float(self._tau_min) if self._tau_min is not None else tau_start
@@ -410,7 +419,7 @@ class SUAVE:
     def _gumbel_temperature_for_epoch(self, epoch: int) -> float:
         """Return the annealed Gumbel-Softmax temperature for ``epoch``."""
 
-        if self.behaviour != "hivae" or self._tau_start is None:
+        if self.behaviour != "unsupervised" or self._tau_start is None:
             return 1.0
         tau_start = float(self._tau_start)
         tau_min = float(self._tau_min) if self._tau_min is not None else tau_start
@@ -892,7 +901,7 @@ class SUAVE:
         joint_decoder_lr_scale: Optional[float] = None,
         early_stop_patience: Optional[int] = None,
     ) -> "SUAVE":
-        """Optimise the HI-VAE encoder/decoder using the staged schedule.
+        """Optimise the encoder/decoder using the staged schedule.
 
         Parameters
         ----------
@@ -900,14 +909,14 @@ class SUAVE:
             Training features with shape ``(n_samples, n_features)``.
         y:
             Training targets with shape ``(n_samples,)``. Optional when
-            ``behaviour="hivae"`` because the baseline HI-VAE objective does not
+            ``behaviour="unsupervised"`` because the generative-only branch does not
             consume labels.
         schema:
             Optional schema overriding the instance-level schema.
         epochs:
             Deprecated alias for ``warmup_epochs`` kept for backwards
             compatibility. When provided alongside explicit schedule overrides
-            the latter take precedence. When ``behaviour="hivae"`` the warm-up
+            the latter take precedence. When ``behaviour="unsupervised"`` the warm-up
             phase is the only optimisation stage and ``epochs`` therefore
             controls the total number of training passes.
         batch_size:
@@ -916,16 +925,16 @@ class SUAVE:
             Overrides the KL warm-up epochs specified during initialisation.
         warmup_epochs:
             Overrides the warm-start phase duration. Falls back to the instance
-            configuration when omitted. When ``behaviour="hivae"`` this value
+            configuration when omitted. When ``behaviour="unsupervised"`` this value
             corresponds to the full training duration.
         head_epochs:
             Overrides the classifier head phase duration. Defaults to the
             instance configuration when omitted. Ignored when
-            ``behaviour="hivae"``.
+            ``behaviour="unsupervised"``.
         finetune_epochs:
             Overrides the joint fine-tuning phase duration. Defaults to the
             instance configuration when omitted. Ignored when
-            ``behaviour="hivae"``.
+            ``behaviour="unsupervised"``.
         joint_decoder_lr_scale:
             Optional override for the decoder/prior learning-rate multiplier
             used during joint fine-tuning.
@@ -950,11 +959,13 @@ class SUAVE:
         if self.schema is None:
             raise ValueError("A schema must be provided to fit the model")
         self.schema.require_columns(X.columns)
-        if self.behaviour == "suave" and y is None:
-            raise ValueError("Targets must be provided when behaviour='suave'")
+        if self.behaviour == "supervised" and y is None:
+            raise ValueError("Targets must be provided when behaviour='supervised'")
 
         LOGGER.info("Starting fit: n_samples=%s, n_features=%s", len(X), X.shape[1])
-        stratify_split = self.stratify and self.behaviour == "suave" and y is not None
+        stratify_split = (
+            self.stratify and self.behaviour == "supervised" and y is not None
+        )
         split_targets = y if y is not None else np.zeros(len(X), dtype=np.int64)
         X_train, X_val, y_train, y_val = data_utils.split_train_val(
             X,
@@ -1003,7 +1014,7 @@ class SUAVE:
         if schedule_patience < 0:
             raise ValueError("early_stop_patience must be non-negative")
 
-        if self.behaviour == "hivae":
+        if self.behaviour == "unsupervised":
             schedule_head = 0
             schedule_finetune = 0
 
@@ -1034,7 +1045,7 @@ class SUAVE:
         y_train_tensor: Tensor | None = None
         y_val_tensor: Tensor | None = None
         class_counts: np.ndarray | None = None
-        if self.behaviour == "suave":
+        if self.behaviour == "supervised":
             y_train_array = np.asarray(y_train)
             self._classes = np.unique(y_train_array)
             if self._classes.size == 0:
@@ -1089,7 +1100,7 @@ class SUAVE:
         if _reset_prior:
             self._reset_prior_parameters()
 
-        if self.behaviour == "hivae":
+        if self.behaviour == "unsupervised":
             schedule_head = 0
             schedule_finetune = 0
 
@@ -1145,16 +1156,18 @@ class SUAVE:
             kl_warmup_epochs=kl_warmup_epochs,
         )
 
-        if self.behaviour == "hivae" and self._tau_start is not None:
+        if self.behaviour == "unsupervised" and self._tau_start is not None:
             self._inference_tau = warmup_history.get("final_temperature", 1.0)
 
         posterior_stats = self._collect_posterior_statistics(
             encoder_inputs,
             batch_size=batch_size,
-            temperature=self._inference_tau if self.behaviour == "hivae" else None,
+            temperature=(
+                self._inference_tau if self.behaviour == "unsupervised" else None
+            ),
         )
 
-        if self.behaviour == "suave":
+        if self.behaviour == "supervised":
             assert self._classes is not None
             self._classifier = ClassificationHead(
                 self.latent_dim,
@@ -1187,7 +1200,9 @@ class SUAVE:
             cache_stats = self._collect_posterior_statistics(
                 encoder_inputs,
                 batch_size=batch_size,
-                temperature=self._inference_tau if self.behaviour == "hivae" else None,
+                temperature=(
+                    self._inference_tau if self.behaviour == "unsupervised" else None
+                ),
             )
         else:
             cache_stats = posterior_stats
@@ -1237,7 +1252,7 @@ class SUAVE:
         if warmup_epochs <= 0:
             temperature = (
                 self._gumbel_temperature_for_epoch(0)
-                if self.behaviour == "hivae"
+                if self.behaviour == "unsupervised"
                 else None
             )
             metrics = self._compute_elbo_on_dataset(
@@ -1264,12 +1279,14 @@ class SUAVE:
         global_step = 0
 
         final_temperature = self._gumbel_temperature_for_epoch(0)
-        description = "Warm-start" if self.behaviour == "suave" else "HI-VAE training"
+        description = (
+            "Warm-start" if self.behaviour == "supervised" else "unsupervised training"
+        )
         progress = tqdm(range(warmup_epochs), desc=description, leave=False)
         for epoch in progress:
             temperature = (
                 self._gumbel_temperature_for_epoch(epoch)
-                if self.behaviour == "hivae"
+                if self.behaviour == "unsupervised"
                 else None
             )
             if temperature is not None:
@@ -1341,7 +1358,7 @@ class SUAVE:
         component_logits, component_mu, component_logvar = self._encoder(batch_input)
         component_probs = torch.softmax(component_logits, dim=-1)
         posterior_weights = component_probs
-        if temperature is not None and self.behaviour == "hivae":
+        if temperature is not None and self.behaviour == "unsupervised":
             gumbel_tau = max(float(temperature), 1e-6)
             posterior_weights = F.gumbel_softmax(
                 component_logits, tau=gumbel_tau, hard=False, dim=-1
@@ -1351,7 +1368,7 @@ class SUAVE:
             component_logits, self._prior_component_logits_tensor()
         )
 
-        if self.behaviour == "suave":
+        if self.behaviour == "supervised":
             assignment_tau = max(float(self.gumbel_temperature), 1e-6)
             assignments = F.gumbel_softmax(
                 component_logits, tau=assignment_tau, hard=True
@@ -1650,7 +1667,9 @@ class SUAVE:
                     batch_masks,
                     beta_scale=self.beta,
                     temperature=(
-                        self._inference_tau if self.behaviour == "hivae" else None
+                        self._inference_tau
+                        if self.behaviour == "unsupervised"
+                        else None
                     ),
                 )
                 loss = outputs["loss"]
@@ -1668,7 +1687,9 @@ class SUAVE:
                 val_data_tensors,
                 val_mask_tensors,
                 batch_size=batch_size,
-                temperature=self._inference_tau if self.behaviour == "hivae" else None,
+                temperature=(
+                    self._inference_tau if self.behaviour == "unsupervised" else None
+                ),
                 y_val_tensor=y_val_tensor,
             )
             progress.set_postfix(
@@ -2304,14 +2325,14 @@ class SUAVE:
     def _ensure_classifier_available(self, caller: str) -> None:
         """Raise an informative error if classifier-dependent APIs are used."""
 
-        if self.behaviour == "hivae":
+        if self.behaviour == "unsupervised":
             self._cached_logits = None
             self._cached_probabilities = None
             self._logits_cache_key = None
             self._probability_cache_key = None
             raise RuntimeError(
-                f"{caller} is unavailable when behaviour='hivae'; this mode matches "
-                "the baseline HI-VAE and does not expose classifier outputs."
+                f"{caller} is unavailable when behaviour='unsupervised'; this mode matches "
+                "the baseline unsupervised branch and does not expose classifier outputs."
             )
 
     def _compute_logits(
@@ -2337,7 +2358,9 @@ class SUAVE:
                 logits_enc,
                 mu_enc,
                 logvar_enc,
-                temperature=self._inference_tau if self.behaviour == "hivae" else None,
+                temperature=(
+                    self._inference_tau if self.behaviour == "unsupervised" else None
+                ),
             )
             logits_tensor = self._classifier(posterior_mean)
         if was_encoder_training:
@@ -2382,7 +2405,7 @@ class SUAVE:
         only_missing: bool = True,
         assignment_strategy: Literal["soft", "hard", "sample"] | None = None,
     ) -> pd.DataFrame:
-        """Fill missing entries in ``X`` using the trained HI-VAE decoder.
+        """Fill missing entries in ``X`` using the trained decoder.
 
         Parameters
         ----------
@@ -2390,17 +2413,17 @@ class SUAVE:
             DataFrame containing the features declared in the training schema.
             Missing entries (``NaN``) are imputed using the posterior mean of
             the latent representation followed by a single decoder pass.  The
-            method works in both ``behaviour="suave"`` and
-            ``behaviour="hivae"`` modes.
+            method works in both ``behaviour="supervised"`` and
+            ``behaviour="unsupervised"`` modes.
         only_missing:
             When ``True`` (default) only the originally missing entries are
             replaced by their reconstructions.  When ``False`` the returned
             dataframe contains the full decoder output for all features.
         assignment_strategy:
             Strategy used to map posterior mixture responsibilities to decoder
-            assignments.  ``"soft"`` (default in HI-VAE mode) uses posterior
+            assignments.  ``"soft"`` (default in the unsupervised branch) uses posterior
             probabilities as continuous weights, providing smooth but potentially
-            over-smoothed imputations.  ``"hard"`` (default in SUAVE mode)
+            over-smoothed imputations.  ``"hard"`` (default in the supervised branch)
             selects the argmax component and mirrors
             :meth:`_gather_component_parameters`, yielding sharper but less
             uncertainty-aware reconstructions.  ``"sample"`` draws a relaxed
@@ -2426,7 +2449,7 @@ class SUAVE:
         >>> from suave.types import Schema
         >>> data = pd.DataFrame({"real": [1.0, np.nan, 3.0], "cat": [0, 1, 0]})
         >>> schema = Schema({"real": {"type": "real"}, "cat": {"type": "cat", "n_classes": 2}})
-        >>> model = SUAVE(schema=schema, behaviour="hivae")
+        >>> model = SUAVE(schema=schema, behaviour="unsupervised")
         >>> _ = model.fit(data, epochs=1, batch_size=3)
         >>> imputed = model.impute(data)
         >>> imputed.isna().sum().sum()
@@ -2470,7 +2493,7 @@ class SUAVE:
                 ].to(device)
 
         if assignment_strategy is None:
-            assignment_strategy = "hard" if self.behaviour == "suave" else "soft"
+            assignment_strategy = "hard" if self.behaviour == "supervised" else "soft"
         strategy_normalised = assignment_strategy.lower()
         valid_strategies = {"soft", "hard", "sample"}
         if strategy_normalised not in valid_strategies:
@@ -2488,7 +2511,9 @@ class SUAVE:
                 logits_enc,
                 mu_enc,
                 logvar_enc,
-                temperature=self._inference_tau if self.behaviour == "hivae" else None,
+                temperature=(
+                    self._inference_tau if self.behaviour == "unsupervised" else None
+                ),
             )
             if strategy_normalised == "hard":
                 component_indices = posterior_probs.argmax(dim=-1)
@@ -2502,7 +2527,7 @@ class SUAVE:
                 assignments = posterior_probs
                 selected_mu = posterior_mean
             else:  # sample
-                if self.behaviour == "hivae":
+                if self.behaviour == "unsupervised":
                     tau = max(float(self._inference_tau), 1e-6)
                 else:
                     tau = max(float(self.gumbel_temperature), 1e-6)
@@ -2566,7 +2591,9 @@ class SUAVE:
             logits_enc,
             mu_enc,
             logvar_enc,
-            temperature=self._inference_tau if self.behaviour == "hivae" else None,
+            temperature=(
+                self._inference_tau if self.behaviour == "unsupervised" else None
+            ),
         )
         return posterior_mean, posterior_logvar
 
@@ -2720,7 +2747,9 @@ class SUAVE:
                     mu_enc,
                     logvar_enc,
                     temperature=(
-                        self._inference_tau if self.behaviour == "hivae" else None
+                        self._inference_tau
+                        if self.behaviour == "unsupervised"
+                        else None
                     ),
                 )
                 latent_batches.append(posterior_mean.cpu())
@@ -2758,7 +2787,7 @@ class SUAVE:
     def sample(
         self, n_samples: int, conditional: bool = False, y: Optional[np.ndarray] = None
     ) -> pd.DataFrame:
-        """Generate samples by decoding latent variables through the HI-VAE.
+        """Generate samples by decoding latent variables through the learned model.
 
         Parameters
         ----------
@@ -2890,7 +2919,7 @@ class SUAVE:
             "logvar": self._prior_component_logvar_tensor().detach().cpu(),
             "mu": self._prior_component_means_tensor().detach().cpu(),
         }
-        if self.behaviour == "hivae":
+        if self.behaviour == "unsupervised":
             if self._prior_mean_layer is None:
                 raise RuntimeError("Prior mean layer is not initialised")
             prior_state["mean_state_dict"] = self._state_dict_to_cpu(
@@ -2968,7 +2997,8 @@ class SUAVE:
         artefacts: dict[str, Any] = payload.get("artefacts", {})
         schema_dict = metadata.get("schema") or {}
         schema = Schema(schema_dict) if schema_dict else None
-        behaviour = metadata.get("behaviour", "suave")
+        behaviour = _normalise_behaviour(str(metadata.get("behaviour", "supervised")))
+        metadata["behaviour"] = behaviour
         init_kwargs: dict[str, Any] = {}
         for key in (
             "latent_dim",
@@ -3122,7 +3152,7 @@ class SUAVE:
         elif decoder_state is not None:
             model._decoder.load_state_dict(OrderedDict(decoder_state))
 
-        if behaviour == "suave" and classifier_payload:
+        if behaviour == "supervised" and classifier_payload:
             if model._classes is None:
                 raise ValueError("Saved model is missing class labels")
             class_weight = None
@@ -3172,7 +3202,7 @@ class SUAVE:
                 )
             with torch.no_grad():
                 param_logvar.copy_(logvar_tensor)
-        if model.behaviour == "hivae":
+        if model.behaviour == "unsupervised":
             if model._prior_mean_layer is None:
                 raise RuntimeError("Prior mean layer is not initialised")
             mean_state = prior_state.get("mean_state_dict")
@@ -3236,8 +3266,9 @@ class SUAVE:
             if key not in metadata and key in data:
                 metadata[key] = data[key]
         metadata.setdefault("schema", data.get("schema"))
-        behaviour_value = metadata.get("behaviour", data.get("behaviour", "suave"))
-        metadata["behaviour"] = str(behaviour_value)
+        behaviour_value = metadata.get("behaviour", data.get("behaviour", "supervised"))
+        behaviour_value = _normalise_behaviour(str(behaviour_value))
+        metadata["behaviour"] = behaviour_value
 
         prior_payload = data.get("prior") or data.get("modules", {}).get("prior")
         inferred_latent_dim: int | None = None

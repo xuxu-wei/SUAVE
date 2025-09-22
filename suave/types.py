@@ -13,8 +13,8 @@ class ColumnSpec:
     Parameters
     ----------
     type:
-        Logical feature type. Supported values mirror the HI-VAE
-        implementation: ``"real"`` (Gaussian), ``"pos"`` (log-normal),
+        Logical feature type. Supported values mirror the unsupervised branch of
+        the model: ``"real"`` (Gaussian), ``"pos"`` (log-normal),
         ``"count"`` (Poisson), ``"cat"`` (categorical) and ``"ordinal"``
         (cumulative link).
     n_classes:
