@@ -58,3 +58,14 @@ def test_interactive_mode_gracefully_falls_back(monkeypatch) -> None:
 
     assert "flagged" in result.review_columns
     assert any("Interactive review not available" in message for message in result.messages)
+
+
+def test_integer_inference_handles_wide_range() -> None:
+    wide_range = [0, 10_000_000, 20_000_000]
+    df = pd.DataFrame({"wide_range_ints": wide_range})
+
+    inferencer = SchemaInferencer()
+    result = inferencer.infer(df, mode=SchemaInferenceMode.SILENT)
+    schema_dict = result.schema.to_dict()
+
+    assert schema_dict["wide_range_ints"]["type"] == "count"
