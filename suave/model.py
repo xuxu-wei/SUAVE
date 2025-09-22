@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -14,6 +15,7 @@ from typing import Any, Dict, Iterable, Literal, Optional, Tuple
 import numpy as np
 import pandas as pd
 from pandas import CategoricalDtype
+from pandas.util import hash_pandas_object
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -183,6 +185,8 @@ class SUAVE:
         self._class_to_index: dict[object, int] | None = None
         self._cached_logits: np.ndarray | None = None
         self._cached_probabilities: np.ndarray | None = None
+        self._logits_cache_key: str | None = None
+        self._probability_cache_key: str | None = None
         self._train_latent_mu: Tensor | None = None
         self._train_latent_logvar: Tensor | None = None
         self._train_target_indices: np.ndarray | None = None
@@ -203,21 +207,15 @@ class SUAVE:
         )
 
         if self.behaviour == "hivae":
-            self._prior_component_logits = Parameter(
-                zeros_logits, requires_grad=False
-            )
+            self._prior_component_logits = Parameter(zeros_logits, requires_grad=False)
             self._prior_component_mu = None
-            self._prior_component_logvar = Parameter(
-                zeros_full, requires_grad=False
-            )
+            self._prior_component_logvar = Parameter(zeros_full, requires_grad=False)
             self._prior_mean_layer = PriorMean(self.n_components, self.latent_dim)
         else:
             self._prior_component_logits = Parameter(
                 zeros_logits.clone(), requires_grad=True
             )
-            self._prior_component_mu = Parameter(
-                zeros_full.clone(), requires_grad=True
-            )
+            self._prior_component_mu = Parameter(zeros_full.clone(), requires_grad=True)
             self._prior_component_logvar = Parameter(
                 zeros_full.clone(), requires_grad=True
             )
@@ -456,6 +454,7 @@ class SUAVE:
                 self.latent_dim,
                 self._classes.size,
                 class_weight=class_weights,
+                dropout=self.dropout,
             ).to(device)
         else:
             self._classifier = None
@@ -641,6 +640,8 @@ class SUAVE:
         self._temperature_scaler_state = None
         self._cached_logits = None
         self._cached_probabilities = None
+        self._logits_cache_key = None
+        self._probability_cache_key = None
         LOGGER.info("Fit complete")
         return self
 
@@ -1045,17 +1046,26 @@ class SUAVE:
         """Raise an informative error if classifier-dependent APIs are used."""
 
         if self.behaviour == "hivae":
+            self._cached_logits = None
+            self._cached_probabilities = None
+            self._logits_cache_key = None
+            self._probability_cache_key = None
             raise RuntimeError(
                 f"{caller} is unavailable when behaviour='hivae'; this mode matches "
                 "the baseline HI-VAE and does not expose classifier outputs."
             )
 
-    def _compute_logits(self, X: pd.DataFrame) -> np.ndarray:
+    def _compute_logits(
+        self, X: pd.DataFrame, *, cache_key: str | None = None
+    ) -> np.ndarray:
         """Run the classifier head on ``X`` and cache the logits."""
 
         self._ensure_classifier_available("Logit computation")
         if not self._is_fitted or self._encoder is None or self._classifier is None:
             raise RuntimeError("Model must be fitted before computing logits")
+        key = cache_key or self._fingerprint_inputs(X)
+        if self._cached_logits is not None and self._logits_cache_key == key:
+            return self._cached_logits
         device = self._select_device()
         encoder_inputs = self._prepare_inference_inputs(X).to(device)
         was_encoder_training = self._encoder.training
@@ -1077,6 +1087,9 @@ class SUAVE:
             self._classifier.train()
         logits = logits_tensor.cpu().numpy()
         self._cached_logits = logits
+        self._cached_probabilities = None
+        self._probability_cache_key = None
+        self._logits_cache_key = key
         return logits
 
     @staticmethod
@@ -1091,6 +1104,17 @@ class SUAVE:
         normaliser = probabilities.sum(axis=1, keepdims=True)
         normaliser[normaliser == 0.0] = 1.0
         return probabilities / normaliser
+
+    @staticmethod
+    def _fingerprint_inputs(frame: pd.DataFrame) -> str:
+        """Return a stable fingerprint for ``frame`` used to manage caches."""
+
+        hashed = hash_pandas_object(frame, index=True).to_numpy()
+        digest = hashlib.blake2b(hashed.tobytes(), digest_size=16)
+        column_signature = "|".join(map(str, frame.columns))
+        return (
+            f"{frame.shape[0]}x{frame.shape[1]}|{column_signature}|{digest.hexdigest()}"
+        )
 
     def impute(
         self,
@@ -1314,14 +1338,20 @@ class SUAVE:
         self._ensure_classifier_available("predict_proba")
         if not self._is_fitted or self._classes is None:
             raise RuntimeError("Model must be fitted before calling predict_proba")
-        _ = self._compute_logits(X)
+        cache_key = self._fingerprint_inputs(X)
+        if (
+            self._cached_probabilities is not None
+            and self._probability_cache_key == cache_key
+        ):
+            return self._cached_probabilities
+        logits = self._compute_logits(X, cache_key=cache_key)
         if self._cached_logits is None:
             raise RuntimeError("Logits cache was not populated")
-        logits = self._cached_logits
         if self._is_calibrated:
             logits = self._temperature_scaler.transform(logits)
         probabilities = self._logits_to_probabilities(logits)
         self._cached_probabilities = probabilities
+        self._probability_cache_key = cache_key
         return probabilities
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -1343,13 +1373,14 @@ class SUAVE:
             raise RuntimeError("Fit must be called before calibrate")
         if len(X) != len(y):
             raise ValueError("X and y must have matching first dimensions")
-        logits = self._compute_logits(X)
-        probabilities = self._logits_to_probabilities(logits)
+        cache_key = self._fingerprint_inputs(X)
+        logits = self._compute_logits(X, cache_key=cache_key)
         target_indices = self._map_targets_to_indices(y)
         self._temperature_scaler.fit(logits, target_indices)
         self._temperature_scaler_state = self._temperature_scaler.state_dict()
         self._is_calibrated = True
-        self._cached_probabilities = probabilities
+        self._cached_probabilities = None
+        self._probability_cache_key = None
         return self
 
     # ------------------------------------------------------------------
@@ -1615,6 +1646,8 @@ class SUAVE:
             "train_target_indices": self._train_target_indices,
             "cached_logits": self._cached_logits,
             "cached_probabilities": self._cached_probabilities,
+            "logits_cache_key": self._logits_cache_key,
+            "probability_cache_key": self._probability_cache_key,
         }
         payload = {
             "metadata": metadata,
@@ -1636,7 +1669,14 @@ class SUAVE:
         if isinstance(payload, dict):
             if "metadata" in payload:
                 return cls._load_from_payload(payload)
-            legacy_keys = {"schema", "prior", "behaviour", "classes", "artefacts", "modules"}
+            legacy_keys = {
+                "schema",
+                "prior",
+                "behaviour",
+                "classes",
+                "artefacts",
+                "modules",
+            }
             if legacy_keys.intersection(payload.keys()):
                 return cls._load_from_legacy_json(payload)
         if payload is not None:
@@ -1698,6 +1738,8 @@ class SUAVE:
         model._cached_probabilities = (
             None if cached_prob is None else np.asarray(cached_prob)
         )
+        model._logits_cache_key = artefacts.get("logits_cache_key")
+        model._probability_cache_key = artefacts.get("probability_cache_key")
         model._temperature_scaler_state = artefacts.get("temperature_scaler_state")
         model._is_calibrated = bool(artefacts.get("is_calibrated", False))
 
@@ -1778,6 +1820,7 @@ class SUAVE:
                 model.latent_dim,
                 int(model._classes.size),
                 class_weight=class_weight,
+                dropout=model.dropout,
             ).to(device)
             state = classifier_payload.get("state_dict")
             if isinstance(state, OrderedDict):
@@ -1955,12 +1998,18 @@ class SUAVE:
                 except (TypeError, ValueError) as exc:
                     if isinstance(value, dict):
                         try:
-                            ordered_values = [value[key] for key in sorted(value.keys())]
+                            ordered_values = [
+                                value[key] for key in sorted(value.keys())
+                            ]
                         except Exception as inner_exc:  # pragma: no cover - defensive
-                            raise TypeError("Cannot interpret legacy tensor payload") from inner_exc
+                            raise TypeError(
+                                "Cannot interpret legacy tensor payload"
+                            ) from inner_exc
                         tensor = torch.as_tensor(ordered_values)
                     else:
-                        raise TypeError("Cannot interpret legacy tensor payload") from exc
+                        raise TypeError(
+                            "Cannot interpret legacy tensor payload"
+                        ) from exc
             tensor = tensor.clone().detach()
             if tensor.is_floating_point():
                 tensor = tensor.to(dtype=torch.float32)

@@ -57,6 +57,57 @@ def test_predict_proba_shape():
     assert not np.allclose(probabilities, uniform)
 
 
+def test_predict_proba_uses_and_updates_cache():
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, n_components=2)
+    model.fit(X, y, epochs=1)
+
+    first = model.predict_proba(X)
+    assert np.allclose(first.sum(axis=1), 1.0)
+    assert model._cached_logits is not None
+    assert model._cached_probabilities is not None
+    assert model._logits_cache_key is not None
+    assert model._probability_cache_key is not None
+
+    cached_logits = model._cached_logits
+    cached_probabilities = model._cached_probabilities
+
+    with patch.object(
+        SUAVE,
+        "_compute_logits",
+        side_effect=AssertionError(
+            "_compute_logits should not run when cache is valid"
+        ),
+    ):
+        second = model.predict_proba(X)
+        third = model.predict(X)
+
+    assert second is cached_probabilities
+    assert model._cached_logits is cached_logits
+    assert third.shape == (len(X),)
+
+
+def test_predict_proba_refreshes_cache_for_new_frames():
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, n_components=2)
+    model.fit(X, y, epochs=1)
+
+    _ = model.predict_proba(X)
+    previous_logits = model._cached_logits.copy()
+    previous_probabilities = model._cached_probabilities.copy()
+    previous_logit_key = model._logits_cache_key
+    previous_proba_key = model._probability_cache_key
+
+    shuffled = X.iloc[::-1].reset_index(drop=True)
+    refreshed = model.predict_proba(shuffled)
+
+    assert model._logits_cache_key != previous_logit_key
+    assert model._probability_cache_key != previous_proba_key
+    assert not np.shares_memory(model._cached_logits, previous_logits)
+    assert not np.shares_memory(model._cached_probabilities, previous_probabilities)
+    assert refreshed.shape == (len(X), 2)
+
+
 def test_encode_returns_latent_means():
     X, y, schema = make_dataset()
     model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)
@@ -139,6 +190,8 @@ def test_hivae_behaviour_disables_classifier():
     model.fit(X, epochs=1)
     latent = model.encode(X)
     assert latent.shape[0] == len(X)
+    model._cached_logits = np.array([0.0])
+    model._cached_probabilities = np.array([[0.5, 0.5]])
     with pytest.raises(RuntimeError):
         model._ensure_classifier_available("test")
     with pytest.raises(RuntimeError):
@@ -149,6 +202,8 @@ def test_hivae_behaviour_disables_classifier():
         model.predict(X)
     with pytest.raises(RuntimeError):
         model.calibrate(X, y)
+    assert model._cached_logits is None
+    assert model._cached_probabilities is None
 
 
 def test_hivae_behaviour_persists_after_save(tmp_path: Path):
