@@ -1376,11 +1376,15 @@ class SUAVE:
         cache_key = self._fingerprint_inputs(X)
         logits = self._compute_logits(X, cache_key=cache_key)
         target_indices = self._map_targets_to_indices(y)
+        if logits.shape[0] != target_indices.shape[0]:
+            raise ValueError("Calibration logits and targets must have matching rows")
         self._temperature_scaler.fit(logits, target_indices)
         self._temperature_scaler_state = self._temperature_scaler.state_dict()
         self._is_calibrated = True
-        self._cached_probabilities = None
-        self._probability_cache_key = None
+        calibrated_logits = self._temperature_scaler.transform(logits)
+        probabilities = self._logits_to_probabilities(calibrated_logits)
+        self._cached_probabilities = probabilities
+        self._probability_cache_key = cache_key
         return self
 
     # ------------------------------------------------------------------
