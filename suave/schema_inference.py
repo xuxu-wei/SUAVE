@@ -176,7 +176,6 @@ class SchemaInferencer:
         unique_ratio = nunique / non_missing if non_missing else 0.0
         std = float(numeric.std(ddof=0))
         value_range = float(numeric.max() - numeric.min())
-        unique_values = set(np.unique(numeric))
         min_value = float(numeric.min())
         max_value = float(numeric.max())
         mean_value = float(numeric.mean()) if non_missing else 0.0
@@ -186,6 +185,14 @@ class SchemaInferencer:
             skewness = 0.0
 
         review_reasons: List[str] = []
+
+        unique_values: Optional[set[float]] = None
+
+        def get_unique_values() -> set[float]:
+            nonlocal unique_values
+            if unique_values is None:
+                unique_values = set(np.unique(numeric))
+            return unique_values
 
         integer_like = bool(
             np.all(np.isfinite(numeric)) and np.allclose(numeric, np.round(numeric))
@@ -204,7 +211,7 @@ class SchemaInferencer:
             non_negative = min_value >= 0
             starts_low = sorted_unique.size > 0 and sorted_unique[0] <= 1
 
-            if nunique <= 2 and unique_values.issubset(BINARY_VALUES):
+            if nunique <= 2 and get_unique_values().issubset(BINARY_VALUES):
                 if abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN:
                     review_reasons.append("Binary ratio near categorical threshold.")
                 return self._categorical_spec(nunique), " ".join(review_reasons).strip()
@@ -258,7 +265,7 @@ class SchemaInferencer:
 
             return {"type": "real"}, " ".join(review_reasons).strip()
 
-        if nunique <= 2 and unique_values.issubset(BINARY_VALUES):
+        if nunique <= 2 and get_unique_values().issubset(BINARY_VALUES):
             if abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN:
                 review_reasons.append("Binary ratio near categorical threshold.")
             return self._categorical_spec(nunique), " ".join(review_reasons).strip()
