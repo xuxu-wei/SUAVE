@@ -376,6 +376,11 @@ def test_hivae_behaviour_disables_classifier():
     model.fit(X, epochs=1)
     latent = model.encode(X)
     assert latent.shape[0] == len(X)
+    assert model.warmup_epochs == 1
+    assert model.head_epochs == 0
+    assert model.finetune_epochs == 0
+    if model._warmup_val_history:
+        assert model._joint_val_metrics == model._warmup_val_history[-1]
     model._cached_logits = np.array([0.0])
     model._cached_probabilities = np.array([[0.5, 0.5]])
     with pytest.raises(RuntimeError):
@@ -402,6 +407,9 @@ def test_hivae_behaviour_persists_after_save(tmp_path: Path):
     loaded = SUAVE.load(save_path)
     assert loaded.behaviour == "hivae"
     assert loaded._inference_tau == pytest.approx(trained_tau)
+    assert loaded.warmup_epochs == 1
+    assert loaded.head_epochs == 0
+    assert loaded.finetune_epochs == 0
     assert loaded._classifier is None
     assert loaded._cached_logits is None
     with pytest.raises(RuntimeError):
