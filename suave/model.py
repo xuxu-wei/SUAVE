@@ -2841,10 +2841,17 @@ class SUAVE:
         attr: str | int | None = None,
         *,
         mask: pd.DataFrame | np.ndarray | Tensor | None = None,
-        L: int = 50,
+        L: int = 100,
     ) -> np.ndarray | Tensor:
-        r"""Return calibrated classifier or posterior predictive probabilities.
+        r"""Return posterior predictive probabilities.
 
+        When ``attr`` is ``None`` the method preserves the previous behaviour
+        and returns the calibrated classifier probabilities for ``X``.  When
+        ``attr`` identifies a categorical or ordinal schema attribute the
+        method estimates the Monte Carlo posterior predictive distribution
+        :math:`p(x_{attr} \mid x^o)` by masking the target column and decoding
+        samples from :math:`q(s, z \mid x^o)`.
+        
         Parameters
         ----------
         X : pandas.DataFrame
@@ -2857,7 +2864,7 @@ class SUAVE:
             Boolean mask that marks observed values as ``False`` and missing
             entries as ``True``.  Only required when ``attr`` is provided and
             missingness must be preserved during decoding.
-        L : int, default 50
+        L : int, default 100
             Number of Monte Carlo samples used to approximate the posterior
             predictive distribution when ``attr`` is specified.
 
@@ -2882,6 +2889,7 @@ class SUAVE:
         See Also
         --------
         SUAVE.predict : Convert probabilities into deterministic predictions.
+
 
         Examples
         --------
