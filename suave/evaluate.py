@@ -51,6 +51,9 @@ def _prepare_inputs(
     if not np.all(np.isfinite(prob_array)):
         raise ValueError("probabilities must contain only finite values")
 
+    if prob_array.shape[1] < 2:
+        raise ValueError("probability matrix must contain at least two classes")
+
     if target_array.ndim != 1:
         raise ValueError("targets must be a one-dimensional array")
 
@@ -62,6 +65,10 @@ def _prepare_inputs(
 
     if prob_array.shape[0] == 0:
         return prob_array, target_array.astype(int, copy=False)
+
+    row_sums = prob_array.sum(axis=1)
+    if not np.allclose(row_sums, 1.0, atol=1e-6):
+        raise ValueError("probabilities must sum to one across classes")
 
     if np.min(target_array) < 0:
         raise ValueError("targets must be non-negative integers")

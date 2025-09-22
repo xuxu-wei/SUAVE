@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import math
+import sys
 
 import numpy as np
 import pytest
-pytest.importorskip("sklearn", reason="scikit-learn is required for evaluation metrics tests")
+
+pytest.importorskip(
+    "sklearn", reason="scikit-learn is required for evaluation metrics tests"
+)
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from suave.evaluate import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from suave.evaluate import (  # noqa: E402
     compute_auprc,
     compute_auroc,
     compute_brier,
@@ -20,6 +27,7 @@ from suave.evaluate import (
     evaluate_trtr,
     evaluate_tstr,
     simple_membership_inference,
+    _prepare_inputs,
 )
 
 
@@ -78,7 +86,9 @@ def test_metric_helpers_match_sklearn_multi_class() -> None:
     auprc = compute_auprc(probabilities, targets)
     brier = compute_brier(probabilities, targets)
 
-    expected_auroc = roc_auc_score(targets, probabilities, multi_class="ovr", average="macro")
+    expected_auroc = roc_auc_score(
+        targets, probabilities, multi_class="ovr", average="macro"
+    )
     expected_auprc = np.mean(
         [
             average_precision_score((targets == idx).astype(int), probabilities[:, idx])
@@ -110,7 +120,9 @@ def test_compute_ece_known_value() -> None:
             continue
         bin_confidence = np.mean(confidences[mask])
         bin_accuracy = np.mean(np.argmax(probabilities[mask], axis=1) == targets[mask])
-        expected += abs(bin_confidence - bin_accuracy) * (np.sum(mask) / len(confidences))
+        expected += abs(bin_confidence - bin_accuracy) * (
+            np.sum(mask) / len(confidences)
+        )
     assert ece == pytest.approx(expected)
 
 
@@ -124,8 +136,39 @@ def test_evaluate_accepts_one_dimensional_probabilities() -> None:
     assert metrics["brier"] == pytest.approx(np.mean((probabilities - targets) ** 2))
 
 
+def test_prepare_inputs_valid_multi_class_matrix() -> None:
+    probabilities = np.array(
+        [
+            [0.6, 0.3, 0.1],
+            [0.2, 0.5, 0.3],
+            [0.1, 0.1, 0.8],
+        ]
+    )
+    targets = np.array([0, 1, 2], dtype=int)
+
+    prob_matrix, target_vector = _prepare_inputs(probabilities, targets)
+
+    assert prob_matrix.shape == probabilities.shape
+    assert np.shares_memory(prob_matrix, probabilities)
+    assert np.array_equal(target_vector, targets)
+
+
+def test_prepare_inputs_rejects_non_normalised_multi_class_probabilities() -> None:
+    probabilities = np.array(
+        [
+            [0.6, 0.2, 0.2],
+            [0.4, 0.4, 0.4],
+        ]
+    )
+    targets = np.array([0, 1], dtype=int)
+
+    with pytest.raises(ValueError, match="sum to one"):
+        _prepare_inputs(probabilities, targets)
+
+
 def _logistic_regression_factory() -> LogisticRegression:
     return LogisticRegression(max_iter=500, solver="lbfgs")
+
 
 def test_tstr_and_trtr_workflow() -> None:
     X_syn = np.array([[0.0], [0.1], [1.0], [1.1]])
@@ -139,7 +182,9 @@ def test_tstr_and_trtr_workflow() -> None:
         (X_syn, y_syn), (X_real_test, y_real_test), _logistic_regression_factory
     )
     trtr_metrics = evaluate_trtr(
-        (X_real_train, y_real_train), (X_real_test, y_real_test), _logistic_regression_factory
+        (X_real_train, y_real_train),
+        (X_real_test, y_real_test),
+        _logistic_regression_factory,
     )
 
     assert tstr_metrics["accuracy"] >= 0.75

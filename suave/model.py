@@ -1344,12 +1344,19 @@ class SUAVE:
         if len(X) != len(y):
             raise ValueError("X and y must have matching first dimensions")
         logits = self._compute_logits(X)
-        probabilities = self._logits_to_probabilities(logits)
         target_indices = self._map_targets_to_indices(y)
+        if logits.shape[0] != target_indices.shape[0]:
+            raise ValueError("logits and targets must have matching rows")
+        if logits.ndim != 2:
+            raise ValueError("logits must be a two-dimensional array")
+        n_classes = int(self._classes.size)
+        if logits.shape[1] != n_classes:
+            raise ValueError("Logit columns must match the number of fitted classes")
         self._temperature_scaler.fit(logits, target_indices)
-        self._temperature_scaler_state = self._temperature_scaler.state_dict()
+        self._temperature_scaler_state = dict(self._temperature_scaler.state_dict())
         self._is_calibrated = True
-        self._cached_probabilities = probabilities
+        calibrated_logits = self._temperature_scaler.transform(logits)
+        self._cached_probabilities = self._logits_to_probabilities(calibrated_logits)
         return self
 
     # ------------------------------------------------------------------

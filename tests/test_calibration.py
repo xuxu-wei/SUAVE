@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from suave import SUAVE
 from suave.modules.calibrate import TemperatureScaler
+from suave.evaluate import compute_brier, compute_ece, evaluate_classification
 
 
 def softmax(logits: np.ndarray) -> np.ndarray:
@@ -96,14 +97,23 @@ def test_temperature_scaling_improves_calibration(temperature: float) -> None:
     probs_before = model.predict_proba(X_test)
     brier_before = brier_score(probs_before, y_test)
     ece_before = expected_calibration_error(probs_before, y_test)
+    metrics_before = evaluate_classification(probs_before, y_test)
+    assert metrics_before["brier"] == pytest.approx(compute_brier(probs_before, y_test))
+    assert metrics_before["ece"] == pytest.approx(compute_ece(probs_before, y_test))
 
     model.calibrate(X_cal, y_cal)
     assert model._is_calibrated
     assert model._temperature_scaler_state is not None
+    assert model._temperature_scaler.temperature == pytest.approx(temperature, rel=0.2)
 
     probs_after = model.predict_proba(X_test)
     brier_after = brier_score(probs_after, y_test)
     ece_after = expected_calibration_error(probs_after, y_test)
+    metrics_after = evaluate_classification(probs_after, y_test)
+    assert metrics_after["brier"] == pytest.approx(compute_brier(probs_after, y_test))
+    assert metrics_after["ece"] == pytest.approx(compute_ece(probs_after, y_test))
 
     assert brier_after < brier_before
     assert ece_after < ece_before
+    assert metrics_after["brier"] < metrics_before["brier"]
+    assert metrics_after["ece"] < metrics_before["ece"]
