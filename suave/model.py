@@ -389,20 +389,25 @@ class SUAVE:
         epochs:
             Deprecated alias for ``warmup_epochs`` kept for backwards
             compatibility. When provided alongside explicit schedule overrides
-            the latter take precedence.
+            the latter take precedence. When ``behaviour="hivae"`` the warm-up
+            phase is the only optimisation stage and ``epochs`` therefore
+            controls the total number of training passes.
         batch_size:
             Overrides the batch size specified during initialisation.
         kl_warmup_epochs:
             Overrides the KL warm-up epochs specified during initialisation.
         warmup_epochs:
             Overrides the warm-start phase duration. Falls back to the instance
-            configuration when omitted.
+            configuration when omitted. When ``behaviour="hivae"`` this value
+            corresponds to the full training duration.
         head_epochs:
             Overrides the classifier head phase duration. Defaults to the
-            instance configuration when omitted.
+            instance configuration when omitted. Ignored when
+            ``behaviour="hivae"``.
         finetune_epochs:
             Overrides the joint fine-tuning phase duration. Defaults to the
-            instance configuration when omitted.
+            instance configuration when omitted. Ignored when
+            ``behaviour="hivae"``.
         joint_decoder_lr_scale:
             Optional override for the decoder/prior learning-rate multiplier
             used during joint fine-tuning.
@@ -471,6 +476,12 @@ class SUAVE:
             raise ValueError("joint_decoder_lr_scale must be positive")
         if schedule_patience < 0:
             raise ValueError("early_stop_patience must be non-negative")
+
+        if self.behaviour == "hivae":
+            schedule_head = 0
+            schedule_finetune = 0
+
+        self._joint_val_metrics = None
 
         batch_size = batch_size or self.batch_size
         kl_warmup_epochs = kl_warmup_epochs or self.kl_warmup_epochs
@@ -596,26 +607,30 @@ class SUAVE:
                 batch_size=batch_size,
             )
 
-        self._run_joint_finetune(
-            schedule_finetune,
-            encoder_inputs,
-            data_tensors,
-            mask_tensors,
-            val_encoder_inputs,
-            val_data_tensors,
-            val_mask_tensors,
-            batch_size=batch_size,
-            lr_scale=schedule_lr_scale,
-            early_stop_patience=schedule_patience,
-            y_train_tensor=y_train_tensor,
-            y_val_tensor=y_val_tensor,
-        )
+            self._run_joint_finetune(
+                schedule_finetune,
+                encoder_inputs,
+                data_tensors,
+                mask_tensors,
+                val_encoder_inputs,
+                val_data_tensors,
+                val_mask_tensors,
+                batch_size=batch_size,
+                lr_scale=schedule_lr_scale,
+                early_stop_patience=schedule_patience,
+                y_train_tensor=y_train_tensor,
+                y_val_tensor=y_val_tensor,
+            )
 
-        cache_stats = self._collect_posterior_statistics(
-            encoder_inputs,
-            batch_size=batch_size,
-            temperature=self._inference_tau if self.behaviour == "hivae" else None,
-        )
+            cache_stats = self._collect_posterior_statistics(
+                encoder_inputs,
+                batch_size=batch_size,
+                temperature=self._inference_tau if self.behaviour == "hivae" else None,
+            )
+        else:
+            cache_stats = posterior_stats
+            history = warmup_history.get("history", [])
+            self._joint_val_metrics = history[-1] if history else None
         self._cache_training_statistics(
             cache_stats,
             y_train_tensor.cpu().numpy() if y_train_tensor is not None else None,
@@ -687,7 +702,8 @@ class SUAVE:
         global_step = 0
 
         final_temperature = self._gumbel_temperature_for_epoch(0)
-        progress = tqdm(range(warmup_epochs), desc="Warm-start", leave=False)
+        description = "Warm-start" if self.behaviour == "suave" else "HI-VAE training"
+        progress = tqdm(range(warmup_epochs), desc=description, leave=False)
         for epoch in progress:
             temperature = (
                 self._gumbel_temperature_for_epoch(epoch)
