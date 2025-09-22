@@ -92,3 +92,13 @@ def test_integer_inference_handles_wide_range() -> None:
     schema_dict = result.schema.to_dict()
 
     assert schema_dict["wide_range_ints"]["type"] == "count"
+
+
+def test_long_integer_ladder_prefers_count_over_categorical() -> None:
+    repeated_cycle = list(range(16)) * 50  # unique ratio below categorical threshold
+    df = pd.DataFrame({"cycled_counts": repeated_cycle})
+
+    inferencer = SchemaInferencer()
+    result = inferencer.infer(df, mode=SchemaInferenceMode.SILENT)
+
+    assert result.schema.to_dict()["cycled_counts"] == {"type": "count"}
