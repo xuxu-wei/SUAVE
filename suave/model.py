@@ -33,6 +33,7 @@ from .modules import losses
 from .modules.prior import PriorMean
 from . import sampling as sampling_utils
 from .types import Schema
+from .evaluate import compute_brier, compute_ece
 
 LOGGER = logging.getLogger(__name__)
 
@@ -88,6 +89,23 @@ class SUAVE:
         Linear decay applied to the temperature at each epoch when
         ``behaviour="hivae"``. Default is ``0.01`` so that the temperature
         reaches ``tau_min`` after roughly one hundred epochs.
+    warmup_epochs:
+        Number of epochs dedicated to ELBO-only optimisation before training the
+        classification head. Default is ``10``.
+    head_epochs:
+        Number of epochs used to optimise the classification head with frozen
+        decoder parameters. Default is ``5``.
+    finetune_epochs:
+        Number of epochs used for the final joint fine-tuning stage. Default is
+        ``10``.
+    joint_decoder_lr_scale:
+        Multiplicative factor applied to the decoder (and prior) learning rate
+        during joint fine-tuning. Default is ``0.1`` which slows decoder updates
+        relative to the encoder and classifier.
+    early_stop_patience:
+        Number of epochs without improvement on validation metrics tolerated
+        during the joint fine-tuning stage before restoring the best checkpoint.
+        Default is ``5``.
 
     Examples
     --------
@@ -124,6 +142,11 @@ class SUAVE:
         tau_start: float = 1.0,
         tau_min: float = 1e-3,
         tau_decay: float = 0.01,
+        warmup_epochs: int = 10,
+        head_epochs: int = 5,
+        finetune_epochs: int = 10,
+        joint_decoder_lr_scale: float = 0.1,
+        early_stop_patience: int = 5,
     ) -> None:
         self.schema = schema
         self.latent_dim = latent_dim
@@ -146,6 +169,23 @@ class SUAVE:
         if behaviour_normalised not in {"suave", "hivae"}:
             raise ValueError("behaviour must be either 'suave' or 'hivae'")
         self.behaviour = behaviour_normalised
+
+        for name, value in {
+            "warmup_epochs": warmup_epochs,
+            "head_epochs": head_epochs,
+            "finetune_epochs": finetune_epochs,
+        }.items():
+            if int(value) < 0:
+                raise ValueError(f"{name} must be non-negative")
+        if joint_decoder_lr_scale <= 0:
+            raise ValueError("joint_decoder_lr_scale must be positive")
+        if int(early_stop_patience) < 0:
+            raise ValueError("early_stop_patience must be non-negative")
+        self.warmup_epochs = int(warmup_epochs)
+        self.head_epochs = int(head_epochs)
+        self.finetune_epochs = int(finetune_epochs)
+        self.joint_decoder_lr_scale = float(joint_decoder_lr_scale)
+        self.early_stop_patience = int(early_stop_patience)
 
         self._tau_start: float | None = None
         self._tau_min: float | None = None
@@ -187,6 +227,8 @@ class SUAVE:
         self._cached_probabilities: np.ndarray | None = None
         self._logits_cache_key: str | None = None
         self._probability_cache_key: str | None = None
+        self._warmup_val_history: list[dict[str, float]] = []
+        self._joint_val_metrics: dict[str, float] | None = None
         self._train_latent_mu: Tensor | None = None
         self._train_latent_logvar: Tensor | None = None
         self._train_target_indices: np.ndarray | None = None
@@ -323,11 +365,16 @@ class SUAVE:
         y: Optional[pd.Series | pd.DataFrame | np.ndarray] = None,
         *,
         schema: Optional[Schema] = None,
-        epochs: int = 1,
+        epochs: int | None = 1,
         batch_size: Optional[int] = None,
         kl_warmup_epochs: Optional[int] = None,
+        warmup_epochs: Optional[int] = None,
+        head_epochs: Optional[int] = None,
+        finetune_epochs: Optional[int] = None,
+        joint_decoder_lr_scale: Optional[float] = None,
+        early_stop_patience: Optional[int] = None,
     ) -> "SUAVE":
-        """Optimise the HI-VAE encoder/decoder using the ELBO objective.
+        """Optimise the HI-VAE encoder/decoder using the staged schedule.
 
         Parameters
         ----------
@@ -340,11 +387,28 @@ class SUAVE:
         schema:
             Optional schema overriding the instance-level schema.
         epochs:
-            Number of optimisation epochs for the ELBO objective.
+            Deprecated alias for ``warmup_epochs`` kept for backwards
+            compatibility. When provided alongside explicit schedule overrides
+            the latter take precedence.
         batch_size:
             Overrides the batch size specified during initialisation.
         kl_warmup_epochs:
             Overrides the KL warm-up epochs specified during initialisation.
+        warmup_epochs:
+            Overrides the warm-start phase duration. Falls back to the instance
+            configuration when omitted.
+        head_epochs:
+            Overrides the classifier head phase duration. Defaults to the
+            instance configuration when omitted.
+        finetune_epochs:
+            Overrides the joint fine-tuning phase duration. Defaults to the
+            instance configuration when omitted.
+        joint_decoder_lr_scale:
+            Optional override for the decoder/prior learning-rate multiplier
+            used during joint fine-tuning.
+        early_stop_patience:
+            Optional override for the patience used by the early-stopping
+            monitor during joint fine-tuning.
 
         Returns
         -------
@@ -354,7 +418,7 @@ class SUAVE:
         Examples
         --------
         >>> model = SUAVE(schema=schema)
-        >>> model.fit(X, y, epochs=2)
+        >>> model.fit(X, y, warmup_epochs=2, head_epochs=1, finetune_epochs=1)
         SUAVE(...)
         """
 
@@ -368,9 +432,7 @@ class SUAVE:
 
         LOGGER.info("Starting fit: n_samples=%s, n_features=%s", len(X), X.shape[1])
         stratify_split = self.stratify and self.behaviour == "suave" and y is not None
-        split_targets = y
-        if split_targets is None:
-            split_targets = np.zeros(len(X), dtype=np.int64)
+        split_targets = y if y is not None else np.zeros(len(X), dtype=np.int64)
         X_train, X_val, y_train, y_val = data_utils.split_train_val(
             X,
             split_targets,
@@ -379,18 +441,61 @@ class SUAVE:
         )
         LOGGER.info("Train/val split: %s/%s", len(X_train), len(X_val))
 
-        missing_mask = data_utils.build_missing_mask(X_train)
-        LOGGER.debug(
-            "Missing mask summary: %s missing values", int(missing_mask.sum().sum())
+        schedule_warmup = (
+            self.warmup_epochs if warmup_epochs is None else int(warmup_epochs)
         )
+        if epochs is not None and warmup_epochs is None:
+            schedule_warmup = int(epochs)
+        schedule_head = self.head_epochs if head_epochs is None else int(head_epochs)
+        schedule_finetune = (
+            self.finetune_epochs if finetune_epochs is None else int(finetune_epochs)
+        )
+        schedule_lr_scale = (
+            self.joint_decoder_lr_scale
+            if joint_decoder_lr_scale is None
+            else float(joint_decoder_lr_scale)
+        )
+        schedule_patience = (
+            self.early_stop_patience
+            if early_stop_patience is None
+            else int(early_stop_patience)
+        )
+        for name, value in {
+            "warmup_epochs": schedule_warmup,
+            "head_epochs": schedule_head,
+            "finetune_epochs": schedule_finetune,
+        }.items():
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+        if schedule_lr_scale <= 0:
+            raise ValueError("joint_decoder_lr_scale must be positive")
+        if schedule_patience < 0:
+            raise ValueError("early_stop_patience must be non-negative")
 
+        batch_size = batch_size or self.batch_size
+        kl_warmup_epochs = kl_warmup_epochs or self.kl_warmup_epochs
+
+        missing_mask = data_utils.build_missing_mask(X_train)
         X_train_std, stats = data_utils.standardize(X_train, self.schema)
         missing_mask = missing_mask | X_train_std.isna()
         self._norm_stats_per_col = stats
-        _ = data_utils.standardize(X_val, self.schema)
+
+        encoder_inputs, data_tensors, mask_tensors = self._prepare_training_tensors(
+            X_train_std, missing_mask
+        )
+
+        val_missing_mask = data_utils.build_missing_mask(X_val)
+        X_val_std = self._apply_training_normalization(X_val)
+        val_missing_mask = val_missing_mask | X_val_std.isna()
+        val_encoder_inputs, val_data_tensors, val_mask_tensors = (
+            self._prepare_training_tensors(
+                X_val_std, val_missing_mask, update_layout=False
+            )
+        )
 
         class_weights: np.ndarray | None = None
         y_train_tensor: Tensor | None = None
+        y_val_tensor: Tensor | None = None
         if self.behaviour == "suave":
             y_train_array = np.asarray(y_train)
             self._classes = np.unique(y_train_array)
@@ -408,30 +513,30 @@ class SUAVE:
                 raise ValueError("Training targets must contain at least one class")
             class_weights = total_count / (len(class_counts) * class_counts)
             y_train_tensor = torch.from_numpy(train_target_indices.astype(np.int64))
+            if y_val is not None:
+                val_indices = self._map_targets_to_indices(np.asarray(y_val))
+                y_val_tensor = torch.from_numpy(val_indices.astype(np.int64))
         else:
             self._classes = None
             self._class_to_index = None
 
-        batch_size = batch_size or self.batch_size
-        kl_warmup_epochs = kl_warmup_epochs or self.kl_warmup_epochs
-        encoder_inputs, data_tensors, mask_tensors = self._prepare_training_tensors(
-            X_train_std, missing_mask
-        )
-
-        self._train_component_logits = None
-        self._train_component_mu = None
-        self._train_component_logvar = None
-        self._train_component_probs = None
-
         device = self._select_device()
         self._move_prior_parameters_to_device(device)
         encoder_inputs = encoder_inputs.to(device)
-        for feature_type in data_tensors:
-            for column, tensor in data_tensors[feature_type].items():
-                data_tensors[feature_type][column] = tensor.to(device)
-                mask_tensors[feature_type][column] = mask_tensors[feature_type][
-                    column
-                ].to(device)
+        val_encoder_inputs = val_encoder_inputs.to(device)
+
+        def _nested_to_device(
+            nested: dict[str, dict[str, Tensor]],
+        ) -> dict[str, dict[str, Tensor]]:
+            return {
+                key: {column: tensor.to(device) for column, tensor in tensors.items()}
+                for key, tensors in nested.items()
+            }
+
+        data_tensors = _nested_to_device(data_tensors)
+        mask_tensors = _nested_to_device(mask_tensors)
+        val_data_tensors = _nested_to_device(val_data_tensors)
+        val_mask_tensors = _nested_to_device(val_mask_tensors)
 
         torch.manual_seed(self.random_state)
         self._encoder = EncoderMLP(
@@ -448,6 +553,34 @@ class SUAVE:
             dropout=self.dropout,
             n_components=self.n_components,
         ).to(device)
+        self._classifier = None
+
+        if y_train_tensor is not None:
+            y_train_tensor = y_train_tensor.to(device)
+        if y_val_tensor is not None:
+            y_val_tensor = y_val_tensor.to(device)
+
+        warmup_history = self._run_warmup_phase(
+            schedule_warmup,
+            encoder_inputs,
+            data_tensors,
+            mask_tensors,
+            val_encoder_inputs,
+            val_data_tensors,
+            val_mask_tensors,
+            batch_size=batch_size,
+            kl_warmup_epochs=kl_warmup_epochs,
+        )
+
+        if self.behaviour == "hivae" and self._tau_start is not None:
+            self._inference_tau = warmup_history.get("final_temperature", 1.0)
+
+        posterior_stats = self._collect_posterior_statistics(
+            encoder_inputs,
+            batch_size=batch_size,
+            temperature=self._inference_tau if self.behaviour == "hivae" else None,
+        )
+
         if self.behaviour == "suave":
             assert self._classes is not None
             self._classifier = ClassificationHead(
@@ -456,32 +589,120 @@ class SUAVE:
                 class_weight=class_weights,
                 dropout=self.dropout,
             ).to(device)
-        else:
-            self._classifier = None
+            self._train_head_phase(
+                posterior_stats["mean"],
+                y_train_tensor,
+                epochs=schedule_head,
+                batch_size=batch_size,
+            )
+
+        self._run_joint_finetune(
+            schedule_finetune,
+            encoder_inputs,
+            data_tensors,
+            mask_tensors,
+            val_encoder_inputs,
+            val_data_tensors,
+            val_mask_tensors,
+            batch_size=batch_size,
+            lr_scale=schedule_lr_scale,
+            early_stop_patience=schedule_patience,
+            y_train_tensor=y_train_tensor,
+            y_val_tensor=y_val_tensor,
+        )
+
+        cache_stats = self._collect_posterior_statistics(
+            encoder_inputs,
+            batch_size=batch_size,
+            temperature=self._inference_tau if self.behaviour == "hivae" else None,
+        )
+        self._cache_training_statistics(
+            cache_stats,
+            y_train_tensor.cpu().numpy() if y_train_tensor is not None else None,
+        )
+
+        self.warmup_epochs = schedule_warmup
+        self.head_epochs = schedule_head
+        self.finetune_epochs = schedule_finetune
+        self.joint_decoder_lr_scale = schedule_lr_scale
+        self.early_stop_patience = schedule_patience
+
+        self._is_fitted = True
+        self._is_calibrated = False
+        self._temperature_scaler = TemperatureScaler()
+        self._temperature_scaler_state = None
+        self._cached_logits = None
+        self._cached_probabilities = None
+        self._logits_cache_key = None
+        self._probability_cache_key = None
+        self._warmup_val_history = warmup_history.get("history", [])
+
+        LOGGER.info("Fit complete")
+        return self
+
+    def _run_warmup_phase(
+        self,
+        warmup_epochs: int,
+        encoder_inputs: Tensor,
+        data_tensors: dict[str, dict[str, Tensor]],
+        mask_tensors: dict[str, dict[str, Tensor]],
+        val_inputs: Tensor,
+        val_data_tensors: dict[str, dict[str, Tensor]],
+        val_mask_tensors: dict[str, dict[str, Tensor]],
+        *,
+        batch_size: int,
+        kl_warmup_epochs: int,
+    ) -> dict[str, Any]:
+        """Execute the ELBO warm-start stage and record validation metrics."""
+
+        history: list[dict[str, float]] = []
+        device = encoder_inputs.device
+        if warmup_epochs <= 0:
+            temperature = (
+                self._gumbel_temperature_for_epoch(0)
+                if self.behaviour == "hivae"
+                else None
+            )
+            metrics = self._compute_elbo_on_dataset(
+                val_inputs,
+                val_data_tensors,
+                val_mask_tensors,
+                batch_size=batch_size,
+                temperature=temperature,
+            )
+            if metrics:
+                history.append(metrics)
+            final_temperature = temperature if temperature is not None else 1.0
+            return {"final_temperature": float(final_temperature), "history": history}
+
         parameters = list(self._encoder.parameters())
         parameters.extend(self._decoder.parameters())
         parameters.extend(self._prior_parameters_for_optimizer())
-        if self._classifier is not None:
-            parameters.extend(self._classifier.parameters())
         optimizer = Adam(parameters, lr=self.learning_rate)
 
-        if y_train_tensor is not None:
-            y_train_tensor = y_train_tensor.to(device)
-
         n_samples = encoder_inputs.size(0)
-        effective_batch = min(batch_size, n_samples)
-        n_batches = max(1, math.ceil(n_samples / effective_batch))
+        effective_batch = min(batch_size, n_samples) if n_samples else batch_size
+        n_batches = max(1, math.ceil(max(n_samples, 1) / max(effective_batch, 1)))
         warmup_steps = max(1, kl_warmup_epochs * n_batches)
         global_step = 0
-        progress = tqdm(range(epochs), desc="Training", leave=False)
+
         final_temperature = self._gumbel_temperature_for_epoch(0)
+        progress = tqdm(range(warmup_epochs), desc="Warm-start", leave=False)
         for epoch in progress:
-            temperature = self._gumbel_temperature_for_epoch(epoch)
-            use_gumbel = self.behaviour == "hivae" and self._tau_start is not None
-            final_temperature = temperature
-            permutation = torch.randperm(n_samples, device=device)
+            temperature = (
+                self._gumbel_temperature_for_epoch(epoch)
+                if self.behaviour == "hivae"
+                else None
+            )
+            if temperature is not None:
+                final_temperature = temperature
+            permutation = (
+                torch.randperm(n_samples, device=device)
+                if n_samples
+                else torch.tensor([], device=device, dtype=torch.long)
+            )
             epoch_loss = 0.0
-            for start in range(0, n_samples, effective_batch):
+            for start in range(0, n_samples, max(effective_batch, 1)):
                 batch_indices = permutation[start : start + effective_batch]
                 batch_input = encoder_inputs[batch_indices]
                 batch_data = {
@@ -499,151 +720,611 @@ class SUAVE:
                     for key, tensors in mask_tensors.items()
                 }
 
-                component_logits, component_mu, component_logvar = self._encoder(
-                    batch_input
-                )
-                component_probs = torch.softmax(component_logits, dim=-1)
-                if use_gumbel:
-                    gumbel_tau = max(float(temperature), 1e-6)
-                    posterior_weights = F.gumbel_softmax(
-                        component_logits, tau=gumbel_tau, hard=False, dim=-1
-                    )
-                else:
-                    posterior_weights = component_probs
-
                 global_step += 1
                 beta_scale = losses.kl_warmup(global_step, warmup_steps, self.beta)
-                categorical_kl = losses.kl_categorical(
-                    component_logits, self._prior_component_logits_tensor()
+                outputs = self._forward_elbo_batch(
+                    batch_input,
+                    batch_data,
+                    batch_masks,
+                    beta_scale=beta_scale,
+                    temperature=temperature,
                 )
-
-                if self.behaviour == "suave":
-                    assignment_tau = max(float(self.gumbel_temperature), 1e-6)
-                    assignments = F.gumbel_softmax(
-                        component_logits, tau=assignment_tau, hard=True
-                    )
-                    component_indices = assignments.argmax(dim=-1)
-                    selected_mu = self._gather_component_parameters(
-                        component_mu, component_indices
-                    )
-                    selected_logvar = self._gather_component_parameters(
-                        component_logvar, component_indices
-                    )
-                    z_sample = self._reparameterize(selected_mu, selected_logvar)
-                    decoder_out = self._decoder(
-                        z_sample,
-                        assignments,
-                        batch_data,
-                        self._norm_stats_per_col,
-                        batch_masks,
-                    )
-                    recon_sum = losses.sum_reconstruction_terms(decoder_out["log_px"])
-                    prior_means = self._prior_component_means_tensor()
-                    prior_logvars = self._prior_component_logvar_tensor()
-                    prior_mu = prior_means.index_select(0, component_indices)
-                    prior_logvar = prior_logvars.index_select(0, component_indices)
-                    gaussian_kl = losses.kl_normal_vs_normal(
-                        selected_mu, selected_logvar, prior_mu, prior_logvar
-                    )
-                    total_kl = beta_scale * (categorical_kl + gaussian_kl)
-                    elbo_value = recon_sum - total_kl
-                    loss = -elbo_value.mean()
-                    latent_for_classifier = z_sample
-                else:
-                    z_samples = self._reparameterize(component_mu, component_logvar)
-                    component_log_px: list[Tensor] = []
-                    for component_idx in range(self.n_components):
-                        component_assignments = F.one_hot(
-                            torch.full(
-                                (z_samples.size(0),),
-                                component_idx,
-                                device=z_samples.device,
-                                dtype=torch.long,
-                            ),
-                            num_classes=self.n_components,
-                        ).float()
-                        decoder_out = self._decoder(
-                            z_samples[:, component_idx, :],
-                            component_assignments,
-                            batch_data,
-                            self._norm_stats_per_col,
-                            batch_masks,
-                        )
-                        recon_sum = losses.sum_reconstruction_terms(
-                            decoder_out["log_px"]
-                        )
-                        component_log_px.append(recon_sum)
-                    component_log_px_tensor = torch.stack(component_log_px, dim=-1)
-                    gaussian_kl = losses.kl_normal_mixture(
-                        component_mu,
-                        component_logvar,
-                        self._prior_component_means_tensor(),
-                        self._prior_component_logvar_tensor(),
-                        component_probs,
-                    )
-                    total_kl = beta_scale * (categorical_kl + gaussian_kl)
-                    weighted_recon = (posterior_weights * component_log_px_tensor).sum(
-                        dim=-1
-                    )
-                    elbo_value = weighted_recon - total_kl
-                    loss = -elbo_value.mean()
-                    latent_for_classifier = (
-                        posterior_weights.unsqueeze(-1) * z_samples
-                    ).sum(dim=1)
-                if self._classifier is not None and y_train_tensor is not None:
-                    logits = self._classifier(latent_for_classifier)
-                    batch_targets = y_train_tensor[batch_indices]
-                    classification_loss = self._classifier.loss(logits, batch_targets)
-                    loss = loss + classification_loss
-
+                loss = outputs["loss"]
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-
-                epoch_loss += loss.item()
+                epoch_loss += float(loss.item())
 
             progress.set_postfix({"loss": epoch_loss / n_batches})
-
-        if self.behaviour == "hivae" and self._tau_start is not None:
-            self._inference_tau = float(final_temperature)
-
-        with torch.no_grad():
-            encoder_training_state = self._encoder.training
-            self._encoder.eval()
-            component_logits_all, component_mu_all, component_logvar_all = (
-                self._encoder(encoder_inputs)
+            metrics = self._compute_elbo_on_dataset(
+                val_inputs,
+                val_data_tensors,
+                val_mask_tensors,
+                batch_size=batch_size,
+                temperature=temperature,
             )
-            if encoder_training_state:
-                self._encoder.train()
-        posterior_mean, posterior_logvar, posterior_probs = (
-            self._mixture_posterior_statistics(
-                component_logits_all,
-                component_mu_all,
-                component_logvar_all,
-                temperature=self._inference_tau if self.behaviour == "hivae" else None,
+            if metrics:
+                history.append(metrics)
+
+        final_temperature = final_temperature if final_temperature is not None else 1.0
+        return {"final_temperature": float(final_temperature), "history": history}
+
+    def _forward_elbo_batch(
+        self,
+        batch_input: Tensor,
+        batch_data: dict[str, dict[str, Tensor]],
+        batch_masks: dict[str, dict[str, Tensor]],
+        *,
+        beta_scale: float,
+        temperature: float | None,
+    ) -> dict[str, Tensor]:
+        """Return ELBO components for a mini-batch."""
+
+        component_logits, component_mu, component_logvar = self._encoder(batch_input)
+        component_probs = torch.softmax(component_logits, dim=-1)
+        posterior_weights = component_probs
+        if temperature is not None and self.behaviour == "hivae":
+            gumbel_tau = max(float(temperature), 1e-6)
+            posterior_weights = F.gumbel_softmax(
+                component_logits, tau=gumbel_tau, hard=False, dim=-1
             )
+
+        categorical_kl = losses.kl_categorical(
+            component_logits, self._prior_component_logits_tensor()
         )
-        self._train_latent_mu = posterior_mean.detach().cpu()
-        self._train_latent_logvar = posterior_logvar.detach().cpu()
-        self._train_component_logits = component_logits_all.detach().cpu()
-        self._train_component_mu = component_mu_all.detach().cpu()
-        self._train_component_logvar = component_logvar_all.detach().cpu()
-        self._train_component_probs = posterior_probs.detach().cpu()
-        if y_train_tensor is not None:
-            self._train_target_indices = y_train_tensor.detach().cpu().numpy()
+
+        if self.behaviour == "suave":
+            assignment_tau = max(float(self.gumbel_temperature), 1e-6)
+            assignments = F.gumbel_softmax(
+                component_logits, tau=assignment_tau, hard=True
+            )
+            component_indices = assignments.argmax(dim=-1)
+            selected_mu = self._gather_component_parameters(
+                component_mu, component_indices
+            )
+            selected_logvar = self._gather_component_parameters(
+                component_logvar, component_indices
+            )
+            latent = self._reparameterize(selected_mu, selected_logvar)
+            decoder_out = self._decoder(
+                latent,
+                assignments,
+                batch_data,
+                self._norm_stats_per_col,
+                batch_masks,
+            )
+            recon_sum = losses.sum_reconstruction_terms(decoder_out["log_px"])
+            prior_means = self._prior_component_means_tensor()
+            prior_logvars = self._prior_component_logvar_tensor()
+            prior_mu = prior_means.index_select(0, component_indices)
+            prior_logvar = prior_logvars.index_select(0, component_indices)
+            gaussian_kl = losses.kl_normal_vs_normal(
+                selected_mu, selected_logvar, prior_mu, prior_logvar
+            )
+            total_kl_unscaled = categorical_kl + gaussian_kl
+            total_kl = beta_scale * total_kl_unscaled
+            elbo_value = recon_sum - total_kl
+            loss = -elbo_value.mean()
+            reconstruction = recon_sum
+        else:
+            z_samples = self._reparameterize(component_mu, component_logvar)
+            component_log_px: list[Tensor] = []
+            for component_idx in range(self.n_components):
+                component_assignments = F.one_hot(
+                    torch.full(
+                        (z_samples.size(0),),
+                        component_idx,
+                        device=z_samples.device,
+                        dtype=torch.long,
+                    ),
+                    num_classes=self.n_components,
+                ).float()
+                decoder_out = self._decoder(
+                    z_samples[:, component_idx, :],
+                    component_assignments,
+                    batch_data,
+                    self._norm_stats_per_col,
+                    batch_masks,
+                )
+                recon_sum = losses.sum_reconstruction_terms(decoder_out["log_px"])
+                component_log_px.append(recon_sum)
+            component_log_px_tensor = torch.stack(component_log_px, dim=-1)
+            gaussian_kl = losses.kl_normal_mixture(
+                component_mu,
+                component_logvar,
+                self._prior_component_means_tensor(),
+                self._prior_component_logvar_tensor(),
+                posterior_weights,
+            )
+            total_kl_unscaled = categorical_kl + gaussian_kl
+            total_kl = beta_scale * total_kl_unscaled
+            reconstruction = (posterior_weights * component_log_px_tensor).sum(dim=-1)
+            elbo_value = reconstruction - total_kl
+            loss = -elbo_value.mean()
+            latent = (posterior_weights.unsqueeze(-1) * z_samples).sum(dim=1)
+
+        return {
+            "loss": loss,
+            "reconstruction": reconstruction,
+            "categorical_kl": categorical_kl,
+            "gaussian_kl": gaussian_kl,
+            "total_kl": total_kl,
+            "kl_unscaled": total_kl_unscaled,
+            "latent": latent,
+            "component_logits": component_logits,
+            "component_mu": component_mu,
+            "component_logvar": component_logvar,
+        }
+
+    def _collect_posterior_statistics(
+        self,
+        encoder_inputs: Tensor,
+        *,
+        batch_size: int,
+        temperature: float | None,
+    ) -> dict[str, Tensor]:
+        """Return posterior summaries for ``encoder_inputs``."""
+
+        n_samples = encoder_inputs.size(0)
+        effective_batch = min(batch_size, n_samples) if n_samples else batch_size
+
+        was_training = self._encoder.training
+        self._encoder.eval()
+        means: list[Tensor] = []
+        logvars: list[Tensor] = []
+        probs: list[Tensor] = []
+        logits: list[Tensor] = []
+        mu_params: list[Tensor] = []
+        logvar_params: list[Tensor] = []
+        with torch.no_grad():
+            for start in range(0, n_samples, max(effective_batch, 1)):
+                end = start + effective_batch
+                batch_input = encoder_inputs[start:end]
+                component_logits, component_mu, component_logvar = self._encoder(
+                    batch_input
+                )
+                posterior_mean, posterior_logvar, posterior_probs = (
+                    self._mixture_posterior_statistics(
+                        component_logits,
+                        component_mu,
+                        component_logvar,
+                        temperature=temperature,
+                    )
+                )
+                means.append(posterior_mean.detach().cpu())
+                logvars.append(posterior_logvar.detach().cpu())
+                probs.append(posterior_probs.detach().cpu())
+                logits.append(component_logits.detach().cpu())
+                mu_params.append(component_mu.detach().cpu())
+                logvar_params.append(component_logvar.detach().cpu())
+
+        if was_training:
+            self._encoder.train()
+
+        return {
+            "mean": (
+                torch.cat(means, dim=0) if means else torch.empty(0, self.latent_dim)
+            ),
+            "logvar": (
+                torch.cat(logvars, dim=0)
+                if logvars
+                else torch.empty(0, self.latent_dim)
+            ),
+            "probs": (
+                torch.cat(probs, dim=0) if probs else torch.empty(0, self.n_components)
+            ),
+            "component_logits": (
+                torch.cat(logits, dim=0)
+                if logits
+                else torch.empty(0, self.n_components)
+            ),
+            "component_mu": (
+                torch.cat(mu_params, dim=0)
+                if mu_params
+                else torch.empty(0, self.n_components, self.latent_dim)
+            ),
+            "component_logvar": (
+                torch.cat(logvar_params, dim=0)
+                if logvar_params
+                else torch.empty(0, self.n_components, self.latent_dim)
+            ),
+        }
+
+    def _train_head_phase(
+        self,
+        latent_mu: Tensor,
+        y_train_tensor: Tensor | None,
+        *,
+        epochs: int,
+        batch_size: int,
+    ) -> None:
+        """Train the classification head on cached latent representations."""
+
+        if self._classifier is None or y_train_tensor is None or epochs <= 0:
+            return
+
+        device = y_train_tensor.device
+        latent_mu = latent_mu.to(device)
+        n_samples = latent_mu.size(0)
+        if n_samples == 0:
+            return
+
+        effective_batch = min(batch_size, n_samples)
+        n_batches = max(1, math.ceil(n_samples / effective_batch))
+        optimizer = Adam(self._classifier.parameters(), lr=self.learning_rate)
+
+        encoder_requires_grad = [
+            param.requires_grad for param in self._encoder.parameters()
+        ]
+        decoder_requires_grad = [
+            param.requires_grad for param in self._decoder.parameters()
+        ]
+        for param in self._encoder.parameters():
+            param.requires_grad = False
+        for param in self._decoder.parameters():
+            param.requires_grad = False
+
+        was_training = self._classifier.training
+        self._classifier.train()
+        progress = tqdm(range(epochs), desc="Head", leave=False)
+        for _ in progress:
+            permutation = torch.randperm(n_samples, device=device)
+            epoch_loss = 0.0
+            for start in range(0, n_samples, effective_batch):
+                batch_indices = permutation[start : start + effective_batch]
+                logits = self._classifier(latent_mu[batch_indices])
+                targets = y_train_tensor[batch_indices]
+                loss = self._classifier.loss(logits, targets)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                epoch_loss += float(loss.item())
+            progress.set_postfix({"loss": epoch_loss / n_batches})
+
+        if not was_training:
+            self._classifier.eval()
+        for param, flag in zip(self._encoder.parameters(), encoder_requires_grad):
+            param.requires_grad = flag
+        for param, flag in zip(self._decoder.parameters(), decoder_requires_grad):
+            param.requires_grad = flag
+
+    def _run_joint_finetune(
+        self,
+        finetune_epochs: int,
+        encoder_inputs: Tensor,
+        data_tensors: dict[str, dict[str, Tensor]],
+        mask_tensors: dict[str, dict[str, Tensor]],
+        val_inputs: Tensor,
+        val_data_tensors: dict[str, dict[str, Tensor]],
+        val_mask_tensors: dict[str, dict[str, Tensor]],
+        *,
+        batch_size: int,
+        lr_scale: float,
+        early_stop_patience: int,
+        y_train_tensor: Tensor | None,
+        y_val_tensor: Tensor | None,
+    ) -> None:
+        """Fine-tune all modules jointly with early stopping."""
+
+        if finetune_epochs <= 0:
+            return
+
+        device = encoder_inputs.device
+        encoder_params = list(self._encoder.parameters())
+        decoder_params = list(self._decoder.parameters())
+        prior_params = self._prior_parameters_for_optimizer()
+        param_groups: list[dict[str, Any]] = []
+        if encoder_params:
+            param_groups.append({"params": encoder_params, "lr": self.learning_rate})
+        if self._classifier is not None:
+            param_groups.append(
+                {"params": self._classifier.parameters(), "lr": self.learning_rate}
+            )
+        scaled_lr = self.learning_rate * lr_scale
+        if decoder_params:
+            param_groups.append({"params": decoder_params, "lr": scaled_lr})
+        if prior_params:
+            param_groups.append({"params": prior_params, "lr": scaled_lr})
+        if not param_groups:
+            return
+
+        optimizer = Adam(param_groups)
+        self._encoder.train()
+        self._decoder.train()
+        if self._classifier is not None:
+            self._classifier.train()
+
+        n_samples = encoder_inputs.size(0)
+        effective_batch = min(batch_size, n_samples) if n_samples else batch_size
+        n_batches = max(1, math.ceil(max(n_samples, 1) / max(effective_batch, 1)))
+
+        best_state: dict[str, Any] | None = None
+        best_metrics: dict[str, float] | None = None
+        patience_counter = 0
+        progress = tqdm(range(finetune_epochs), desc="Joint fine-tune", leave=False)
+        for epoch in progress:
+            permutation = (
+                torch.randperm(n_samples, device=device)
+                if n_samples
+                else torch.tensor([], device=device, dtype=torch.long)
+            )
+            epoch_loss = 0.0
+            for start in range(0, n_samples, max(effective_batch, 1)):
+                batch_indices = permutation[start : start + effective_batch]
+                batch_input = encoder_inputs[batch_indices]
+                batch_data = {
+                    key: {
+                        column: tensor[batch_indices]
+                        for column, tensor in tensors.items()
+                    }
+                    for key, tensors in data_tensors.items()
+                }
+                batch_masks = {
+                    key: {
+                        column: tensor[batch_indices]
+                        for column, tensor in tensors.items()
+                    }
+                    for key, tensors in mask_tensors.items()
+                }
+                outputs = self._forward_elbo_batch(
+                    batch_input,
+                    batch_data,
+                    batch_masks,
+                    beta_scale=self.beta,
+                    temperature=(
+                        self._inference_tau if self.behaviour == "hivae" else None
+                    ),
+                )
+                loss = outputs["loss"]
+                if self._classifier is not None and y_train_tensor is not None:
+                    logits = self._classifier(outputs["latent"])
+                    targets = y_train_tensor[batch_indices]
+                    loss = loss + self._classifier.loss(logits, targets)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                epoch_loss += float(loss.item())
+
+            metrics = self._compute_validation_scores(
+                val_inputs,
+                val_data_tensors,
+                val_mask_tensors,
+                batch_size=batch_size,
+                temperature=self._inference_tau if self.behaviour == "hivae" else None,
+                y_val_tensor=y_val_tensor,
+            )
+            progress.set_postfix(
+                {"loss": epoch_loss / n_batches, "nll": metrics.get("nll")}
+            )
+
+            if best_metrics is None or self._is_better_metrics(metrics, best_metrics):
+                best_metrics = metrics
+                best_state = self._capture_model_state()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter > early_stop_patience:
+                    break
+
+        if best_state is not None:
+            self._restore_model_state(best_state, device)
+            self._joint_val_metrics = best_metrics
+
+    def _compute_elbo_on_dataset(
+        self,
+        encoder_inputs: Tensor,
+        data_tensors: dict[str, dict[str, Tensor]],
+        mask_tensors: dict[str, dict[str, Tensor]],
+        *,
+        batch_size: int,
+        temperature: float | None,
+    ) -> dict[str, float]:
+        """Evaluate reconstruction and KL terms on a dataset."""
+
+        n_samples = encoder_inputs.size(0)
+        if n_samples == 0:
+            return {}
+        effective_batch = min(batch_size, n_samples)
+
+        encoder_training = self._encoder.training
+        decoder_training = self._decoder.training
+        self._encoder.eval()
+        self._decoder.eval()
+
+        total_recon = 0.0
+        total_cat_kl = 0.0
+        total_gauss_kl = 0.0
+        with torch.no_grad():
+            for start in range(0, n_samples, effective_batch):
+                end = start + effective_batch
+                batch_input = encoder_inputs[start:end]
+                batch_data = {
+                    key: {
+                        column: tensor[start:end] for column, tensor in tensors.items()
+                    }
+                    for key, tensors in data_tensors.items()
+                }
+                batch_masks = {
+                    key: {
+                        column: tensor[start:end] for column, tensor in tensors.items()
+                    }
+                    for key, tensors in mask_tensors.items()
+                }
+                outputs = self._forward_elbo_batch(
+                    batch_input,
+                    batch_data,
+                    batch_masks,
+                    beta_scale=self.beta,
+                    temperature=temperature,
+                )
+                total_recon += float(outputs["reconstruction"].sum().item())
+                total_cat_kl += float(outputs["categorical_kl"].sum().item())
+                total_gauss_kl += float(outputs["gaussian_kl"].sum().item())
+
+        if encoder_training:
+            self._encoder.train()
+        if decoder_training:
+            self._decoder.train()
+
+        nll = ((total_cat_kl + total_gauss_kl) * self.beta - total_recon) / n_samples
+        return {
+            "nll": float(nll),
+            "reconstruction": float(total_recon / n_samples),
+            "categorical_kl": float(total_cat_kl / n_samples),
+            "gaussian_kl": float(total_gauss_kl / n_samples),
+        }
+
+    def _compute_validation_scores(
+        self,
+        encoder_inputs: Tensor,
+        data_tensors: dict[str, dict[str, Tensor]],
+        mask_tensors: dict[str, dict[str, Tensor]],
+        *,
+        batch_size: int,
+        temperature: float | None,
+        y_val_tensor: Tensor | None,
+    ) -> dict[str, float]:
+        """Compute validation NLL, Brier score and ECE."""
+
+        metrics = self._compute_elbo_on_dataset(
+            encoder_inputs,
+            data_tensors,
+            mask_tensors,
+            batch_size=batch_size,
+            temperature=temperature,
+        )
+        if not metrics:
+            return {}
+        metrics = dict(metrics)
+        metrics.setdefault("brier", float("nan"))
+        metrics.setdefault("ece", float("nan"))
+
+        if self._classifier is None or y_val_tensor is None:
+            return metrics
+
+        was_training = self._classifier.training
+        self._classifier.eval()
+        posterior = self._collect_posterior_statistics(
+            encoder_inputs,
+            batch_size=batch_size,
+            temperature=temperature,
+        )
+        latent_mu = posterior["mean"].to(encoder_inputs.device)
+        with torch.no_grad():
+            logits = self._classifier(latent_mu)
+        probabilities = torch.softmax(logits, dim=-1).detach().cpu().numpy()
+        targets = y_val_tensor.detach().cpu().numpy()
+        try:
+            metrics["brier"] = float(compute_brier(probabilities, targets))
+        except ValueError:
+            metrics["brier"] = float("nan")
+        try:
+            metrics["ece"] = float(compute_ece(probabilities, targets))
+        except ValueError:
+            metrics["ece"] = float("nan")
+        if was_training:
+            self._classifier.train()
+        return metrics
+
+    @staticmethod
+    def _is_better_metrics(candidate: dict[str, float], best: dict[str, float]) -> bool:
+        """Return ``True`` when ``candidate`` improves upon ``best``."""
+
+        for key in ("nll", "brier", "ece"):
+            cand = float(candidate.get(key, float("inf")))
+            best_val = float(best.get(key, float("inf")))
+            if not math.isfinite(cand):
+                cand = float("inf")
+            if not math.isfinite(best_val):
+                best_val = float("inf")
+            if cand < best_val - 1e-8:
+                return True
+            if cand > best_val + 1e-8:
+                return False
+        return False
+
+    def _capture_model_state(self) -> dict[str, Any]:
+        """Capture trainable module states for early stopping."""
+
+        state: dict[str, Any] = {
+            "encoder": self._state_dict_to_cpu(self._encoder),
+            "decoder": self._state_dict_to_cpu(self._decoder),
+            "classifier": self._state_dict_to_cpu(self._classifier),
+            "prior_logits": self._tensor_to_cpu(self._prior_component_logits_tensor()),
+            "prior_logvar": self._tensor_to_cpu(self._prior_component_logvar_tensor()),
+            "prior_mu": self._tensor_to_cpu(self._prior_component_means_tensor()),
+            "inference_tau": float(self._inference_tau),
+        }
+        if self._prior_mean_layer is not None:
+            state["prior_mean_state"] = self._state_dict_to_cpu(self._prior_mean_layer)
+        return state
+
+    def _restore_model_state(self, state: dict[str, Any], device: torch.device) -> None:
+        """Restore trainable parameters from ``state``."""
+
+        encoder_state = state.get("encoder")
+        if encoder_state is not None and self._encoder is not None:
+            self._encoder.load_state_dict(encoder_state)
+        decoder_state = state.get("decoder")
+        if decoder_state is not None and self._decoder is not None:
+            self._decoder.load_state_dict(decoder_state)
+        classifier_state = state.get("classifier")
+        if classifier_state is not None and self._classifier is not None:
+            self._classifier.load_state_dict(classifier_state)
+
+        prior_logits = state.get("prior_logits")
+        if prior_logits is not None and self._prior_component_logits is not None:
+            self._prior_component_logits.data.copy_(prior_logits.to(device))
+        prior_logvar = state.get("prior_logvar")
+        if prior_logvar is not None and self._prior_component_logvar is not None:
+            self._prior_component_logvar.data.copy_(prior_logvar.to(device))
+        prior_mu = state.get("prior_mu")
+        if prior_mu is not None and self._prior_component_mu is not None:
+            self._prior_component_mu.data.copy_(prior_mu.to(device))
+        if self._prior_mean_layer is not None and "prior_mean_state" in state:
+            self._prior_mean_layer.load_state_dict(state["prior_mean_state"])
+
+        inference_tau = state.get("inference_tau")
+        if inference_tau is not None:
+            self._inference_tau = float(inference_tau)
+
+    def _cache_training_statistics(
+        self,
+        stats: dict[str, Tensor],
+        train_target_indices: np.ndarray | None,
+    ) -> None:
+        """Persist posterior summaries for downstream tasks."""
+
+        self._train_latent_mu = (
+            stats.get("mean", torch.empty(0, self.latent_dim)).clone().detach()
+        )
+        self._train_latent_logvar = (
+            stats.get("logvar", torch.empty(0, self.latent_dim)).clone().detach()
+        )
+        self._train_component_logits = (
+            stats.get("component_logits", torch.empty(0, self.n_components))
+            .clone()
+            .detach()
+        )
+        self._train_component_mu = (
+            stats.get(
+                "component_mu", torch.empty(0, self.n_components, self.latent_dim)
+            ).clone()
+        ).detach()
+        self._train_component_logvar = (
+            stats.get(
+                "component_logvar", torch.empty(0, self.n_components, self.latent_dim)
+            ).clone()
+        ).detach()
+        self._train_component_probs = (
+            stats.get("probs", torch.empty(0, self.n_components)).clone().detach()
+        )
+        if train_target_indices is not None:
+            self._train_target_indices = np.asarray(
+                train_target_indices, dtype=np.int64
+            )
         else:
             self._train_target_indices = None
-
-        self._is_fitted = True
-        self._is_calibrated = False
-        self._temperature_scaler = TemperatureScaler()
-        self._temperature_scaler_state = None
-        self._cached_logits = None
-        self._cached_probabilities = None
-        self._logits_cache_key = None
-        self._probability_cache_key = None
-        LOGGER.info("Fit complete")
-        return self
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1604,6 +2285,11 @@ class SUAVE:
             "tau_min": self._tau_min,
             "tau_decay": self._tau_decay,
             "inference_tau": self._inference_tau,
+            "warmup_epochs": self.warmup_epochs,
+            "head_epochs": self.head_epochs,
+            "finetune_epochs": self.finetune_epochs,
+            "joint_decoder_lr_scale": self.joint_decoder_lr_scale,
+            "early_stop_patience": self.early_stop_patience,
         }
         classifier_state: dict[str, Any] | None = None
         if self._classifier is not None:
@@ -1652,6 +2338,8 @@ class SUAVE:
             "cached_probabilities": self._cached_probabilities,
             "logits_cache_key": self._logits_cache_key,
             "probability_cache_key": self._probability_cache_key,
+            "warmup_val_history": self._warmup_val_history,
+            "joint_val_metrics": self._joint_val_metrics,
         }
         payload = {
             "metadata": metadata,
@@ -1713,13 +2401,34 @@ class SUAVE:
             "tau_start",
             "tau_min",
             "tau_decay",
+            "warmup_epochs",
+            "head_epochs",
+            "finetune_epochs",
+            "joint_decoder_lr_scale",
+            "early_stop_patience",
         ):
             if key in metadata and metadata[key] is not None:
                 value = metadata[key]
                 if key == "hidden_dims":
                     value = tuple(int(v) for v in value)
-                elif key in {"tau_start", "tau_min", "tau_decay"}:
+                elif key in {
+                    "tau_start",
+                    "tau_min",
+                    "tau_decay",
+                    "joint_decoder_lr_scale",
+                }:
                     value = float(value)
+                elif key in {
+                    "latent_dim",
+                    "n_components",
+                    "batch_size",
+                    "kl_warmup_epochs",
+                    "warmup_epochs",
+                    "head_epochs",
+                    "finetune_epochs",
+                    "early_stop_patience",
+                }:
+                    value = int(value)
                 init_kwargs[key] = value
         model = cls(schema=schema, behaviour=behaviour, **init_kwargs)
 
@@ -1746,6 +2455,8 @@ class SUAVE:
         model._probability_cache_key = artefacts.get("probability_cache_key")
         model._temperature_scaler_state = artefacts.get("temperature_scaler_state")
         model._is_calibrated = bool(artefacts.get("is_calibrated", False))
+        model._warmup_val_history = artefacts.get("warmup_val_history", [])
+        model._joint_val_metrics = artefacts.get("joint_val_metrics")
 
         def _clone_optional_tensor(value: Any) -> Tensor | None:
             if value is None:
