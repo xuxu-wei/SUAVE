@@ -2850,7 +2850,10 @@ class SUAVE:
         ``attr`` identifies a categorical or ordinal schema attribute the
         method estimates the Monte Carlo posterior predictive distribution
         :math:`p(x_{attr} \mid x^o)` by masking the target column and decoding
-        samples from :math:`q(s, z \mid x^o)`.
+        samples from :math:`q(s, z \mid x^o)`.  In
+        ``behaviour="unsupervised"`` mode the classifier head is disabled, so
+        ``attr`` must be provided and the method only operates in the
+        generative regime described above.
         
         Parameters
         ----------
@@ -2862,8 +2865,13 @@ class SUAVE:
             label are returned.
         mask : pandas.DataFrame or numpy.ndarray or torch.Tensor, optional
             Boolean mask that marks observed values as ``False`` and missing
-            entries as ``True``.  Only required when ``attr`` is provided and
-            missingness must be preserved during decoding.
+            entries as ``True``.  When ``attr`` is provided the corresponding
+            column is always treated as missing while decoding.  Provide
+            ``mask`` when ``X`` has been imputed or otherwise lacks explicit
+            ``NaN`` markers so that the original missingness pattern (for
+            example the mask returned by :func:`suave.data.build_missing_mask`)
+            can be respected during decoding.  If ``mask`` is omitted the
+            method infers missingness directly from ``X``.
         L : int, default 100
             Number of Monte Carlo samples used to approximate the posterior
             predictive distribution when ``attr`` is specified.
@@ -2899,6 +2907,8 @@ class SUAVE:
         >>> gender_probs = model.predict_proba(X, attr="gender")
         >>> torch.allclose(gender_probs.sum(dim=1), torch.ones(len(X)))
         True
+        >>> mask = suave.data.build_missing_mask(X_raw)
+        >>> model.predict_proba(X_imputed, attr="gender", mask=mask)
         """
 
         if attr is None:
@@ -2992,7 +3002,9 @@ class SUAVE:
         returned dictionary includes the requested point estimate, percentile
         confidence interval bounds and the sample standard deviation.  When
         ``return_samples`` is ``True`` the raw predictive samples are also
-        returned with shape ``(n_samples, L)``.
+        returned with shape ``(n_samples, L)``.  ``mask`` can be supplied to
+        preserve externally tracked missingness patterns that are not encoded
+        as ``NaN`` values in ``X``.
 
         Parameters
         ----------
@@ -3004,7 +3016,10 @@ class SUAVE:
         mask:
             Optional boolean mask marking missing entries (``True`` for
             missing).  The specified attribute is always treated as missing
-            regardless of ``mask``.
+            regardless of ``mask``.  Pass the mask used during training (for
+            example from :func:`suave.data.build_missing_mask`) when ``X`` has
+            been imputed so that the decoder can preserve the original
+            missingness pattern while conditioning on ``x^o``.
         L:
             Number of Monte Carlo samples used to approximate the predictive
             distribution.  Must be positive.
@@ -3032,6 +3047,8 @@ class SUAVE:
         >>> stats = model.predict_confidence_interval(X, "age", L=256)
         >>> stats["lower"].shape
         torch.Size([len(X)])
+        >>> mask = suave.data.build_missing_mask(X_raw)
+        >>> model.predict_confidence_interval(X_imputed, "age", mask=mask)
         """
 
         if not self._is_fitted or self._encoder is None or self._decoder is None:
@@ -3130,11 +3147,18 @@ class SUAVE:
             Feature matrix with the same columns used during training.
         attr : str or int, optional
             Name or positional index of the attribute to infer.  When omitted,
-            class labels from the supervised head are returned.
+            class labels from the supervised head are returned.  In
+            ``behaviour="unsupervised"`` mode the classifier head is not
+            available, so ``attr`` must be supplied and only attribute-level
+            predictions are produced.
         mask : pandas.DataFrame or numpy.ndarray or torch.Tensor, optional
             Boolean mask indicating observed (``False``) and missing (``True``)
             entries.  Used when requesting attribute predictions so the
-            original missingness pattern can be respected.
+            original missingness pattern can be respected.  Supply the same
+            mask used during training (for example from
+            :func:`suave.data.build_missing_mask`) when ``X`` no longer contains
+            ``NaN`` placeholders for missing inputs; otherwise the method infers
+            missingness directly from ``X``.
         L : int, default 50
             Number of Monte Carlo samples drawn when ``mode='sample'`` or when
             summarising posterior predictive statistics for non-class targets.
@@ -3166,6 +3190,8 @@ class SUAVE:
         (len(X),)
         >>> glucose = model.predict(X, attr="glucose")
         >>> glucose_samples = model.predict(X, attr="glucose", mode="sample")
+        >>> mask = suave.data.build_missing_mask(X_raw)
+        >>> model.predict(X_imputed, attr="glucose", mask=mask)
 
         """
 
