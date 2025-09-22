@@ -1,6 +1,6 @@
-"""Distribution helpers mirroring the TensorFlow HI-VAE implementation.
+"""Distribution helpers mirroring the legacy TensorFlow unsupervised implementation.
 
-The original HI-VAE code expresses reconstruction terms for every column type
+The original unsupervised code expresses reconstruction terms for every column type
 in terms of log-likelihoods under the corresponding distribution.  This module
 contains the PyTorch equivalents that are shared by the decoder heads.
 """

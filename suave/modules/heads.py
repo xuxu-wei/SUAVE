@@ -1,4 +1,4 @@
-"""Classification heads mirroring the TensorFlow HI-VAE baseline."""
+"""Classification heads mirroring the legacy TensorFlow unsupervised baseline."""
 
 from __future__ import annotations
 
