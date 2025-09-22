@@ -8,7 +8,7 @@ from typing import Dict, Iterable, Mapping, MutableMapping, Optional
 
 @dataclass(frozen=True)
 class ColumnSpec:
-    """Specification for a single column in the :class:`Schema`.
+    """Structured description of a single column handled by :class:`Schema`.
 
     Parameters
     ----------
@@ -18,8 +18,13 @@ class ColumnSpec:
         ``"count"`` (Poisson), ``"cat"`` (categorical) and ``"ordinal"``
         (cumulative link).
     n_classes:
-        Number of distinct categories for categorical features. It must be
-        provided when ``type`` is ``"cat"``.
+        Number of distinct categories for categorical or ordinal features.
+        It must be provided (and strictly greater than one) whenever ``type``
+        is ``"cat"`` or ``"ordinal"``.
+    y_dim:
+        Optional integer indicating how many latent ``y`` dimensions the
+        column should occupy when passed to the decoder. When omitted, SUAVE
+        derives a default allocation based on the column type.
     """
 
     type: str
@@ -28,33 +33,82 @@ class ColumnSpec:
 
 
 class Schema:
-    """Container describing the tabular data layout expected by :class:`SUAVE`.
+    """Explicit description of the tabular layout consumed by :class:`SUAVE`.
 
-    The schema is intentionally lightweight: users provide a mapping from
-    column name to a :class:`ColumnSpec`.  Automatic inference is outside the
-    scope of this first iteration, which keeps the public API explicit and
-    predictable.
+    ``Schema`` is the primary entry-point for telling SUAVE how your dataset is
+    organised.  You pass a mapping of column names to dictionaries (or
+    :class:`ColumnSpec` instances) describing the semantic type of each
+    feature, the number of discrete classes where applicable, and any optional
+    latent dimensionality overrides.  Keeping the schema explicit avoids the
+    surprises of automatic inference while providing a single place to inspect
+    and share dataset metadata.
 
     Parameters
     ----------
     columns:
-        Mapping from column names to ``dict`` (or :class:`ColumnSpec`) objects
-        containing the ``type`` key and, for categorical features, the
-        ``n_classes`` key.
+        Mapping of column names to dictionaries with at least the ``"type"``
+        key.  Supported types are ``"real"`` (continuous, Gaussian head),
+        ``"pos"`` (positive real values, log-normal head), ``"count"``
+        (non-negative integers, Poisson head), ``"cat"`` (categorical,
+        requires ``"n_classes"``) and ``"ordinal"`` (ordered discrete,
+        requires ``"n_classes"``).  The mapping may optionally include a
+        ``"y_dim"`` integer to override how many latent dimensions the column
+        occupies when interfacing with the decoder.  Each entry is normalised
+        into a :class:`ColumnSpec` during initialisation.
+
+    Attributes
+    ----------
+    feature_names: tuple of str
+        Column order as retained internally by SUAVE.  This is typically the
+        order expected by downstream preprocessing utilities.
+    real_features, categorical_features, positive_features,
+    count_features, ordinal_features: tuple of str
+        Convenience accessors exposing subsets of ``feature_names`` filtered by
+        their logical type.  They are especially handy when configuring
+        encoders/decoders or sanity-checking that the schema matches the raw
+        dataframe.
+
+    Raises
+    ------
+    ValueError
+        If a column declares an unsupported ``type``, omits the required
+        ``n_classes`` for categorical/ordinal data, or specifies invalid values
+        for ``n_classes``/``y_dim``.
+
+    Notes
+    -----
+    ``Schema`` is intentionally read/write friendly: the :meth:`to_dict`
+    method returns a JSON-serialisable payload that can be written to disk and
+    re-loaded later to guarantee reproducible preprocessing.  You can also
+    compose schema fragments via :meth:`update` when datasets are built
+    iteratively.
 
     Examples
     --------
+    Build a schema from scratch using dictionaries and access different
+    feature subsets:
+
     >>> from suave.types import Schema
     >>> schema = Schema(
     ...     {
     ...         "age": {"type": "real"},
     ...         "gender": {"type": "cat", "n_classes": 2},
+    ...         "visit_count": {"type": "count"},
     ...     }
     ... )
     >>> schema.feature_names
-    ['age', 'gender']
+    ('age', 'gender', 'visit_count')
     >>> schema.categorical_features
-    ['gender']
+    ('gender',)
+
+    Persist an existing schema to JSON and load it back later:
+
+    >>> import json
+    >>> payload = schema.to_dict()
+    >>> with open("schema.json", "w") as fp:
+    ...     json.dump(payload, fp)
+    >>> Schema(payload).positive_features
+    ()
     """
 
     _SUPPORTED_TYPES = {"real", "cat", "pos", "count", "ordinal"}

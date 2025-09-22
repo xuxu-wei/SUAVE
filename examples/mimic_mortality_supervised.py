@@ -28,7 +28,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from suave import SUAVE, Schema
+
+from suave import (
+    SUAVE,
+    Schema,
+    SchemaInferenceMode,
+    SchemaInferencer,
+)
 from suave.evaluate import evaluate_tstr, evaluate_trtr, simple_membership_inference
 
 
@@ -44,18 +50,18 @@ def load_dataset(path: Path) -> pd.DataFrame:
 
     return pd.read_csv(path, sep="\t")
 
-
 def define_schema(df: pd.DataFrame, feature_columns: Iterable[str]) -> Schema:
     """Create a :class:`Schema` describing ``df``'s feature columns."""
 
-    schema_dict: Dict[str, Mapping[str, object]] = {}
-    for column in feature_columns:
-        if column in CATEGORICAL_FEATURES:
-            n_classes = int(df[column].dropna().nunique())
-            schema_dict[column] = {"type": "cat", "n_classes": max(n_classes, 2)}
-        else:
-            schema_dict[column] = {"type": "real"}
-    return Schema(schema_dict)
+    inferencer = SchemaInferencer(categorical_overrides=CATEGORICAL_FEATURES)
+    result = inferencer.infer(
+        df,
+        feature_columns,
+        mode=SchemaInferenceMode.INFO,
+    )
+    for message in result.messages:
+        print(f"[schema] {message}")
+    return result.schema
 
 
 def prepare_features(df: pd.DataFrame, feature_columns: Iterable[str]) -> pd.DataFrame:
