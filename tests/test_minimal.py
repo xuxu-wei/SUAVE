@@ -14,6 +14,13 @@ import torch
 import torch.nn.functional as F
 
 from suave import SUAVE, Schema
+from suave.evaluate import (
+    compute_auprc,
+    compute_auroc,
+    compute_brier,
+    compute_ece,
+    evaluate_classification,
+)
 
 
 def make_dataset() -> tuple[pd.DataFrame, pd.Series, Schema]:
@@ -229,7 +236,11 @@ def test_save_load_predict_round_trip(tmp_path: Path):
     expected_probabilities = model.predict_proba(X)
     expected_logits = model._cached_logits.copy()
     expected_latents = model.encode(X)
-    scaler_state = model._temperature_scaler_state.copy() if model._temperature_scaler_state else None
+    scaler_state = (
+        model._temperature_scaler_state.copy()
+        if model._temperature_scaler_state
+        else None
+    )
     tensor_attrs = [
         "_train_latent_mu",
         "_train_latent_logvar",
@@ -239,7 +250,11 @@ def test_save_load_predict_round_trip(tmp_path: Path):
         "_train_component_probs",
     ]
     tensor_snapshots = {
-        attr: getattr(model, attr).clone().detach() if getattr(model, attr) is not None else None
+        attr: (
+            getattr(model, attr).clone().detach()
+            if getattr(model, attr) is not None
+            else None
+        )
         for attr in tensor_attrs
     }
     target_indices_snapshot = None
@@ -309,6 +324,50 @@ def test_save_payload_contains_classifier_temperature_and_prior(tmp_path: Path):
     np.testing.assert_allclose(
         artefacts["cached_probabilities"], expected_probabilities
     )
+
+
+def test_calibrate_updates_probability_cache_and_metrics() -> None:
+    X, y, schema = make_dataset()
+    model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)
+    model.fit(X, y, epochs=1)
+    model.calibrate(X, y)
+
+    assert model._temperature_scaler_state is not None
+    assert model._temperature_scaler_state.get("fitted") is True
+
+    expected_cache_key = model._fingerprint_inputs(X)
+    assert model._logits_cache_key == expected_cache_key
+    assert model._probability_cache_key == expected_cache_key
+    assert model._cached_probabilities is not None
+
+    cached_probabilities = model._cached_probabilities.copy()
+    recomputed_probabilities = model.predict_proba(X)
+    np.testing.assert_allclose(recomputed_probabilities, cached_probabilities)
+
+    target_indices = model._map_targets_to_indices(y)
+    metrics = evaluate_classification(recomputed_probabilities, target_indices)
+
+    predictions = np.argmax(recomputed_probabilities, axis=1)
+    expected_accuracy = np.mean(predictions == target_indices)
+    assert metrics["accuracy"] == pytest.approx(expected_accuracy)
+
+    expected_auroc = compute_auroc(recomputed_probabilities, target_indices)
+    if np.isnan(expected_auroc):
+        assert np.isnan(metrics["auroc"])
+    else:
+        assert metrics["auroc"] == pytest.approx(expected_auroc)
+
+    expected_auprc = compute_auprc(recomputed_probabilities, target_indices)
+    if np.isnan(expected_auprc):
+        assert np.isnan(metrics["auprc"])
+    else:
+        assert metrics["auprc"] == pytest.approx(expected_auprc)
+
+    expected_brier = compute_brier(recomputed_probabilities, target_indices)
+    assert metrics["brier"] == pytest.approx(expected_brier)
+
+    expected_ece = compute_ece(recomputed_probabilities, target_indices)
+    assert metrics["ece"] == pytest.approx(expected_ece)
 
 
 def test_hivae_behaviour_disables_classifier():
@@ -491,9 +550,7 @@ def test_legacy_loader_respects_behaviour_modes(tmp_path: Path):
     assert loaded_suave.behaviour == "suave"
     assert loaded_suave._classifier is not None
     np.testing.assert_allclose(expected_suave_logits, loaded_suave._cached_logits)
-    np.testing.assert_allclose(
-        expected_suave_probs, loaded_suave._cached_probabilities
-    )
+    np.testing.assert_allclose(expected_suave_probs, loaded_suave._cached_probabilities)
     np.testing.assert_allclose(expected_suave_latents, loaded_suave.encode(X))
     np.testing.assert_allclose(expected_suave_probs, loaded_suave.predict_proba(X))
 
