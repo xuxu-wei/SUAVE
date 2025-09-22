@@ -21,6 +21,9 @@ class ClassificationHead(nn.Module):
     class_weight:
         Optional weighting applied to the cross-entropy objective.  The
         semantics follow :func:`torch.nn.functional.cross_entropy`.
+    dropout:
+        Dropout probability applied before the linear projection. ``0.0``
+        disables dropout.
     """
 
     def __init__(
@@ -29,10 +32,14 @@ class ClassificationHead(nn.Module):
         n_classes: int,
         *,
         class_weight: Iterable[float] | Sequence[float] | Tensor | None = None,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         if n_classes < 2:
             raise ValueError("Classification head requires at least two classes")
+        if not 0.0 <= float(dropout) < 1.0:
+            raise ValueError("dropout must lie in the interval [0, 1)")
+        self._dropout = nn.Dropout(float(dropout)) if dropout else None
         self.linear = nn.Linear(in_features, n_classes)
         if class_weight is not None:
             weight_tensor = torch.as_tensor(class_weight, dtype=torch.float32)
@@ -49,6 +56,8 @@ class ClassificationHead(nn.Module):
     def forward(self, latents: Tensor) -> Tensor:
         """Return unnormalised logits for ``latents``."""
 
+        if self._dropout is not None:
+            latents = self._dropout(latents)
         return self.linear(latents)
 
     def loss(self, logits: Tensor, targets: Tensor) -> Tensor:
