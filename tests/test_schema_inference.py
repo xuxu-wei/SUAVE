@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pandas as pd
 
@@ -58,3 +60,45 @@ def test_interactive_mode_gracefully_falls_back(monkeypatch) -> None:
 
     assert "flagged" in result.review_columns
     assert any("Interactive review not available" in message for message in result.messages)
+
+
+def test_high_cardinality_float_skips_unique(monkeypatch) -> None:
+    inferencer = SchemaInferencer()
+    high_cardinality = pd.Series(np.linspace(-500.5, 499.5, num=2048) + 0.123456)
+
+    module = importlib.import_module(SchemaInferencer.__module__)
+    call_counter = {"count": 0}
+    original_unique = module.np.unique
+
+    def tracking_unique(*args, **kwargs):
+        call_counter["count"] += 1
+        return original_unique(*args, **kwargs)
+
+    monkeypatch.setattr(module.np, "unique", tracking_unique)
+
+    spec, notes = inferencer._infer_numeric_schema(high_cardinality)
+
+    assert spec == {"type": "real"}
+    assert notes == ""
+    assert call_counter["count"] == 0
+    
+    
+def test_integer_inference_handles_wide_range() -> None:
+    wide_range = [0, 10_000_000, 20_000_000]
+    df = pd.DataFrame({"wide_range_ints": wide_range})
+
+    inferencer = SchemaInferencer()
+    result = inferencer.infer(df, mode=SchemaInferenceMode.SILENT)
+    schema_dict = result.schema.to_dict()
+
+    assert schema_dict["wide_range_ints"]["type"] == "count"
+
+
+def test_long_integer_ladder_prefers_count_over_categorical() -> None:
+    repeated_cycle = list(range(16)) * 50  # unique ratio below categorical threshold
+    df = pd.DataFrame({"cycled_counts": repeated_cycle})
+
+    inferencer = SchemaInferencer()
+    result = inferencer.infer(df, mode=SchemaInferenceMode.SILENT)
+
+    assert result.schema.to_dict()["cycled_counts"] == {"type": "count"}

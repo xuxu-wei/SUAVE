@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+
 from suave import (
     SUAVE,
     Schema,
@@ -48,6 +49,7 @@ def load_dataset(path: Path) -> pd.DataFrame:
     """Load a TSV file into a :class:`pandas.DataFrame`."""
 
     return pd.read_csv(path, sep="\t")
+
 def define_schema(df: pd.DataFrame, feature_columns: Iterable[str]) -> Schema:
     """Create a :class:`Schema` describing ``df``'s feature columns."""
 

@@ -176,7 +176,6 @@ class SchemaInferencer:
         unique_ratio = nunique / non_missing if non_missing else 0.0
         std = float(numeric.std(ddof=0))
         value_range = float(numeric.max() - numeric.min())
-        unique_values = set(np.unique(numeric))
         min_value = float(numeric.min())
         max_value = float(numeric.max())
         mean_value = float(numeric.mean()) if non_missing else 0.0
@@ -187,24 +186,35 @@ class SchemaInferencer:
 
         review_reasons: List[str] = []
 
+        unique_values: Optional[set[float]] = None
+
+        def get_unique_values() -> set[float]:
+            nonlocal unique_values
+            if unique_values is None:
+                unique_values = set(np.unique(numeric))
+            return unique_values
+
         integer_like = bool(
             np.all(np.isfinite(numeric)) and np.allclose(numeric, np.round(numeric))
         )
         if integer_like:
             int_values = np.round(numeric).astype(int)
             sorted_unique = np.sort(np.unique(int_values))
-            contiguous = bool(
-                sorted_unique.size > 0
-                and np.array_equal(sorted_unique, np.arange(sorted_unique[0], sorted_unique[-1] + 1))
-            )
+            if sorted_unique.size <= 1:
+                contiguous = bool(sorted_unique.size)
+                ladder_span = 0
+            else:
+                diffs = np.diff(sorted_unique)
+                contiguous = bool(np.all(diffs == 1))
+                ladder_span = int(sorted_unique[-1] - sorted_unique[0])
             limited_range = (
                 sorted_unique.size > 0
-                and (sorted_unique[-1] - sorted_unique[0]) <= ORDINAL_RANGE_THRESHOLD
+                and ladder_span <= ORDINAL_RANGE_THRESHOLD
             )
             non_negative = min_value >= 0
             starts_low = sorted_unique.size > 0 and sorted_unique[0] <= 1
 
-            if nunique <= 2 and unique_values.issubset(BINARY_VALUES):
+            if nunique <= 2 and get_unique_values().issubset(BINARY_VALUES):
                 if abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN:
                     review_reasons.append("Binary ratio near categorical threshold.")
                 return self._categorical_spec(nunique), " ".join(review_reasons).strip()
@@ -234,6 +244,17 @@ class SchemaInferencer:
                     review_reasons.append("Count ladder close to categorical ratio boundary.")
                 return {"type": "count"}, " ".join(review_reasons).strip()
 
+            if (
+                non_negative
+                and starts_low
+                and contiguous
+                and ladder_span > ORDINAL_RANGE_THRESHOLD
+                and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD
+            ):
+                if abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN:
+                    review_reasons.append("Count ladder close to categorical ratio boundary.")
+                return {"type": "count"}, " ".join(review_reasons).strip()
+
             if nunique <= MAX_CATEGORICAL_UNIQUE and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD:
                 if (
                     abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN
@@ -258,7 +279,7 @@ class SchemaInferencer:
 
             return {"type": "real"}, " ".join(review_reasons).strip()
 
-        if nunique <= 2 and unique_values.issubset(BINARY_VALUES):
+        if nunique <= 2 and get_unique_values().issubset(BINARY_VALUES):
             if abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN:
                 review_reasons.append("Binary ratio near categorical threshold.")
             return self._categorical_spec(nunique), " ".join(review_reasons).strip()
