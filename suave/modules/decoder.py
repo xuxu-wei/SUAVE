@@ -98,7 +98,7 @@ class RealHead(LikelihoodHead):
 
 
 class PosHead(LikelihoodHead):
-    """Log-normal reconstruction head for strictly positive features."""
+    """Log-normal reconstruction head for non-negative features processed via ``log1p``."""
 
     def __init__(self, y_dim: int, n_components: int) -> None:
         super().__init__(y_dim, n_components)

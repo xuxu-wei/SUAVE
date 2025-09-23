@@ -251,9 +251,9 @@ button.secondary {
     <h1>SUAVE Schema Builder</h1>
     <p class="lead">Review the automatically inferred schema, adjust column types as needed, and click <strong>Save schema</strong> when you are satisfied.</p>
     <div class="legend">
-      <div class="legend-item"><span class="legend-color" style="background:#FBBDB8;"></span><span>低置信度（请重点检查）</span></div>
-      <div class="legend-item"><span class="legend-color" style="background:#FFE483;"></span><span>中等置信度（建议复核）</span></div>
-      <div class="legend-item"><span class="legend-color" style="background:#AAD781;"></span><span>高置信度</span></div>
+      <div class="legend-item"><span class="legend-color" style="background:#FBBDB8;"></span><span>Low confidence (please double-check)</span></div>
+      <div class="legend-item"><span class="legend-color" style="background:#FFE483;"></span><span>Medium confidence (review recommended)</span></div>
+      <div class="legend-item"><span class="legend-color" style="background:#AAD781;"></span><span>High confidence</span></div>
     </div>
   </header>
   <div id="messages"></div>
@@ -263,11 +263,11 @@ button.secondary {
         <tr>
           <th>Column</th>
           <th>Type <span class="tooltip" tabindex="0">?<span class="tooltip-content">
-            <div><strong>real</strong> 连续数值特征，可取任意实数。</div>
-            <div><strong>pos</strong> 正值或零的连续数值，常见于比率、支出等。</div>
-            <div><strong>count</strong> 非负整数计数，通常来源于事件次数。</div>
-            <div><strong>cat</strong> 无序离散类别，需要指定类别数。</div>
-            <div><strong>ordinal</strong> 有序离散类别，如等级或评分。</div>
+            <div><strong>real</strong> Continuous numeric feature modelled with a Gaussian mean/variance; values can take any real number. Example: z-scored blood pressure with an approximately bell-shaped spread.</div>
+            <div><strong>pos</strong> Non-negative continuous feature (zero allowed) transformed with log1p and modelled as log-normal, so training data must stay above -1 and generated samples remain near that range. Example: right-skewed lab results such as lactate.</div>
+            <div><strong>count</strong> Non-negative integer feature with a Poisson rate; fit and sampling cover 0, 1, 2, … with no preset upper bound. Example: number of prior hospital admissions.</div>
+            <div><strong>cat</strong> Unordered categorical feature; the decoder learns independent class probabilities for each level. Example: ward identifier or blood type.</div>
+            <div><strong>ordinal</strong> Ordered categorical feature using cumulative logit thresholds across a fixed number of ranks (0 to K-1), so samples never exceed the declared highest level—unlike counts, which assume an unbounded integer range. Example: triage acuity scores.</div>
           </span></span></th>
           <th>n_classes</th>
           <th>y_dim</th>
@@ -284,6 +284,7 @@ button.secondary {
 </main>
 <script>
 const TYPE_OPTIONS = ["real", "pos", "count", "cat", "ordinal"];
+let cancellationNotified = false;
 
 function createOption(option, selected) {
     const choice = document.createElement("option");
@@ -472,13 +473,14 @@ function openDistributionWindow(column, payload) {
         alert('Unable to open a new window for the distribution plot.');
         return;
     }
-    const payloadJson = JSON.stringify(payload);
-    win.document.write(`<!DOCTYPE html>
+
+    const doc = win.document;
+    doc.open();
+    doc.write(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <title>Distribution for ${column}</title>
-<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 <style>
 body { font-family: "Segoe UI", Arial, sans-serif; margin: 16px; }
 #plot { width: 100%; height: 90vh; }
@@ -487,28 +489,45 @@ body { font-family: "Segoe UI", Arial, sans-serif; margin: 16px; }
 <body>
 <h2>Distribution for ${column}</h2>
 <div id="plot"></div>
-<script>
-const payload = ${payloadJson};
-if (payload.type === "empty") {
-    document.getElementById('plot').innerText = payload.message || 'No data available.';
-} else {
-    const layout = {
-        title: payload.title || 'Distribution',
-        xaxis: {title: payload.x_label || 'Value'},
-        yaxis: {title: payload.y_label || 'Count'}
-    };
-    let trace;
-    if (payload.type === 'hist') {
-        trace = {type: 'bar', x: payload.bins, y: payload.counts, marker: {color: '#4c72b0'}};
-    } else {
-        trace = {type: 'bar', x: payload.labels, y: payload.counts, marker: {color: '#4c72b0'}};
-    }
-    Plotly.newPlot('plot', [trace], layout);
-}
-</script>
 </body>
 </html>`);
-    win.document.close();
+    doc.close();
+
+    const plotContainer = doc.getElementById('plot');
+    if (!plotContainer) {
+        return;
+    }
+
+    if (payload.type === "empty") {
+        plotContainer.innerText = payload.message || 'No data available.';
+        return;
+    }
+
+    const script = doc.createElement('script');
+    script.src = 'https://cdn.plot.ly/plotly-latest.min.js';
+    script.async = true;
+    script.onload = () => {
+        if (!win.Plotly || typeof win.Plotly.newPlot !== 'function') {
+            plotContainer.innerText = 'Plotly loaded but could not be initialised.';
+            return;
+        }
+        const layout = {
+            title: payload.title || `Distribution for ${column}`,
+            xaxis: { title: payload.x_label || 'Value' },
+            yaxis: { title: payload.y_label || 'Count' }
+        };
+        let trace;
+        if (payload.type === 'hist') {
+            trace = { type: 'bar', x: payload.bins, y: payload.counts, marker: { color: '#4c72b0' } };
+        } else {
+            trace = { type: 'bar', x: payload.labels, y: payload.counts, marker: { color: '#4c72b0' } };
+        }
+        win.Plotly.newPlot('plot', [trace], layout);
+    };
+    script.onerror = () => {
+        plotContainer.innerText = 'Unable to load Plotly for rendering.';
+    };
+    doc.head.appendChild(script);
 }
 
 async function finalizeSchema() {
@@ -534,17 +553,33 @@ async function finalizeSchema() {
 
 document.getElementById("finalize").addEventListener("click", finalizeSchema);
 
-window.addEventListener("beforeunload", () => {
+function notifyCancellation(reason) {
+    if (cancellationNotified) {
+        return;
+    }
+    cancellationNotified = true;
+    const payload = JSON.stringify({ reason, timestamp: Date.now() });
+    if (navigator.sendBeacon) {
+        navigator.sendBeacon('/api/cancel', payload);
+    } else {
+        fetch('/api/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+            keepalive: true,
+        }).catch(() => {});
+    }
+}
+
+function handlePageExit() {
     if (window.__schemaFinalized) {
         return;
     }
-    if (navigator.sendBeacon) {
-        const blob = new Blob([], { type: 'application/json' });
-        navigator.sendBeacon('/api/cancel', blob);
-    } else {
-        fetch('/api/cancel', { method: 'POST', keepalive: true });
-    }
-});
+    notifyCancellation('page_exit');
+}
+
+window.addEventListener("beforeunload", handlePageExit);
+window.addEventListener("pagehide", handlePageExit);
 
 loadState();
 </script>
