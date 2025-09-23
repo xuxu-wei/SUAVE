@@ -17,18 +17,13 @@ from suave import Schema, SchemaInferenceMode, SchemaInferencer  # noqa: E402
 
 RANDOM_STATE: int = 20201021
 TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
-CATEGORICAL_FEATURES: Tuple[str, str, str] = (
-    "sex",
-    "CRRT",
-    "Respiratory_Support",
-)
+
 CALIBRATION_SIZE: float = 0.2
 VALIDATION_SIZE: float = 0.2
 
 __all__ = [
     "RANDOM_STATE",
     "TARGET_COLUMNS",
-    "CATEGORICAL_FEATURES",
     "CALIBRATION_SIZE",
     "VALIDATION_SIZE",
     "Schema",
@@ -57,7 +52,7 @@ def load_dataset(path: Path) -> pd.DataFrame:
 def define_schema(df: pd.DataFrame, feature_columns: Iterable[str], mode=SchemaInferenceMode.INFO) -> Schema:
     """Create a :class:`Schema` describing ``df``'s feature columns."""
 
-    inferencer = SchemaInferencer(categorical_overrides=CATEGORICAL_FEATURES)
+    inferencer = SchemaInferencer()
     result = inferencer.infer(
         df,
         feature_columns,

@@ -162,23 +162,23 @@ class SUAVE:
 
     Attributes
     ----------
-    auto_hyperparameters_ : dict[str, object] or None
+    `auto_hyperparameters_` : dict[str, object] or None
         Description of heuristically selected hyperparameters after calling
         :meth:`fit`.  ``None`` when every configurable value was supplied by the
         user.
 
     See Also
     --------
-    fit : Optimize encoder/decoder and (when supervised) the classifier head.
-    calibrate : Temperature-scale logits on held-out data for better calibration.
-    predict_proba : Calibrated class probabilities (or posterior predictive for an attribute).
-    predict : Class labels (supervised) or attribute predictions/samples.
-    predict_confidence_interval : Posterior predictive mean/median and CI for real/pos/count.
-    encode : Latent posterior means (optionally component assignments/params).
-    impute : Single-pass decoder imputation of missing entries.
-    sample : Draw synthetic rows (optionally conditional on labels in supervised mode).
-    save : Serialize a trained model to disk.
-    load : Restore a serialized model and make it ready for inference.
+    `fit` : Optimize encoder/decoder and (when supervised) the classifier head.
+    `calibrate` : Temperature-scale logits on held-out data for better calibration.
+    `predict_proba` : Calibrated class probabilities (or posterior predictive for an attribute).
+    `predict` : Class labels (supervised) or attribute predictions/samples.
+    `predict_confidence_interval` : Posterior predictive mean/median and CI for real/pos/count.
+    `encode` : Latent posterior means (optionally component assignments/params).
+    `impute` : Single-pass decoder imputation of missing entries.
+    `sample` : Draw synthetic rows (optionally conditional on labels in supervised mode).
+    `save` : Serialize a trained model to disk.
+    `load` : Restore a serialized model and make it ready for inference.
 
     --------
     Training schedule (how the epoch knobs interact)
