@@ -1,18 +1,18 @@
-"""Top-level package for the lightweight SUAVE API.
+"""Compatibility shim exposing the lowercase :mod:`suave` package as ``SUAVE``."""
 
-This module exposes the user-facing classes that are required for the
-minimal runnable skeleton requested in the roadmap.  The real
-implementation will iterate on top of these public entry points.
-"""
+from importlib import import_module
+import sys
 
-from .model import SUAVE
-from .types import Schema
-from .schema_inference import SchemaInferenceMode, SchemaInferenceResult, SchemaInferencer
+import suave as _suave
+from suave import *  # noqa: F401,F403
 
-__all__ = [
-    "SUAVE",
-    "Schema",
-    "SchemaInferencer",
-    "SchemaInferenceMode",
-    "SchemaInferenceResult",
-]
+__path__ = list(_suave.__path__)
+
+for _name in ("interactive", "types", "schema_inference"):
+    sys.modules[f"SUAVE.{_name}"] = import_module(f"suave.{_name}")
+
+sys.modules["SUAVE.interactive.schema_builder"] = import_module(
+    "suave.interactive.schema_builder"
+)
+
+del import_module, sys, _suave, _name

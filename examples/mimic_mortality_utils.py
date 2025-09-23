@@ -15,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from suave import Schema, SchemaInferenceMode, SchemaInferencer  # noqa: E402
 
-RANDOM_STATE: int = 42
+RANDOM_STATE: int = 20201021
 TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
 CATEGORICAL_FEATURES: Tuple[str, str, str] = (
     "sex",
