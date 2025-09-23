@@ -6,3 +6,7 @@ matplotlib>=3.7
 tqdm>=4.65
 scikit-learn>=1.3
 optuna>=3.4
+
+# Optional extras for interactive schema builder (install separately)
+flask>=2.3,<3
+

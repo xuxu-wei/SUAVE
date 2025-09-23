@@ -191,28 +191,42 @@ class SchemaInferencer:
                 review_notes[column] = notes
 
         messages: List[str] = []
+        review_columns = list(review_notes.keys())
         if mode in {SchemaInferenceMode.INFO, SchemaInferenceMode.INTERACTIVE} and review_notes:
             for name, note in review_notes.items():
                 messages.append(f"Column '{name}' flagged for review: {note}")
 
-        if mode is SchemaInferenceMode.INTERACTIVE and review_notes:
-            if self._can_launch_gui():
-                updated = self._interactive_review(df, schema_dict, review_notes)
-                if updated:
-                    messages.append(
-                        "Interactive review applied to: " + ", ".join(sorted(updated))
-                    )
-            else:
+        if mode is SchemaInferenceMode.INTERACTIVE:
+            browser_schema, browser_message = self._try_browser_schema_builder(df, columns)
+            if browser_schema is not None:
+                schema_dict = browser_schema.to_dict()
+                review_notes = {}
+                review_columns = []
                 messages.append(
-                    "Interactive review not available in the current environment; "
-                    "returning the automatically inferred schema."
+                    "Browser-based schema builder applied; returning the user-adjusted schema."
                 )
+            else:
+                if browser_message:
+                    messages.append(browser_message)
+                if review_notes:
+                    if self._can_launch_gui():
+                        updated = self._interactive_review(df, schema_dict, review_notes)
+                        if updated:
+                            messages.append(
+                                "Interactive review applied to: "
+                                + ", ".join(sorted(updated))
+                            )
+                    else:
+                        messages.append(
+                            "Interactive review not available in the current environment; "
+                            "returning the automatically inferred schema."
+                        )
 
         result_schema = Schema(schema_dict)
         return SchemaInferenceResult(
             schema=result_schema,
             mode=mode,
-            review_columns=list(review_notes.keys()),
+            review_columns=review_columns,
             column_notes=review_notes,
             messages=messages,
         )
@@ -405,6 +419,35 @@ class SchemaInferencer:
     # ------------------------------------------------------------------
     # Interactive helpers
     # ------------------------------------------------------------------
+    def _try_browser_schema_builder(
+        self, df: pd.DataFrame, columns: Iterable[str]
+    ) -> Tuple[Optional[Schema], Optional[str]]:
+        """Attempt to launch the browser-based schema editor if available."""
+
+        try:  # pragma: no cover - optional dependency
+            from .interactive import launch_schema_builder
+            from .interactive.schema_builder import SchemaBuilderError
+        except Exception:  # pragma: no cover - missing optional dependency
+            return None, (
+                "Browser-based schema builder unavailable; falling back to Matplotlib review."
+            )
+
+        subset = df.loc[:, list(columns)].copy()
+        inferencer = SchemaInferencer(categorical_overrides=set(self._categorical_overrides))
+        try:
+            schema = launch_schema_builder(
+                subset,
+                feature_columns=columns,
+                mode=SchemaInferenceMode.INFO,
+                inferencer=inferencer,
+            )
+        except SchemaBuilderError as error:
+            return None, f"Browser-based schema builder failed: {error}"
+        except Exception as error:  # pragma: no cover - unexpected runtime issues
+            return None, f"Browser-based schema builder failed: {error}"
+
+        return schema, None
+
     @staticmethod
     def _can_launch_gui() -> bool:
         if plt is None or matplotlib is None:

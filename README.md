@@ -1,4 +1,4 @@
-# SUAVE
+# SUAVE: Supervised, Unified, Augmented Variational Embedding
 
 SUAVE is a schema-first variational autoencoder for mixed tabular data that unifies generative modelling and supervised prediction. The project draws direct inspiration from HI-VAE and related research on hierarchical latent variable models while modernising the workflow around explicit schemas, staged training, and probability calibration.
 

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from suave.schema_inference import SchemaInferenceMode, SchemaInferencer
+from suave.types import Schema
 
 
 def test_infer_silent_mode_returns_schema_only() -> None:
@@ -56,10 +57,43 @@ def test_interactive_mode_gracefully_falls_back(monkeypatch) -> None:
         "_can_launch_gui",
         staticmethod(lambda: False),
     )
+    fallback_message = (
+        "Browser-based schema builder unavailable; falling back to Matplotlib review."
+    )
+    monkeypatch.setattr(
+        SchemaInferencer,
+        "_try_browser_schema_builder",
+        lambda self, df, columns: (None, fallback_message),
+        raising=False,
+    )
+
     result = inferencer.infer(df, mode=SchemaInferenceMode.INTERACTIVE)
 
     assert "flagged" in result.review_columns
+    assert any(fallback_message in message for message in result.messages)
     assert any("Interactive review not available" in message for message in result.messages)
+
+
+
+def test_interactive_mode_prefers_browser_builder(monkeypatch) -> None:
+    df = pd.DataFrame({"flagged": [0, 1, 0, 1]})
+    inferencer = SchemaInferencer()
+    custom_schema = Schema({"flagged": {"type": "pos"}})
+
+    monkeypatch.setattr(
+        SchemaInferencer,
+        "_try_browser_schema_builder",
+        lambda self, df, columns: (custom_schema, None),
+        raising=False,
+    )
+
+    result = inferencer.infer(df, mode=SchemaInferenceMode.INTERACTIVE)
+
+    assert result.schema.to_dict()["flagged"]["type"] == "pos"
+    assert result.review_columns == []
+    assert any(
+        "Browser-based schema builder applied" in message for message in result.messages
+    )
 
 
 def test_high_cardinality_float_skips_unique(monkeypatch) -> None:

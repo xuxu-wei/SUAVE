@@ -33,82 +33,102 @@ class ColumnSpec:
 
 
 class Schema:
-    """Explicit description of the tabular layout consumed by :class:`SUAVE`.
+    """
+    Explicit description of the tabular layout consumed by :class:`SUAVE`.
 
-    ``Schema`` is the primary entry-point for telling SUAVE how your dataset is
-    organised.  You pass a mapping of column names to dictionaries (or
+    ``Schema`` is the primary entry-point for telling SUAVE how your dataset
+    is organised. You pass a mapping of column names to dictionaries (or
     :class:`ColumnSpec` instances) describing the semantic type of each
     feature, the number of discrete classes where applicable, and any optional
-    latent dimensionality overrides.  Keeping the schema explicit avoids the
+    latent dimensionality overrides. Keeping the schema explicit avoids the
     surprises of automatic inference while providing a single place to inspect
     and share dataset metadata.
 
     Parameters
     ----------
-    columns:
+    columns : Mapping[str, Mapping[str, object]]
         Mapping of column names to dictionaries with at least the ``"type"``
-        key.  Supported types are ``"real"`` (continuous, Gaussian head),
-        ``"pos"`` (positive real values, log-normal head), ``"count"``
-        (non-negative integers, Poisson head), ``"cat"`` (categorical,
-        requires ``"n_classes"``) and ``"ordinal"`` (ordered discrete,
-        requires ``"n_classes"``).  The mapping may optionally include a
-        ``"y_dim"`` integer to override how many latent dimensions the column
-        occupies when interfacing with the decoder.  Each entry is normalised
-        into a :class:`ColumnSpec` during initialisation.
+        key. Supported types are:
+            - ``"real"`` : continuous values (Gaussian head),
+            - ``"pos"`` : positive real values (log-normal head),
+            - ``"count"`` : non-negative integers (Poisson head),
+            - ``"cat"`` : categorical (requires ``"n_classes"``),
+            - ``"ordinal"`` : ordered discrete (requires ``"n_classes"``).
+
+        Each entry may also include:
+            - ``"n_classes"`` : int, required for categorical/ordinal,
+            - ``"y_dim"`` : int, optional latent dimensionality override.
 
     Attributes
     ----------
-    feature_names: tuple of str
-        Column order as retained internally by SUAVE.  This is typically the
-        order expected by downstream preprocessing utilities.
-    real_features, categorical_features, positive_features,
-    count_features, ordinal_features: tuple of str
-        Convenience accessors exposing subsets of ``feature_names`` filtered by
-        their logical type.  They are especially handy when configuring
-        encoders/decoders or sanity-checking that the schema matches the raw
-        dataframe.
+    feature_names : tuple of str
+        Column order retained internally by SUAVE.
+    real_features : tuple of str
+        Names of columns declared as ``"real"``.
+    categorical_features : tuple of str
+        Names of columns declared as ``"cat"``.
+    positive_features : tuple of str
+        Names of columns declared as ``"pos"``.
+    count_features : tuple of str
+        Names of columns declared as ``"count"``.
+    ordinal_features : tuple of str
+        Names of columns declared as ``"ordinal"``.
 
+    Methods
+    -------
+    to_dict()
+        Return a JSON-serialisable representation of the schema.
+    update(other)
+        Update the schema with additional column specifications.
+    require_columns(columns)
+        Validate that all requested columns are present in the schema.
+    y_dimensions()
+        Return the latent ``y`` allocation for every column.
+    
     Raises
     ------
     ValueError
         If a column declares an unsupported ``type``, omits the required
-        ``n_classes`` for categorical/ordinal data, or specifies invalid values
-        for ``n_classes``/``y_dim``.
+        ``n_classes`` for categorical/ordinal data, or specifies invalid
+        values for ``n_classes``/``y_dim``.
+    KeyError
+        If :meth:`require_columns` is called with missing columns.
 
     Notes
     -----
-    ``Schema`` is intentionally read/write friendly: the :meth:`to_dict`
-    method returns a JSON-serialisable payload that can be written to disk and
-    re-loaded later to guarantee reproducible preprocessing.  You can also
-    compose schema fragments via :meth:`update` when datasets are built
-    iteratively.
+    ``Schema`` is intentionally read/write friendly: :meth:`to_dict` returns
+    a JSON-serialisable payload that can be written to disk and re-loaded to
+    guarantee reproducible preprocessing. Schema fragments can also be merged
+    iteratively with :meth:`update`.
 
     Examples
     --------
-    Build a schema from scratch using dictionaries and access different
-    feature subsets:
+    Build a schema from scratch:
 
-    >>> from suave.types import Schema
-    >>> schema = Schema(
-    ...     {
-    ...         "age": {"type": "real"},
-    ...         "gender": {"type": "cat", "n_classes": 2},
-    ...         "visit_count": {"type": "count"},
-    ...     }
-    ... )
+    >>> schema = Schema({
+    ...     "age": {"type": "real"},
+    ...     "gender": {"type": "cat", "n_classes": 2},
+    ...     "visit_count": {"type": "count"},
+    ... })
     >>> schema.feature_names
     ('age', 'gender', 'visit_count')
     >>> schema.categorical_features
     ('gender',)
 
-    Persist an existing schema to JSON and load it back later:
+    Persist and reload from JSON:
 
     >>> import json
     >>> payload = schema.to_dict()
-    >>> with open("schema.json", "w") as fp:
-    ...     json.dump(payload, fp)
+    >>> with open("schema.json", "w") as f:
+    ...     json.dump(payload, f)
     >>> Schema(payload).positive_features
     ()
+
+    Update with a new column:
+
+    >>> schema.update({"treatment": {"type": "ordinal", "n_classes": 3}})
+    >>> schema.ordinal_features
+    ('treatment',)
     """
 
     _SUPPORTED_TYPES = {"real", "cat", "pos", "count", "ordinal"}
