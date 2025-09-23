@@ -8,7 +8,14 @@ from suave import *  # noqa: F401,F403
 
 __path__ = list(_suave.__path__)
 
-for _name in ("interactive", "types", "schema_inference"):
+for _name in (
+    "interactive",
+    "types",
+    "schema_inference",
+    "data",
+    "evaluate",
+    "sampling",
+):
     sys.modules[f"SUAVE.{_name}"] = import_module(f"suave.{_name}")
 
 sys.modules["SUAVE.interactive.schema_builder"] = import_module(
