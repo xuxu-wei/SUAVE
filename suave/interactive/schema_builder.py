@@ -111,9 +111,7 @@ p.lead {
     border-radius: 12px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
     padding: 16px;
-    position: relative;
     overflow-x: auto;
-    overflow-y: visible;
 }
 table {
     border-collapse: collapse;
@@ -211,13 +209,6 @@ button.secondary {
     position: relative;
     cursor: pointer;
 }
-.tooltip.flagged {
-    background: #d93025;
-}
-.tooltip.flagged:focus-visible {
-    outline: 2px solid rgba(217, 48, 37, 0.4);
-    outline-offset: 2px;
-}
 .tooltip-content {
     position: absolute;
     top: 24px;
@@ -236,7 +227,6 @@ button.secondary {
     transform: translateY(-6px);
     transition: opacity 0.2s ease, transform 0.2s ease;
     pointer-events: none;
-    z-index: 20;
 }
 .tooltip:focus-within .tooltip-content,
 .tooltip:hover .tooltip-content {
@@ -252,53 +242,6 @@ button.secondary {
     margin-top: 4px;
     color: #5f6368;
     font-size: 0.82rem;
-}
-.column-header {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-}
-.name-cell {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-}
-.sort-controls {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 8px;
-    font-weight: normal;
-    font-size: 0.85rem;
-}
-.sort-controls label {
-    color: #5f6368;
-}
-.sort-controls select,
-.sort-controls button {
-    border-radius: 4px;
-    border: 1px solid rgba(0, 0, 0, 0.12);
-    padding: 4px 8px;
-    font-size: 0.85rem;
-    background: #ffffff;
-    color: #1f1f1f;
-}
-.sort-controls button {
-    cursor: pointer;
-    min-width: 32px;
-}
-.sort-controls button:focus-visible,
-.sort-controls select:focus-visible {
-    outline: 2px solid rgba(31, 111, 235, 0.4);
-    outline-offset: 2px;
-}
-.sort-controls button[data-direction="asc"]::after {
-    content: "↑";
-}
-.sort-controls button[data-direction="desc"]::after {
-    content: "↓";
 }
 </style>
 </head>
@@ -318,20 +261,7 @@ button.secondary {
     <table>
       <thead>
         <tr>
-          <th>
-            <div class="column-header">
-              <span>Column</span>
-              <div class="sort-controls">
-                <label for="sort-key">Sort by</label>
-                <select id="sort-key">
-                  <option value="original">DataFrame order</option>
-                  <option value="confidence">Confidence</option>
-                  <option value="flagged">Flagged</option>
-                </select>
-                <button type="button" id="sort-direction" data-direction="asc" aria-label="Toggle sort direction"></button>
-              </div>
-            </div>
-          </th>
+          <th>Column</th>
           <th>Type <span class="tooltip" tabindex="0">?<span class="tooltip-content">
             <div><strong>real</strong> Continuous numeric feature modelled with a Gaussian mean/variance; values can take any real number. Example: z-scored blood pressure with an approximately bell-shaped spread.</div>
             <div><strong>pos</strong> Non-negative continuous feature (zero allowed) transformed with log1p and modelled as log-normal, so training data must stay above -1 and generated samples remain near that range. Example: right-skewed lab results such as lactate.</div>
@@ -354,13 +284,7 @@ button.secondary {
 </main>
 <script>
 const TYPE_OPTIONS = ["real", "pos", "count", "cat", "ordinal"];
-const CONFIDENCE_ORDER = { low: 0, medium: 1, high: 2 };
 let cancellationNotified = false;
-let currentColumns = [];
-let sortState = { key: "original", direction: "asc" };
-
-const sortKeySelect = document.getElementById("sort-key");
-const sortDirectionButton = document.getElementById("sort-direction");
 
 function createOption(option, selected) {
     const choice = document.createElement("option");
@@ -370,23 +294,6 @@ function createOption(option, selected) {
         choice.selected = true;
     }
     return choice;
-}
-
-function formatSampleValue(value) {
-    if (typeof value === "number" && Number.isFinite(value)) {
-        const rounded = Math.round(value * 100) / 100;
-        if (Number.isInteger(rounded)) {
-            return Math.trunc(rounded);
-        }
-        return Number(rounded.toFixed(2));
-    }
-    return value;
-}
-
-function formatSample(sample) {
-    const target = sample === undefined ? [] : sample;
-    const formatted = JSON.stringify(target, (_key, value) => formatSampleValue(value));
-    return formatted === undefined ? "" : formatted;
 }
 
 function renderMessages(messages) {
@@ -467,84 +374,15 @@ async function sendUpdate(column, type, nClasses, yDim) {
     }
 }
 
-function syncSortControls() {
-    if (sortKeySelect) {
-        sortKeySelect.value = sortState.key;
-    }
-    if (sortDirectionButton) {
-        sortDirectionButton.dataset.direction = sortState.direction;
-        const label = sortState.direction === "asc" ? "Sort ascending" : "Sort descending";
-        sortDirectionButton.setAttribute("aria-label", label);
-        sortDirectionButton.title = label;
-    }
-}
-
-function sortColumns(columns, state) {
-    const sorted = [...columns];
-    const direction = state.direction === "desc" ? -1 : 1;
-    sorted.sort((a, b) => {
-        let aValue;
-        let bValue;
-        switch (state.key) {
-            case "confidence":
-                aValue = CONFIDENCE_ORDER[(a.confidence || "high").toLowerCase()] ?? CONFIDENCE_ORDER.high;
-                bValue = CONFIDENCE_ORDER[(b.confidence || "high").toLowerCase()] ?? CONFIDENCE_ORDER.high;
-                break;
-            case "flagged":
-                aValue = a.note ? 1 : 0;
-                bValue = b.note ? 1 : 0;
-                break;
-            case "original":
-            default:
-                aValue = a.__originalIndex;
-                bValue = b.__originalIndex;
-                break;
-        }
-        if (aValue === bValue) {
-            return a.__originalIndex - b.__originalIndex;
-        }
-        return (aValue > bValue ? 1 : -1) * direction;
-    });
-    return sorted;
-}
-
 function renderTable(columns) {
-    currentColumns = (columns || []).map((column, index) => ({
-        ...column,
-        __originalIndex: index,
-    }));
-    syncSortControls();
-    renderTableBody();
-}
-
-function renderTableBody() {
     const body = document.getElementById("schema-body");
     body.innerHTML = "";
-    const sortedColumns = sortColumns(currentColumns, sortState);
-    sortedColumns.forEach((column) => {
+    columns.forEach((column) => {
         const row = document.createElement("tr");
         applyConfidence(row, column.confidence);
 
         const nameCell = document.createElement("td");
-        const nameWrapper = document.createElement("div");
-        nameWrapper.className = "name-cell";
-        const nameText = document.createElement("span");
-        nameText.textContent = column.name;
-        nameWrapper.appendChild(nameText);
-        if (column.note) {
-            const flag = document.createElement("span");
-            flag.className = "tooltip flagged";
-            flag.setAttribute("tabindex", "0");
-            flag.setAttribute("role", "button");
-            flag.setAttribute("aria-label", column.note);
-            flag.textContent = "!";
-            const flagContent = document.createElement("span");
-            flagContent.className = "tooltip-content";
-            flagContent.textContent = column.note;
-            flag.appendChild(flagContent);
-            nameWrapper.appendChild(flag);
-        }
-        nameCell.appendChild(nameWrapper);
+        nameCell.textContent = column.name;
         row.appendChild(nameCell);
 
         const typeCell = document.createElement("td");
@@ -597,7 +435,7 @@ function renderTableBody() {
         summary.innerHTML = `<strong>dtype:</strong> ${column.dtype} · <strong>nunique:</strong> ${column.nunique} · <strong>missing:</strong> ${column.missing}`;
         const sample = document.createElement("div");
         sample.className = "summary-note";
-        sample.textContent = `sample: ${formatSample(column.sample)}`;
+        sample.textContent = `sample: ${JSON.stringify(column.sample)}`;
         summaryCell.appendChild(summary);
         summaryCell.appendChild(sample);
         if (column.note) {
@@ -610,23 +448,6 @@ function renderTableBody() {
 
         body.appendChild(row);
     });
-}
-
-function setupSortControls() {
-    if (sortKeySelect) {
-        sortKeySelect.addEventListener("change", () => {
-            sortState.key = sortKeySelect.value;
-            renderTableBody();
-        });
-    }
-    if (sortDirectionButton) {
-        sortDirectionButton.addEventListener("click", () => {
-            sortState.direction = sortState.direction === "asc" ? "desc" : "asc";
-            syncSortControls();
-            renderTableBody();
-        });
-    }
-    syncSortControls();
 }
 
 async function showDistribution(column) {
@@ -760,7 +581,6 @@ function handlePageExit() {
 window.addEventListener("beforeunload", handlePageExit);
 window.addEventListener("pagehide", handlePageExit);
 
-setupSortControls();
 loadState();
 </script>
 </body>
