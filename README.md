@@ -6,7 +6,7 @@ SUAVE is a schema-first variational autoencoder for mixed tabular data that unif
 
 - **Schema-driven inputs.** Users declare every column through `Schema`, giving the model explicit knowledge of data types and category counts before training begins.
 - **Staged optimisation.** Training follows a warm-up → classifier head → joint fine-tuning schedule with KL annealing for stable convergence.
-- **Transparent automation.** Optional `auto_parameters` heuristics adapt batch sizes, learning rates, and schedule lengths using dataset statistics without hiding overrides.
+- **Transparent automation.** Heuristic defaults adapt batch sizes, learning rates, and schedule lengths using dataset statistics while keeping explicit overrides intact.
 - **Mask-aware generative decoding.** Normalisation utilities and decoder heads propagate feature-wise masks so missing values remain consistent across real, categorical, positive, count, and ordinal variables.
 - **Built-in calibration and evaluation.** Temperature scaling, Brier score, expected calibration error, and additional metrics are available for trustworthy downstream decisions.
 
