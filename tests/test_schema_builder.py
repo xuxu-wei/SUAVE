@@ -6,14 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from SUAVE.interactive import schema_builder
-from SUAVE.interactive.schema_builder import (
+from suave.interactive import schema_builder
+from suave.interactive.schema_builder import (
     SchemaBuilderError,
     _coerce_optional_positive_int,
     _distribution_payload,
     _summarise_series,
 )
-from SUAVE.types import Schema
+from suave.types import Schema
 
 
 @pytest.fixture
