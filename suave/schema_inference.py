@@ -38,6 +38,29 @@ REVIEW_UNIQUE_MARGIN = 2
 MIN_NUMERIC_COVERAGE = 0.95
 
 
+class InferenceConfidence(str, Enum):
+    """Simple tri-state confidence used to annotate schema suggestions."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+_CONFIDENCE_PRIORITY = {
+    InferenceConfidence.LOW: 0,
+    InferenceConfidence.MEDIUM: 1,
+    InferenceConfidence.HIGH: 2,
+}
+
+
+def _worst_confidence(*levels: InferenceConfidence) -> InferenceConfidence:
+    """Return the lowest-confidence entry from ``levels``."""
+
+    if not levels:
+        return InferenceConfidence.HIGH
+    return min(levels, key=_CONFIDENCE_PRIORITY.__getitem__)
+
+
 class SchemaInferenceMode(str, Enum):
     """
     Enumeration of available schema inference modes.
@@ -87,6 +110,9 @@ class SchemaInferenceResult:
     messages : list of str
         Human-readable diagnostics and status messages suitable for logging
         or console display.
+    column_confidence : Mapping[str, InferenceConfidence]
+        Per-column confidence assessments produced during inference. These
+        values are useful for colour-coding interactive review tools.
 
     See Also
     --------
@@ -98,6 +124,7 @@ class SchemaInferenceResult:
     review_columns: List[str]
     column_notes: Mapping[str, str]
     messages: List[str]
+    column_confidence: Mapping[str, InferenceConfidence]
 
 
 class SchemaInferencer:
@@ -183,12 +210,14 @@ class SchemaInferencer:
 
         schema_dict: Dict[str, MutableMapping[str, object]] = {}
         review_notes: Dict[str, str] = {}
+        column_confidence: Dict[str, InferenceConfidence] = {}
 
         for column in columns:
-            spec, notes = self._infer_column_schema(column, df[column])
+            spec, notes, confidence = self._infer_column_schema(column, df[column])
             schema_dict[column] = dict(spec)
             if notes:
                 review_notes[column] = notes
+            column_confidence[column] = confidence
 
         messages: List[str] = []
         review_columns = list(review_notes.keys())
@@ -229,6 +258,7 @@ class SchemaInferencer:
             review_columns=review_columns,
             column_notes=review_notes,
             messages=messages,
+            column_confidence=column_confidence,
         )
 
     # ------------------------------------------------------------------
@@ -236,19 +266,27 @@ class SchemaInferencer:
     # ------------------------------------------------------------------
     def _infer_column_schema(
         self, column: str, series: pd.Series
-    ) -> Tuple[Mapping[str, object], str]:
+    ) -> Tuple[Mapping[str, object], str, InferenceConfidence]:
         if column in self._categorical_overrides:
             nunique = int(series.dropna().nunique())
             spec = self._categorical_spec(nunique)
-            return spec, "Categorical override applied."
+            return spec, "Categorical override applied.", InferenceConfidence.HIGH
 
         if is_bool_dtype(series):
             nunique = int(series.dropna().nunique())
-            return self._categorical_spec(nunique), "Boolean column coerced to categorical."
+            return (
+                self._categorical_spec(nunique),
+                "Boolean column coerced to categorical.",
+                InferenceConfidence.HIGH,
+            )
 
         non_null = series.dropna()
         if non_null.empty:
-            return {"type": "real"}, "Column empty after removing missing values."
+            return (
+                {"type": "real"},
+                "Column empty after removing missing values.",
+                InferenceConfidence.LOW,
+            )
 
         if is_numeric_dtype(series):
             return self._infer_numeric_schema(non_null)
@@ -256,24 +294,35 @@ class SchemaInferencer:
         convertible = pd.to_numeric(non_null, errors="coerce")
         coverage = float(convertible.notna().sum()) / float(len(non_null)) if len(non_null) else 0.0
         if coverage >= MIN_NUMERIC_COVERAGE:
-            spec, notes = self._infer_numeric_schema(convertible.dropna())
+            spec, notes, confidence = self._infer_numeric_schema(convertible.dropna())
             extra_note = (
                 "Converted from non-numeric values with high numeric coverage."
             )
             full_note = f"{extra_note} {notes}".strip()
-            return spec, full_note
+            adjusted = _worst_confidence(confidence, InferenceConfidence.MEDIUM)
+            return spec, full_note, adjusted
 
         nunique = int(non_null.nunique())
         note = (
             "Treating as categorical; only "
             f"{coverage:.0%} of values can be safely parsed as numeric."
         )
-        return self._categorical_spec(nunique), note
+        return (
+            self._categorical_spec(nunique),
+            note,
+            InferenceConfidence.LOW,
+        )
 
-    def _infer_numeric_schema(self, series: pd.Series) -> Tuple[Mapping[str, object], str]:
+    def _infer_numeric_schema(
+        self, series: pd.Series
+    ) -> Tuple[Mapping[str, object], str, InferenceConfidence]:
         numeric = pd.to_numeric(series, errors="coerce").dropna()
         if numeric.empty:
-            return {"type": "real"}, "No numeric values available after coercion."
+            return (
+                {"type": "real"},
+                "No numeric values available after coercion.",
+                InferenceConfidence.LOW,
+            )
 
         nunique = int(numeric.nunique())
         non_missing = numeric.size
@@ -289,6 +338,22 @@ class SchemaInferencer:
             skewness = 0.0
 
         review_reasons: List[str] = []
+
+        def finalize(
+            spec: Mapping[str, object],
+            *,
+            reasons: Optional[List[str]] = None,
+            note: str = "",
+            forced: Optional[InferenceConfidence] = None,
+        ) -> Tuple[Mapping[str, object], str, InferenceConfidence]:
+            text_note = note.strip() if note else " ".join(reasons or []).strip()
+            if forced is not None:
+                confidence = forced
+            elif text_note:
+                confidence = InferenceConfidence.MEDIUM
+            else:
+                confidence = InferenceConfidence.HIGH
+            return spec, text_note, confidence
 
         unique_values: Optional[set[float]] = None
 
@@ -321,7 +386,7 @@ class SchemaInferencer:
             if nunique <= 2 and get_unique_values().issubset(BINARY_VALUES):
                 if abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN:
                     review_reasons.append("Binary ratio near categorical threshold.")
-                return self._categorical_spec(nunique), " ".join(review_reasons).strip()
+                return finalize(self._categorical_spec(nunique), reasons=review_reasons)
 
             if (
                 non_negative
@@ -334,7 +399,7 @@ class SchemaInferencer:
                     review_reasons.append("Ordinal ladder near categorical ratio boundary.")
                 if nunique >= MAX_CATEGORICAL_UNIQUE - REVIEW_UNIQUE_MARGIN:
                     review_reasons.append("Ordinal ladder near size threshold.")
-                return self._ordinal_spec(nunique), " ".join(review_reasons).strip()
+                return finalize(self._ordinal_spec(nunique), reasons=review_reasons)
 
             if (
                 non_negative
@@ -346,7 +411,7 @@ class SchemaInferencer:
             ):
                 if unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD + REVIEW_RATIO_MARGIN:
                     review_reasons.append("Count ladder close to categorical ratio boundary.")
-                return {"type": "count"}, " ".join(review_reasons).strip()
+                return finalize({"type": "count"}, reasons=review_reasons)
 
             if (
                 non_negative
@@ -357,7 +422,7 @@ class SchemaInferencer:
             ):
                 if abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN:
                     review_reasons.append("Count ladder close to categorical ratio boundary.")
-                return {"type": "count"}, " ".join(review_reasons).strip()
+                return finalize({"type": "count"}, reasons=review_reasons)
 
             if nunique <= MAX_CATEGORICAL_UNIQUE and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD:
                 if (
@@ -365,43 +430,51 @@ class SchemaInferencer:
                     or nunique >= MAX_CATEGORICAL_UNIQUE - REVIEW_UNIQUE_MARGIN
                 ):
                     review_reasons.append("Discrete integer near categorical thresholds.")
-                return self._categorical_spec(nunique), " ".join(review_reasons).strip()
+                return finalize(self._categorical_spec(nunique), reasons=review_reasons)
 
             if std <= SMALL_STD_THRESHOLD or value_range <= SMALL_RANGE_THRESHOLD:
                 review_reasons.append("Dispersion too small; treating as categorical.")
-                return self._categorical_spec(nunique), " ".join(review_reasons).strip()
+                return finalize(
+                    self._categorical_spec(nunique),
+                    reasons=review_reasons,
+                    forced=InferenceConfidence.LOW,
+                )
 
             if non_negative and (
                 skewness >= POSITIVE_SKEW_THRESHOLD or ratio >= POSITIVE_MAX_MEAN_RATIO
             ):
                 if skewness <= POSITIVE_SKEW_THRESHOLD + REVIEW_SKEW_MARGIN:
                     review_reasons.append("Positive skew close to threshold.")
-                return {"type": "pos"}, " ".join(review_reasons).strip()
+                return finalize({"type": "pos"}, reasons=review_reasons)
 
             if unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD + REVIEW_RATIO_MARGIN:
                 review_reasons.append("Integer feature near categorical threshold.")
-
-            return {"type": "real"}, " ".join(review_reasons).strip()
-
-        if nunique <= 2 and get_unique_values().issubset(BINARY_VALUES):
-            if abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN:
-                review_reasons.append("Binary ratio near categorical threshold.")
-            return self._categorical_spec(nunique), " ".join(review_reasons).strip()
+            return finalize({"type": "real"}, reasons=review_reasons)
 
         if nunique <= MAX_CATEGORICAL_UNIQUE and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD:
-            if std > STD_REAL_FALLBACK or value_range > RANGE_REAL_FALLBACK:
-                review_reasons.append("Dispersion suggests continuous behaviour despite low cardinality.")
-                return {"type": "real"}, " ".join(review_reasons).strip()
+            if non_missing and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD + REVIEW_RATIO_MARGIN:
+                review_reasons.append("Binary ratio near categorical threshold.")
+            return finalize(self._categorical_spec(nunique), reasons=review_reasons)
+
+        if std <= SMALL_STD_THRESHOLD or value_range <= SMALL_RANGE_THRESHOLD:
+            review_reasons.append("Dispersion suggests continuous behaviour despite low cardinality.")
+            return finalize({"type": "real"}, reasons=review_reasons)
+
+        if nunique <= MAX_CATEGORICAL_UNIQUE and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD:
             if (
                 abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN
                 or nunique >= MAX_CATEGORICAL_UNIQUE - REVIEW_UNIQUE_MARGIN
             ):
                 review_reasons.append("Floating feature near categorical thresholds.")
-            return self._categorical_spec(nunique), " ".join(review_reasons).strip()
+            return finalize(self._categorical_spec(nunique), reasons=review_reasons)
 
         if std <= SMALL_STD_THRESHOLD or value_range <= SMALL_RANGE_THRESHOLD:
             review_reasons.append("Dispersion too small; defaulting to categorical.")
-            return self._categorical_spec(nunique), " ".join(review_reasons).strip()
+            return finalize(
+                self._categorical_spec(nunique),
+                reasons=review_reasons,
+                forced=InferenceConfidence.LOW,
+            )
 
         positive_support = min_value > 0 or (min_value == 0 and max_value > 0)
         if positive_support and (
@@ -409,13 +482,12 @@ class SchemaInferencer:
         ):
             if skewness <= POSITIVE_SKEW_THRESHOLD + REVIEW_SKEW_MARGIN:
                 review_reasons.append("Positive skew close to threshold.")
-            return {"type": "pos"}, " ".join(review_reasons).strip()
+            return finalize({"type": "pos"}, reasons=review_reasons)
 
         if abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN:
             review_reasons.append("Continuous feature near categorical ratio boundary.")
 
-        return {"type": "real"}, " ".join(review_reasons).strip()
-
+        return finalize({"type": "real"}, reasons=review_reasons)
     # ------------------------------------------------------------------
     # Interactive helpers
     # ------------------------------------------------------------------
@@ -536,4 +608,5 @@ __all__ = [
     "SchemaInferencer",
     "SchemaInferenceMode",
     "SchemaInferenceResult",
+    "InferenceConfidence",
 ]

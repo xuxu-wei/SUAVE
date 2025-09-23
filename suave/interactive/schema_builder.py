@@ -57,6 +57,7 @@ class _ColumnState:
     sample: List[object]
     n_classes: Optional[int]
     y_dim: Optional[int]
+    confidence: str
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -69,6 +70,7 @@ class _ColumnState:
             "sample": self.sample,
             "n_classes": self.n_classes,
             "y_dim": self.y_dim,
+            "confidence": self.confidence,
         }
 
 
@@ -76,252 +78,236 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>SUAVE Schema Builder</title>
 <style>
-body { font-family: Arial, sans-serif; margin: 16px; }
-h1 { font-size: 1.4rem; }
-table { border-collapse: collapse; width: 100%; margin-top: 16px; }
-th, td { border: 1px solid #ddd; padding: 8px; }
-th { background-color: #f4f4f4; text-align: left; }
-select, input { width: 100%; box-sizing: border-box; }
-small { color: #555; }
-button { margin-top: 16px; padding: 8px 16px; font-size: 1rem; }
-.message { margin-top: 8px; padding: 8px; background: #eef; border: 1px solid #ccd; }
-.error { background: #fee; border-color: #f99; }
+:root {
+    color-scheme: light;
+    font-family: "Segoe UI", Arial, sans-serif;
+}
+body {
+    margin: 0;
+    background: #f5f5f5;
+    color: #1f1f1f;
+}
+main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 24px;
+}
+header {
+    margin-bottom: 24px;
+}
+h1 {
+    margin: 0 0 8px;
+    font-size: 1.8rem;
+}
+p.lead {
+    margin: 0 0 16px;
+    color: #333;
+}
+.table-wrapper {
+    background: #ffffff;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    padding: 16px;
+    overflow-x: auto;
+}
+table {
+    border-collapse: collapse;
+    width: 100%;
+}
+th, td {
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    padding: 10px;
+    vertical-align: top;
+}
+th {
+    background: #fafafa;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+tbody tr[data-confidence="low"] td {
+    background-color: #FBBDB8;
+}
+tbody tr[data-confidence="medium"] td {
+    background-color: #FFE483;
+}
+tbody tr[data-confidence="high"] td {
+    background-color: #AAD781;
+}
+tbody tr td {
+    transition: background-color 0.2s ease-in-out;
+}
+tbody tr:hover td {
+    box-shadow: inset 0 0 0 9999px rgba(0, 0, 0, 0.05);
+}
+button.primary {
+    background: #1f6feb;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 18px;
+    font-size: 1rem;
+    cursor: pointer;
+}
+button.primary[disabled] {
+    opacity: 0.6;
+    cursor: wait;
+}
+button.secondary {
+    padding: 6px 12px;
+    border: 1px solid #1f6feb;
+    background: #ffffff;
+    color: #1f6feb;
+    border-radius: 4px;
+    cursor: pointer;
+}
+#messages .message {
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: #eef3ff;
+    border: 1px solid #d0defb;
+}
+#messages .message.error {
+    background: #fde7e9;
+    border-color: #f5b0b7;
+}
+.legend {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+    font-size: 0.9rem;
+}
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.legend-color {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+}
+.tooltip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #1f6feb;
+    color: #ffffff;
+    font-size: 0.8rem;
+    font-weight: bold;
+    margin-left: 6px;
+    position: relative;
+    cursor: pointer;
+}
+.tooltip-content {
+    position: absolute;
+    top: 24px;
+    right: 0;
+    width: 280px;
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.15);
+    padding: 12px 14px;
+    color: #1f1f1f;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    visibility: hidden;
+    opacity: 0;
+    transform: translateY(-6px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    pointer-events: none;
+}
+.tooltip:focus-within .tooltip-content,
+.tooltip:hover .tooltip-content {
+    visibility: visible;
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+.tooltip-content div + div {
+    margin-top: 6px;
+}
+.summary-note {
+    margin-top: 4px;
+    color: #5f6368;
+    font-size: 0.82rem;
+}
 </style>
 </head>
 <body>
-<h1>SUAVE Schema Builder</h1>
-<p>Review the automatically inferred schema, adjust column types as needed, and click <strong>Save schema</strong> when finished.</p>
-<div id="messages"></div>
-<table>
-<thead>
-<tr>
-<th>Column</th>
-<th>Type</th>
-<th>n_classes</th>
-<th>y_dim</th>
-<th>Distribution</th>
-<th>Summary</th>
-</tr>
-</thead>
-<tbody id="schema-body"></tbody>
-</table>
-<button id="finalize">Save schema</button>
+<main>
+  <header>
+    <h1>SUAVE Schema Builder</h1>
+    <p class="lead">Review the automatically inferred schema, adjust column types as needed, and click <strong>Save schema</strong> when you are satisfied.</p>
+    <div class="legend">
+      <div class="legend-item"><span class="legend-color" style="background:#FBBDB8;"></span><span>低置信度（请重点检查）</span></div>
+      <div class="legend-item"><span class="legend-color" style="background:#FFE483;"></span><span>中等置信度（建议复核）</span></div>
+      <div class="legend-item"><span class="legend-color" style="background:#AAD781;"></span><span>高置信度</span></div>
+    </div>
+  </header>
+  <div id="messages"></div>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Column</th>
+          <th>Type <span class="tooltip" tabindex="0">?<span class="tooltip-content">
+            <div><strong>real</strong> 连续数值特征，可取任意实数。</div>
+            <div><strong>pos</strong> 正值或零的连续数值，常见于比率、支出等。</div>
+            <div><strong>count</strong> 非负整数计数，通常来源于事件次数。</div>
+            <div><strong>cat</strong> 无序离散类别，需要指定类别数。</div>
+            <div><strong>ordinal</strong> 有序离散类别，如等级或评分。</div>
+          </span></span></th>
+          <th>n_classes</th>
+          <th>y_dim</th>
+          <th>Distribution</th>
+          <th>Summary</th>
+        </tr>
+      </thead>
+      <tbody id="schema-body"></tbody>
+    </table>
+  </div>
+  <div style="margin-top:16px;">
+    <button id="finalize" class="primary">Save schema</button>
+  </div>
+</main>
 <script>
 const TYPE_OPTIONS = ["real", "pos", "count", "cat", "ordinal"];
+
+function createOption(option, selected) {
+    const choice = document.createElement("option");
+    choice.value = option;
+    choice.textContent = option;
+    if (option === selected) {
+        choice.selected = true;
+    }
+    return choice;
+}
 
 function renderMessages(messages) {
     const container = document.getElementById("messages");
     container.innerHTML = "";
-    messages.forEach(function(msg) {
+    if (!messages.length) {
+        return;
+    }
+    messages.forEach((msg) => {
         const div = document.createElement("div");
         div.className = "message";
         div.textContent = msg;
         container.appendChild(div);
     });
 }
-
-function showDistribution(column) {
-    fetch("/api/distribution?column=" + encodeURIComponent(column))
-        .then(function(response) {
-            if (!response.ok) {
-                throw new Error('Failed to load distribution');
-            }
-            return response.json();
-        })
-        .then(function(payload) {
-            if (payload.error) {
-                alert(payload.error);
-                return;
-            }
-            openDistributionWindow(column, payload);
-        })
-        .catch(function(err) {
-            alert('Failed to load distribution: ' + err);
-        });
-}
-
-function openDistributionWindow(column, payload) {
-    const win = window.open('', '_blank', 'width=720,height=520');
-    if (!win) {
-        alert('Unable to open a new window for the distribution plot.');
-        return;
-    }
-    const payloadJson = JSON.stringify(payload);
-    const docLines = [
-        '<!DOCTYPE html>',
-        '<html lang="en">',
-        '<head>',
-        '<meta charset="utf-8" />',
-        '<title>Distribution for ' + column + '</title>',
-        '<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>',
-        '<style>body { font-family: Arial, sans-serif; margin: 16px; } #plot { width: 100%; height: 90vh; }</style>',
-        '</head>',
-        '<body>',
-        '<h2>Distribution for ' + column + '</h2>',
-        '<div id="plot"></div>',
-        '<script>',
-        'const payload = ' + payloadJson + ';',
-        'if (payload.type === "empty") {',
-        "  document.getElementById('plot').innerText = payload.message || 'No data available.';",
-        '} else {',
-        "  const layout = {title: payload.title || 'Distribution', xaxis: {title: payload.x_label || 'Value'}, yaxis: {title: payload.y_label || 'Count'}};",
-        '  let trace;',
-        '  if (payload.type === "hist") {',
-        "    trace = {type: 'bar', x: payload.bins, y: payload.counts, marker: {color: '#4c72b0'}};",
-        '  } else {',
-        "    trace = {type: 'bar', x: payload.labels, y: payload.counts, marker: {color: '#4c72b0'}};",
-        '  }',
-        "  Plotly.newPlot('plot', [trace], layout);",
-        '}',
-        '</script>',
-        '</body>',
-        '</html>',
-    ];
-    win.document.write(docLines.join(''));
-    win.document.close();
-}
-
-function renderTable(columns) {
-    const body = document.getElementById("schema-body");
-    body.innerHTML = "";
-    columns.forEach(function(column) {
-        const row = document.createElement("tr");
-
-        const nameCell = document.createElement("td");
-        nameCell.textContent = column.name;
-        row.appendChild(nameCell);
-
-        const typeCell = document.createElement("td");
-        const select = document.createElement("select");
-        TYPE_OPTIONS.forEach(function(option) {
-            const choice = document.createElement("option");
-            choice.value = option;
-            choice.textContent = option;
-            if (option === column.type) {
-                choice.selected = true;
-            }
-            select.appendChild(choice);
-        });
-        select.addEventListener("change", function() {
-            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
-        });
-        typeCell.appendChild(select);
-        row.appendChild(typeCell);
-
-        const nClassesCell = document.createElement("td");
-        const nClassesInput = document.createElement("input");
-        nClassesInput.type = "number";
-        nClassesInput.min = "2";
-        nClassesInput.placeholder = "required for cat/ordinal";
-        nClassesInput.value = column.n_classes === null ? "" : column.n_classes;
-        nClassesInput.addEventListener("change", function() {
-            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
-        });
-        nClassesCell.appendChild(nClassesInput);
-        row.appendChild(nClassesCell);
-
-        const yDimCell = document.createElement("td");
-        const yDimInput = document.createElement("input");
-        yDimInput.type = "number";
-        yDimInput.min = "1";
-        yDimInput.placeholder = "optional";
-        yDimInput.value = column.y_dim === null ? "" : column.y_dim;
-        yDimInput.addEventListener("change", function() {
-            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
-        });
-        yDimCell.appendChild(yDimInput);
-        row.appendChild(yDimCell);
-
-        const distributionCell = document.createElement("td");
-        const distributionButton = document.createElement("button");
-        distributionButton.type = "button";
-        distributionButton.textContent = "View";
-        distributionButton.addEventListener("click", function() {
-            showDistribution(column.name);
-        });
-        distributionCell.appendChild(distributionButton);
-        row.appendChild(distributionCell);
-
-        const summaryCell = document.createElement("td");
-        const summary = document.createElement("small");
-        const sampleText = JSON.stringify(column.sample);
-        summary.textContent = 'dtype=' + column.dtype + ', nunique=' + column.nunique + ', missing=' + column.missing + ', sample=' + sampleText;
-        if (column.note) {
-            const note = document.createElement("div");
-            note.textContent = column.note;
-            summary.appendChild(document.createElement("br"));
-            summary.appendChild(note);
-        }
-        summaryCell.appendChild(summary);
-        row.appendChild(summaryCell);
-
-        body.appendChild(row);
-    });
-}
-
-function loadState() {
-    fetch("/api/state")
-        .then(function(response) {
-            if (!response.ok) {
-                throw new Error('Failed to load state');
-            }
-            return response.json();
-        })
-        .then(function(payload) {
-            renderMessages(payload.messages || []);
-            renderTable(payload.columns || []);
-        })
-        .catch(function(err) {
-            showError('Unable to load initial state: ' + err);
-        });
-}
-
-function preparePayload(column, type, nClasses, yDim) {
-    const payload = { column: column, type: type };
-    if (nClasses !== '' && nClasses !== null) {
-        payload.n_classes = Number(nClasses);
-    }
-    if (yDim !== '' && yDim !== null) {
-        payload.y_dim = Number(yDim);
-    }
-    return payload;
-}
-
-function sendUpdate(column, type, nClasses, yDim) {
-    const payload = preparePayload(column, type, nClasses, yDim);
-    fetch("/api/schema", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    }).then(function(response) {
-        return response.json();
-    }).then(function(data) {
-        if (data.error) {
-            alert(data.error);
-        } else {
-            loadState();
-        }
-    }).catch(function(err) {
-        alert('Failed to update column: ' + err);
-    });
-}
-
-document.getElementById("finalize").addEventListener("click", function() {
-    fetch("/api/finalize", { method: "POST" })
-        .then(function(response) { return response.json(); })
-        .then(function(data) {
-            if (data.error) {
-                alert(data.error);
-            } else {
-                alert('Schema saved. You can now close this tab.');
-            }
-        })
-        .catch(function(err) {
-            alert('Failed to save schema: ' + err);
-        });
-});
 
 function showError(message) {
     const container = document.getElementById("messages");
@@ -331,11 +317,241 @@ function showError(message) {
     container.appendChild(div);
 }
 
+async function loadState() {
+    try {
+        const response = await fetch("/api/state");
+        if (!response.ok) {
+            throw new Error(`Server responded with ${response.status}`);
+        }
+        const payload = await response.json();
+        renderMessages(payload.messages || []);
+        renderTable(payload.columns || []);
+    } catch (error) {
+        showError(`Unable to load initial state: ${error.message}`);
+    }
+}
+
+function applyConfidence(row, confidence) {
+    const level = (confidence || "high").toLowerCase();
+    row.dataset.confidence = ["low", "medium", "high"].includes(level) ? level : "high";
+}
+
+function syncNClassState(select, nClassesInput) {
+    const needsClasses = select.value === "cat" || select.value === "ordinal";
+    nClassesInput.disabled = !needsClasses;
+    if (!needsClasses) {
+        nClassesInput.value = "";
+    }
+}
+
+function preparePayload(column, type, nClasses, yDim) {
+    const payload = { column, type };
+    if (nClasses !== "" && nClasses !== null) {
+        payload.n_classes = Number(nClasses);
+    }
+    if (yDim !== "" && yDim !== null) {
+        payload.y_dim = Number(yDim);
+    }
+    return payload;
+}
+
+async function sendUpdate(column, type, nClasses, yDim) {
+    const payload = preparePayload(column, type, nClasses, yDim);
+    try {
+        const response = await fetch("/api/schema", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+            throw new Error(data.error || `Server responded with ${response.status}`);
+        }
+        await loadState();
+    } catch (error) {
+        alert(`Failed to update column: ${error.message}`);
+    }
+}
+
+function renderTable(columns) {
+    const body = document.getElementById("schema-body");
+    body.innerHTML = "";
+    columns.forEach((column) => {
+        const row = document.createElement("tr");
+        applyConfidence(row, column.confidence);
+
+        const nameCell = document.createElement("td");
+        nameCell.textContent = column.name;
+        row.appendChild(nameCell);
+
+        const typeCell = document.createElement("td");
+        const select = document.createElement("select");
+        TYPE_OPTIONS.forEach((option) => select.appendChild(createOption(option, column.type)));
+        const nClassesInput = document.createElement("input");
+        const yDimInput = document.createElement("input");
+        syncNClassState(select, nClassesInput);
+        select.addEventListener("change", () => {
+            syncNClassState(select, nClassesInput);
+            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
+        });
+        typeCell.appendChild(select);
+        row.appendChild(typeCell);
+
+        const nClassesCell = document.createElement("td");
+        nClassesInput.type = "number";
+        nClassesInput.min = "2";
+        nClassesInput.placeholder = "cat / ordinal only";
+        nClassesInput.value = column.n_classes === null ? "" : column.n_classes;
+        nClassesInput.disabled = !(column.type === "cat" || column.type === "ordinal");
+        nClassesInput.addEventListener("change", () => {
+            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
+        });
+        nClassesCell.appendChild(nClassesInput);
+        row.appendChild(nClassesCell);
+
+        const yDimCell = document.createElement("td");
+        yDimInput.type = "number";
+        yDimInput.min = "1";
+        yDimInput.placeholder = "optional";
+        yDimInput.value = column.y_dim === null ? "" : column.y_dim;
+        yDimInput.addEventListener("change", () => {
+            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
+        });
+        yDimCell.appendChild(yDimInput);
+        row.appendChild(yDimCell);
+
+        const distributionCell = document.createElement("td");
+        const distributionButton = document.createElement("button");
+        distributionButton.type = "button";
+        distributionButton.className = "secondary";
+        distributionButton.textContent = "View";
+        distributionButton.addEventListener("click", () => showDistribution(column.name));
+        distributionCell.appendChild(distributionButton);
+        row.appendChild(distributionCell);
+
+        const summaryCell = document.createElement("td");
+        const summary = document.createElement("div");
+        summary.innerHTML = `<strong>dtype:</strong> ${column.dtype} · <strong>nunique:</strong> ${column.nunique} · <strong>missing:</strong> ${column.missing}`;
+        const sample = document.createElement("div");
+        sample.className = "summary-note";
+        sample.textContent = `sample: ${JSON.stringify(column.sample)}`;
+        summaryCell.appendChild(summary);
+        summaryCell.appendChild(sample);
+        if (column.note) {
+            const note = document.createElement("div");
+            note.className = "summary-note";
+            note.textContent = column.note;
+            summaryCell.appendChild(note);
+        }
+        row.appendChild(summaryCell);
+
+        body.appendChild(row);
+    });
+}
+
+async function showDistribution(column) {
+    try {
+        const response = await fetch(`/api/distribution?column=${encodeURIComponent(column)}`);
+        if (!response.ok) {
+            throw new Error(`Server responded with ${response.status}`);
+        }
+        const payload = await response.json();
+        if (payload.error) {
+            alert(payload.error);
+            return;
+        }
+        openDistributionWindow(column, payload);
+    } catch (error) {
+        alert(`Failed to load distribution: ${error.message}`);
+    }
+}
+
+function openDistributionWindow(column, payload) {
+    const win = window.open('', '_blank', 'width=720,height=520');
+    if (!win) {
+        alert('Unable to open a new window for the distribution plot.');
+        return;
+    }
+    const payloadJson = JSON.stringify(payload);
+    win.document.write(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Distribution for ${column}</title>
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<style>
+body { font-family: "Segoe UI", Arial, sans-serif; margin: 16px; }
+#plot { width: 100%; height: 90vh; }
+</style>
+</head>
+<body>
+<h2>Distribution for ${column}</h2>
+<div id="plot"></div>
+<script>
+const payload = ${payloadJson};
+if (payload.type === "empty") {
+    document.getElementById('plot').innerText = payload.message || 'No data available.';
+} else {
+    const layout = {
+        title: payload.title || 'Distribution',
+        xaxis: {title: payload.x_label || 'Value'},
+        yaxis: {title: payload.y_label || 'Count'}
+    };
+    let trace;
+    if (payload.type === 'hist') {
+        trace = {type: 'bar', x: payload.bins, y: payload.counts, marker: {color: '#4c72b0'}};
+    } else {
+        trace = {type: 'bar', x: payload.labels, y: payload.counts, marker: {color: '#4c72b0'}};
+    }
+    Plotly.newPlot('plot', [trace], layout);
+}
+</script>
+</body>
+</html>`);
+    win.document.close();
+}
+
+async function finalizeSchema() {
+    const button = document.getElementById("finalize");
+    button.disabled = true;
+    const originalText = button.textContent;
+    button.textContent = "Saving...";
+    try {
+        const response = await fetch("/api/finalize", { method: "POST" });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+            throw new Error(data.error || `Server responded with ${response.status}`);
+        }
+        window.__schemaFinalized = true;
+        alert('Schema saved. You can now close this tab.');
+    } catch (error) {
+        alert(`Failed to save schema: ${error.message}`);
+    } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+    }
+}
+
+document.getElementById("finalize").addEventListener("click", finalizeSchema);
+
+window.addEventListener("beforeunload", () => {
+    if (window.__schemaFinalized) {
+        return;
+    }
+    if (navigator.sendBeacon) {
+        const blob = new Blob([], { type: 'application/json' });
+        navigator.sendBeacon('/api/cancel', blob);
+    } else {
+        fetch('/api/cancel', { method: 'POST', keepalive: true });
+    }
+});
+
 loadState();
 </script>
 </body>
 </html>
 """
+
 
 
 def launch_schema_builder(
@@ -430,10 +646,16 @@ class _SchemaBuilder:
         )
         self._notes = dict(inference.column_notes)
         self._messages = list(inference.messages)
+        self._confidence_map: Dict[str, str] = {}
+        for name in self._schema_dict:
+            raw_confidence = inference.column_confidence.get(name, "high")
+            value = getattr(raw_confidence, "value", raw_confidence)
+            self._confidence_map[name] = str(value)
         if not self._messages:
             self._messages = ["Schema inferred automatically; adjust columns as needed."]
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._cancelled = False
         self._result_schema: Optional[Schema] = None
 
     def run(self) -> Schema:
@@ -458,6 +680,8 @@ class _SchemaBuilder:
         server.shutdown()
         server_thread.join(timeout=2.0)
 
+        if self._cancelled:
+            raise SchemaBuilderError("Schema builder cancelled by user.")
         if self._result_schema is None:
             raise SchemaBuilderError("Schema builder terminated without a result.")
         return self._result_schema
@@ -543,6 +767,13 @@ class _SchemaBuilder:
                 self._stop_event.set()
             return jsonify({"status": "ok"})
 
+        @app.post("/api/cancel")
+        def cancel():
+            with self._lock:
+                self._cancelled = True
+                self._stop_event.set()
+            return jsonify({"status": "cancelled"})
+
     def _column_state(self, column: str) -> _ColumnState:
         spec = self._schema_dict[column]
         series = self._df[column]
@@ -558,6 +789,7 @@ class _SchemaBuilder:
             sample=summary["sample"],
             n_classes=spec.get("n_classes"),
             y_dim=spec.get("y_dim"),
+            confidence=self._confidence_map.get(column, "high"),
         )
 
 
