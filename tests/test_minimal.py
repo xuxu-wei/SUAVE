@@ -177,6 +177,28 @@ def test_predict_proba_refreshes_cache_for_new_frames():
     assert refreshed.shape == (len(X), 2)
 
 
+def test_multilayer_classification_head_runs_end_to_end():
+    X, y, schema = make_dataset()
+    hidden_dims = (16, 8)
+    model = SUAVE(
+        schema=schema,
+        n_components=2,
+        head_hidden_dims=hidden_dims,
+        dropout=0.2,
+        batch_size=2,
+    )
+    model.fit(X, y, epochs=1)
+
+    assert model._classifier is not None
+    assert model._classifier.linear.in_features == hidden_dims[-1]
+
+    probabilities = model.predict_proba(X)
+    predictions = model.predict(X)
+
+    assert probabilities.shape == (len(X), 2)
+    assert predictions.shape == (len(X),)
+
+
 def test_encode_returns_latent_means():
     X, y, schema = make_dataset()
     model = SUAVE(schema=schema, latent_dim=4, batch_size=2, n_components=2)

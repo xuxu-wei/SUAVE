@@ -42,6 +42,7 @@ _DEFAULT_LATENT_DIM = 32
 _DEFAULT_N_COMPONENTS = 1
 _DEFAULT_BETA = 1.5
 _DEFAULT_HIDDEN_DIMS = (256, 128)
+_DEFAULT_HEAD_HIDDEN_DIMS: tuple[int, ...] = ()
 _DEFAULT_DROPOUT = 0.1
 _DEFAULT_LEARNING_RATE = 1e-3
 _DEFAULT_BATCH_SIZE = 128
@@ -76,7 +77,7 @@ class SUAVE:
 
     - ``behaviour="supervised"``: encoder/decoder + classifier head.
     - ``behaviour="unsupervised"``: encoder/decoder only (head is disabled).
-    
+
     Parameters
     ----------
     schema : Schema, optional
@@ -97,6 +98,10 @@ class SUAVE:
         perceptrons.
     dropout : float, default 0.1
         Dropout probability applied inside the neural modules.
+    head_hidden_dims : Iterable[int], default ()
+        Width of optional hidden layers inserted into the classification head.
+        Each hidden layer follows a ``Linear → ReLU → Dropout`` pattern before
+        the final ``n_classes`` projection.
     learning_rate : float, default 1e-3
         Learning rate for the Adam optimiser driving all optimisation stages.
     batch_size : int, default 128
@@ -209,7 +214,7 @@ class SUAVE:
         [ ELBO warm-up only ]
         warmup_epochs
         (``head_epochs`` and ``finetune_epochs`` are ignored)
-        
+
     Examples
     --------
     >>> import pandas as pd
@@ -234,6 +239,7 @@ class SUAVE:
         beta: float = _DEFAULT_BETA,
         hidden_dims: Iterable[int] = _DEFAULT_HIDDEN_DIMS,
         dropout: float = _DEFAULT_DROPOUT,
+        head_hidden_dims: Iterable[int] = _DEFAULT_HEAD_HIDDEN_DIMS,
         learning_rate: float = _DEFAULT_LEARNING_RATE,
         batch_size: int = _DEFAULT_BATCH_SIZE,
         kl_warmup_epochs: int = _DEFAULT_KL_WARMUP_EPOCHS,
@@ -260,6 +266,10 @@ class SUAVE:
         self.beta = beta
         self.hidden_dims = tuple(hidden_dims)
         self.dropout = dropout
+        head_hidden_dims = tuple(int(dim) for dim in head_hidden_dims)
+        if any(dim <= 0 for dim in head_hidden_dims):
+            raise ValueError("head_hidden_dims must contain positive integers")
+        self.head_hidden_dims = head_hidden_dims
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.kl_warmup_epochs = kl_warmup_epochs
@@ -298,6 +308,8 @@ class SUAVE:
             "latent_dim": self.auto_parameters and latent_dim == _DEFAULT_LATENT_DIM,
             "hidden_dims": self.auto_parameters
             and tuple(hidden_dims) == _DEFAULT_HIDDEN_DIMS,
+            "head_hidden_dims": self.auto_parameters
+            and head_hidden_dims == _DEFAULT_HEAD_HIDDEN_DIMS,
             "dropout": self.auto_parameters
             and math.isclose(
                 float(dropout), _DEFAULT_DROPOUT, rel_tol=1e-6, abs_tol=1e-6
@@ -1247,6 +1259,7 @@ class SUAVE:
                 self._classes.size,
                 class_weight=class_weights,
                 dropout=self.dropout,
+                hidden_dims=self.head_hidden_dims,
             ).to(device)
             self._train_head_phase(
                 posterior_stats["mean"],
@@ -2912,7 +2925,7 @@ class SUAVE:
         ``behaviour="unsupervised"`` mode the classifier head is disabled, so
         ``attr`` must be provided and the method only operates in the
         generative regime described above.
-        
+
         Parameters
         ----------
         X : pandas.DataFrame
@@ -3583,6 +3596,7 @@ class SUAVE:
             "latent_dim": self.latent_dim,
             "n_components": self.n_components,
             "hidden_dims": list(self.hidden_dims),
+            "head_hidden_dims": list(self.head_hidden_dims),
             "dropout": self.dropout,
             "learning_rate": self.learning_rate,
             "batch_size": self.batch_size,
@@ -3728,6 +3742,7 @@ class SUAVE:
             "latent_dim",
             "n_components",
             "hidden_dims",
+            "head_hidden_dims",
             "dropout",
             "learning_rate",
             "batch_size",
@@ -3748,6 +3763,8 @@ class SUAVE:
             if key in metadata and metadata[key] is not None:
                 value = metadata[key]
                 if key == "hidden_dims":
+                    value = tuple(int(v) for v in value)
+                elif key == "head_hidden_dims":
                     value = tuple(int(v) for v in value)
                 elif key == "auto_parameters":
                     value = bool(value)
@@ -3888,6 +3905,7 @@ class SUAVE:
                 int(model._classes.size),
                 class_weight=class_weight,
                 dropout=model.dropout,
+                hidden_dims=model.head_hidden_dims,
             ).to(device)
             state = classifier_payload.get("state_dict")
             if isinstance(state, OrderedDict):

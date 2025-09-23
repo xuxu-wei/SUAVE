@@ -22,8 +22,13 @@ class ClassificationHead(nn.Module):
         Optional weighting applied to the cross-entropy objective.  The
         semantics follow :func:`torch.nn.functional.cross_entropy`.
     dropout:
-        Dropout probability applied before the linear projection. ``0.0``
-        disables dropout.
+        Dropout probability applied after each hidden layer (and directly on
+        the inputs when no hidden layers are requested). ``0.0`` disables
+        dropout.
+    hidden_dims:
+        Optional hidden layer widths inserted before the ``n_classes``
+        projection. Each hidden layer follows a ``Linear → ReLU → Dropout``
+        pattern.
     """
 
     def __init__(
@@ -33,14 +38,31 @@ class ClassificationHead(nn.Module):
         *,
         class_weight: Iterable[float] | Sequence[float] | Tensor | None = None,
         dropout: float = 0.0,
+        hidden_dims: Iterable[int] = (),
     ) -> None:
         super().__init__()
         if n_classes < 2:
             raise ValueError("Classification head requires at least two classes")
         if not 0.0 <= float(dropout) < 1.0:
             raise ValueError("dropout must lie in the interval [0, 1)")
-        self._dropout = nn.Dropout(float(dropout)) if dropout else None
-        self.linear = nn.Linear(in_features, n_classes)
+        hidden_dims = tuple(int(dim) for dim in hidden_dims)
+        if any(dim <= 0 for dim in hidden_dims):
+            raise ValueError("hidden_dims must contain positive integers")
+
+        layers: list[nn.Module] = []
+        previous_features = int(in_features)
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(previous_features, hidden_dim))
+            layers.append(nn.ReLU())
+            if dropout:
+                layers.append(nn.Dropout(float(dropout)))
+            previous_features = hidden_dim
+
+        self.hidden_layers = nn.Sequential(*layers) if layers else None
+        self._final_dropout = (
+            nn.Dropout(float(dropout)) if dropout and not hidden_dims else None
+        )
+        self.linear = nn.Linear(previous_features, n_classes)
         if class_weight is not None:
             weight_tensor = torch.as_tensor(class_weight, dtype=torch.float32)
             if weight_tensor.numel() != n_classes:
@@ -56,8 +78,10 @@ class ClassificationHead(nn.Module):
     def forward(self, latents: Tensor) -> Tensor:
         """Return unnormalised logits for ``latents``."""
 
-        if self._dropout is not None:
-            latents = self._dropout(latents)
+        if self.hidden_layers is not None:
+            latents = self.hidden_layers(latents)
+        elif self._final_dropout is not None:
+            latents = self._final_dropout(latents)
         return self.linear(latents)
 
     def loss(self, logits: Tensor, targets: Tensor) -> Tensor:
