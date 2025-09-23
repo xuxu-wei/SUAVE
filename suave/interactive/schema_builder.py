@@ -13,7 +13,7 @@ import threading
 import time
 import webbrowser
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Dict, Iterable, List, MutableMapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -553,7 +553,6 @@ loadState();
 """
 
 
-
 def launch_schema_builder(
     df: pd.DataFrame,
     feature_columns: Optional[Iterable[str]] = None,
@@ -652,7 +651,9 @@ class _SchemaBuilder:
             value = getattr(raw_confidence, "value", raw_confidence)
             self._confidence_map[name] = str(value)
         if not self._messages:
-            self._messages = ["Schema inferred automatically; adjust columns as needed."]
+            self._messages = [
+                "Schema inferred automatically; adjust columns as needed."
+            ]
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._cancelled = False
@@ -674,7 +675,9 @@ class _SchemaBuilder:
 
         if self._open_browser:
             url = f"http://{self._host}:{self._port}/"
-            threading.Thread(target=self._launch_browser, args=(url,), daemon=True).start()
+            threading.Thread(
+                target=self._launch_browser, args=(url,), daemon=True
+            ).start()
 
         self._stop_event.wait()
         server.shutdown()
@@ -702,7 +705,9 @@ class _SchemaBuilder:
         def state():
             with self._lock:
                 payload = {
-                    "columns": [self._column_state(name).to_dict() for name in self._schema_dict],
+                    "columns": [
+                        self._column_state(name).to_dict() for name in self._schema_dict
+                    ],
                     "messages": list(self._messages),
                 }
             return jsonify(payload)
@@ -729,16 +734,26 @@ class _SchemaBuilder:
             updated_spec: MutableMapping[str, object] = {"type": new_type}
             if new_type in {"cat", "ordinal"}:
                 if n_classes is None:
-                    return jsonify(
-                        {
-                            "error": (
-                                f"Column '{column}' is '{new_type}' and requires 'n_classes' > 1."
-                            )
-                        }
-                    ), 400
+                    return (
+                        jsonify(
+                            {
+                                "error": (
+                                    f"Column '{column}' is '{new_type}' and requires 'n_classes' > 1."
+                                )
+                            }
+                        ),
+                        400,
+                    )
                 updated_spec["n_classes"] = int(n_classes)
             elif n_classes is not None:
-                return jsonify({"error": "'n_classes' only applies to categorical/ordinal types."}), 400
+                return (
+                    jsonify(
+                        {
+                            "error": "'n_classes' only applies to categorical/ordinal types."
+                        }
+                    ),
+                    400,
+                )
 
             if y_dim is not None:
                 updated_spec["y_dim"] = int(y_dim)

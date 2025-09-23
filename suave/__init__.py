@@ -1,18 +1,46 @@
-"""Compatibility shim exposing the lowercase :mod:`suave` package as ``SUAVE``."""
+"""
+This module exposes the user-facing classes that are required for the
+minimal runnable skeleton requested in the roadmap.  The real
+implementation will iterate on top of these public entry points.
+
+In addition to the primary estimator and schema helpers, we re-export
+common utility submodules (``data``, ``evaluate``, ``sampling`` and
+``interactive``) so that ``import suave`` mirrors the public namespace
+documented throughout the examples.  Users can therefore rely on
+``suave.data`` or ``suave.evaluate`` without performing an additional
+import of the underlying modules.
+"""
 
 from importlib import import_module
-import sys
 
-import suave as _suave
-from suave import *  # noqa: F401,F403
-
-__path__ = list(_suave.__path__)
-
-for _name in ("interactive", "types", "schema_inference"):
-    sys.modules[f"SUAVE.{_name}"] = import_module(f"suave.{_name}")
-
-sys.modules["SUAVE.interactive.schema_builder"] = import_module(
-    "suave.interactive.schema_builder"
+from .model import SUAVE
+from .types import Schema
+from .schema_inference import (
+    SchemaInferenceMode,
+    SchemaInferenceResult,
+    SchemaInferencer,
 )
 
-del import_module, sys, _suave, _name
+# Re-export commonly used helper modules so that importing ``suave``
+# exposes the documented namespace without requiring users to jump
+# between subpackages explicitly.
+data = import_module(".data", __name__)
+evaluate = import_module(".evaluate", __name__)
+interactive = import_module(".interactive", __name__)
+sampling = import_module(".sampling", __name__)
+types = import_module(".types", __name__)
+schema_inference = import_module(".schema_inference", __name__)
+
+__all__ = [
+    "SUAVE",
+    "Schema",
+    "SchemaInferencer",
+    "SchemaInferenceMode",
+    "SchemaInferenceResult",
+    "data",
+    "evaluate",
+    "interactive",
+    "sampling",
+    "types",
+    "schema_inference",
+]
