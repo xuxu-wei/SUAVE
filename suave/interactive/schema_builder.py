@@ -58,6 +58,8 @@ class _ColumnState:
     n_classes: Optional[int]
     y_dim: Optional[int]
     confidence: str
+    position: int
+    flagged: bool
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -71,6 +73,8 @@ class _ColumnState:
             "n_classes": self.n_classes,
             "y_dim": self.y_dim,
             "confidence": self.confidence,
+            "position": self.position,
+            "flagged": self.flagged,
         }
 
 
@@ -111,9 +115,37 @@ p.lead {
     border-radius: 12px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
     padding: 16px;
+    overflow: visible;
+}
+.table-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+    font-size: 0.95rem;
+}
+.table-controls label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.table-controls select {
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(0, 0, 0, 0.2);
+    background: #ffffff;
+}
+.sort-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+}
+.table-scroll {
     overflow-x: auto;
 }
-table {
+.table-scroll table {
     border-collapse: collapse;
     width: 100%;
 }
@@ -209,11 +241,16 @@ button.secondary {
     position: relative;
     cursor: pointer;
 }
+.tooltip.alert {
+    background: #d93025;
+}
 .tooltip-content {
-    position: absolute;
-    top: 24px;
-    right: 0;
-    width: 280px;
+    display: none;
+}
+.tooltip-floating {
+    position: fixed;
+    z-index: 2000;
+    max-width: min(320px, 90vw);
     background: #ffffff;
     border: 1px solid rgba(0, 0, 0, 0.12);
     border-radius: 8px;
@@ -222,21 +259,15 @@ button.secondary {
     color: #1f1f1f;
     font-size: 0.85rem;
     line-height: 1.4;
-    visibility: hidden;
-    opacity: 0;
-    transform: translateY(-6px);
-    transition: opacity 0.2s ease, transform 0.2s ease;
-    pointer-events: none;
+    display: none;
 }
-.tooltip:focus-within .tooltip-content,
-.tooltip:hover .tooltip-content {
-    visibility: visible;
-    opacity: 1;
-    transform: translateY(0);
-    pointer-events: auto;
-}
-.tooltip-content div + div {
+.tooltip-floating div + div {
     margin-top: 6px;
+}
+.column-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 .summary-note {
     margin-top: 4px;
@@ -258,25 +289,37 @@ button.secondary {
   </header>
   <div id="messages"></div>
   <div class="table-wrapper">
-    <table>
-      <thead>
-        <tr>
-          <th>Column</th>
-          <th>Type <span class="tooltip" tabindex="0">?<span class="tooltip-content">
-            <div><strong>real</strong> Continuous numeric feature modelled with a Gaussian mean/variance; values can take any real number. Example: z-scored blood pressure with an approximately bell-shaped spread.</div>
-            <div><strong>pos</strong> Non-negative continuous feature (zero allowed) transformed with log1p and modelled as log-normal, so training data must stay above -1 and generated samples remain near that range. Example: right-skewed lab results such as lactate.</div>
-            <div><strong>count</strong> Non-negative integer feature with a Poisson rate; fit and sampling cover 0, 1, 2, … with no preset upper bound. Example: number of prior hospital admissions.</div>
-            <div><strong>cat</strong> Unordered categorical feature; the decoder learns independent class probabilities for each level. Example: ward identifier or blood type.</div>
-            <div><strong>ordinal</strong> Ordered categorical feature using cumulative logit thresholds across a fixed number of ranks (0 to K-1), so samples never exceed the declared highest level—unlike counts, which assume an unbounded integer range. Example: triage acuity scores.</div>
-          </span></span></th>
-          <th>n_classes</th>
-          <th>y_dim</th>
-          <th>Distribution</th>
-          <th>Summary</th>
-        </tr>
-      </thead>
-      <tbody id="schema-body"></tbody>
-    </table>
+    <div class="table-controls">
+      <label for="sort-key">Sort by
+        <select id="sort-key">
+          <option value="position">Column order</option>
+          <option value="confidence">Confidence</option>
+          <option value="flagged">Flagged status</option>
+        </select>
+      </label>
+      <button id="sort-direction" class="secondary sort-button" type="button">Asc ↑</button>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Column</th>
+            <th>Type <span class="tooltip" tabindex="0">?<span class="tooltip-content">
+              <div><strong>real</strong> Continuous numeric feature modelled with a Gaussian mean/variance; values can take any real number. Example: z-scored blood pressure with an approximately bell-shaped spread.</div>
+              <div><strong>pos</strong> Non-negative continuous feature (zero allowed) transformed with log1p and modelled as log-normal, so training data must stay above -1 and generated samples remain near that range. Example: right-skewed lab results such as lactate.</div>
+              <div><strong>count</strong> Non-negative integer feature with a Poisson rate; fit and sampling cover 0, 1, 2, … with no preset upper bound. Example: number of prior hospital admissions.</div>
+              <div><strong>cat</strong> Unordered categorical feature; the decoder learns independent class probabilities for each level. Example: ward identifier or blood type.</div>
+              <div><strong>ordinal</strong> Ordered categorical feature using cumulative logit thresholds across a fixed number of ranks (0 to K-1), so samples never exceed the declared highest level—unlike counts, which assume an unbounded integer range. Example: triage acuity scores.</div>
+            </span></span></th>
+            <th>n_classes</th>
+            <th>y_dim</th>
+            <th>Distribution</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody id="schema-body"></tbody>
+      </table>
+    </div>
   </div>
   <div style="margin-top:16px;">
     <button id="finalize" class="primary">Save schema</button>
@@ -284,7 +327,52 @@ button.secondary {
 </main>
 <script>
 const TYPE_OPTIONS = ["real", "pos", "count", "cat", "ordinal"];
+const CONFIDENCE_ORDER = { low: 0, medium: 1, high: 2 };
 let cancellationNotified = false;
+let currentColumns = [];
+let sortConfig = { key: "position", direction: "asc" };
+let floatingTooltip = null;
+let activeTooltipTarget = null;
+
+const sortKeySelect = document.getElementById("sort-key");
+const sortDirectionButton = document.getElementById("sort-direction");
+
+function ensureFloatingTooltip() {
+    if (!floatingTooltip) {
+        floatingTooltip = document.createElement("div");
+        floatingTooltip.className = "tooltip-floating";
+        document.body.appendChild(floatingTooltip);
+    }
+    return floatingTooltip;
+}
+
+function updateSortDirectionButton() {
+    if (!sortDirectionButton) {
+        return;
+    }
+    const label = sortConfig.direction === "asc" ? "Asc ↑" : "Desc ↓";
+    sortDirectionButton.textContent = label;
+    sortDirectionButton.setAttribute(
+        "aria-label",
+        sortConfig.direction === "asc" ? "Ascending order" : "Descending order",
+    );
+}
+
+if (sortKeySelect) {
+    sortKeySelect.addEventListener("change", () => {
+        sortConfig.key = sortKeySelect.value;
+        refreshTable();
+    });
+}
+
+if (sortDirectionButton) {
+    sortDirectionButton.addEventListener("click", () => {
+        sortConfig.direction = sortConfig.direction === "asc" ? "desc" : "asc";
+        updateSortDirectionButton();
+        refreshTable();
+    });
+    updateSortDirectionButton();
+}
 
 function createOption(option, selected) {
     const choice = document.createElement("option");
@@ -294,6 +382,34 @@ function createOption(option, selected) {
         choice.selected = true;
     }
     return choice;
+}
+
+function formatSampleValue(value) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+        const rounded = Math.round(value * 100) / 100;
+        if (Number.isInteger(rounded)) {
+            return String(Object.is(rounded, -0) ? 0 : rounded);
+        }
+        return (Object.is(rounded, -0) ? 0 : rounded)
+            .toFixed(2)
+            .replace(/0+$/, "")
+            .replace(/\.$/, "");
+    }
+    if (value === null) {
+        return "null";
+    }
+    if (typeof value === "string") {
+        return JSON.stringify(value);
+    }
+    return JSON.stringify(value);
+}
+
+function formatSampleArray(values) {
+    if (!Array.isArray(values) || values.length === 0) {
+        return "[]";
+    }
+    const formatted = values.map((value) => formatSampleValue(value));
+    return `[${formatted.join(", ")}]`;
 }
 
 function renderMessages(messages) {
@@ -326,10 +442,23 @@ async function loadState() {
         }
         const payload = await response.json();
         renderMessages(payload.messages || []);
-        renderTable(payload.columns || []);
+        setColumns(payload.columns || []);
     } catch (error) {
         showError(`Unable to load initial state: ${error.message}`);
     }
+}
+
+function setColumns(columns) {
+    currentColumns = (columns || []).map((column, index) => ({
+        ...column,
+        position:
+            typeof column.position === "number"
+                ? column.position
+                : index,
+        confidence: column.confidence || "high",
+        flagged: Boolean(column.flagged),
+    }));
+    refreshTable();
 }
 
 function applyConfidence(row, confidence) {
@@ -342,6 +471,253 @@ function syncNClassState(select, nClassesInput) {
     nClassesInput.disabled = !needsClasses;
     if (!needsClasses) {
         nClassesInput.value = "";
+    }
+}
+
+function getSortValue(column) {
+    switch (sortConfig.key) {
+        case "confidence": {
+            const key = String(column.confidence || "").toLowerCase();
+            return key in CONFIDENCE_ORDER ? CONFIDENCE_ORDER[key] : Number.MAX_SAFE_INTEGER;
+        }
+        case "flagged":
+            return column.flagged ? 1 : 0;
+        case "position":
+        default:
+            return typeof column.position === "number" ? column.position : 0;
+    }
+}
+
+function getSortedColumns() {
+    const sorted = [...currentColumns];
+    sorted.sort((a, b) => {
+        const aValue = getSortValue(a);
+        const bValue = getSortValue(b);
+        if (aValue === bValue) {
+            const aPos = typeof a.position === "number" ? a.position : 0;
+            const bPos = typeof b.position === "number" ? b.position : 0;
+            return aPos - bPos;
+        }
+        if (sortConfig.direction === "asc") {
+            return aValue - bValue;
+        }
+        return bValue - aValue;
+    });
+    return sorted;
+}
+
+function createFlagIndicator(note) {
+    const indicator = document.createElement("span");
+    indicator.className = "tooltip alert";
+    indicator.tabIndex = 0;
+    indicator.setAttribute("role", "button");
+    indicator.setAttribute("aria-label", "Flagged for review");
+    indicator.textContent = "!";
+    const tooltipContent = document.createElement("span");
+    tooltipContent.className = "tooltip-content";
+    tooltipContent.textContent = note || "Flagged for review.";
+    indicator.appendChild(tooltipContent);
+    return indicator;
+}
+
+function refreshTable() {
+    const body = document.getElementById("schema-body");
+    if (!body) {
+        return;
+    }
+    hideFloatingTooltip();
+    body.innerHTML = "";
+    getSortedColumns().forEach((column) => {
+        const row = document.createElement("tr");
+        applyConfidence(row, column.confidence);
+
+        const nameCell = document.createElement("td");
+        const nameWrapper = document.createElement("div");
+        nameWrapper.className = "column-name";
+        const nameText = document.createElement("span");
+        nameText.textContent = column.name;
+        nameWrapper.appendChild(nameText);
+        if (column.flagged) {
+            nameWrapper.appendChild(createFlagIndicator(column.note));
+        }
+        nameCell.appendChild(nameWrapper);
+        row.appendChild(nameCell);
+
+        const typeCell = document.createElement("td");
+        const select = document.createElement("select");
+        TYPE_OPTIONS.forEach((option) => select.appendChild(createOption(option, column.type)));
+        const nClassesInput = document.createElement("input");
+        const yDimInput = document.createElement("input");
+        syncNClassState(select, nClassesInput);
+        select.addEventListener("change", () => {
+            syncNClassState(select, nClassesInput);
+            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
+        });
+        typeCell.appendChild(select);
+        row.appendChild(typeCell);
+
+        const nClassesCell = document.createElement("td");
+        nClassesInput.type = "number";
+        nClassesInput.min = "2";
+        nClassesInput.placeholder = "cat / ordinal only";
+        nClassesInput.value = column.n_classes === null || column.n_classes === undefined ? "" : column.n_classes;
+        nClassesInput.disabled = !(column.type === "cat" || column.type === "ordinal");
+        nClassesInput.addEventListener("change", () => {
+            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
+        });
+        nClassesCell.appendChild(nClassesInput);
+        row.appendChild(nClassesCell);
+
+        const yDimCell = document.createElement("td");
+        yDimInput.type = "number";
+        yDimInput.min = "1";
+        yDimInput.placeholder = "optional";
+        yDimInput.value = column.y_dim === null || column.y_dim === undefined ? "" : column.y_dim;
+        yDimInput.addEventListener("change", () => {
+            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
+        });
+        yDimCell.appendChild(yDimInput);
+        row.appendChild(yDimCell);
+
+        const distributionCell = document.createElement("td");
+        const distributionButton = document.createElement("button");
+        distributionButton.type = "button";
+        distributionButton.className = "secondary";
+        distributionButton.textContent = "View";
+        distributionButton.addEventListener("click", () => showDistribution(column.name));
+        distributionCell.appendChild(distributionButton);
+        row.appendChild(distributionCell);
+
+        const summaryCell = document.createElement("td");
+        const summary = document.createElement("div");
+        summary.innerHTML = `<strong>dtype:</strong> ${column.dtype} · <strong>nunique:</strong> ${column.nunique} · <strong>missing:</strong> ${column.missing}`;
+        const sample = document.createElement("div");
+        sample.className = "summary-note";
+        sample.textContent = `sample: ${formatSampleArray(column.sample)}`;
+        summaryCell.appendChild(summary);
+        summaryCell.appendChild(sample);
+        if (column.note) {
+            const note = document.createElement("div");
+            note.className = "summary-note";
+            note.textContent = column.note;
+            summaryCell.appendChild(note);
+        }
+        row.appendChild(summaryCell);
+
+        body.appendChild(row);
+    });
+    attachTooltipHandlers(body);
+}
+
+function attachTooltipHandlers(root = document) {
+    const tooltipElements = root.querySelectorAll(".tooltip");
+    tooltipElements.forEach((tooltip) => {
+        if (tooltip.dataset.tooltipBound === "true") {
+            return;
+        }
+        tooltip.dataset.tooltipBound = "true";
+        tooltip.addEventListener("mouseenter", handleTooltipEnter);
+        tooltip.addEventListener("mouseleave", handleTooltipLeave);
+        tooltip.addEventListener("focus", handleTooltipEnter);
+        tooltip.addEventListener("blur", handleTooltipLeave);
+        tooltip.addEventListener("keydown", handleTooltipKeydown);
+    });
+}
+
+function handleTooltipEnter(event) {
+    const target = event.currentTarget;
+    target.setAttribute("aria-expanded", "true");
+    showFloatingTooltip(target);
+}
+
+function handleTooltipLeave(event) {
+    const target = event.currentTarget;
+    if (activeTooltipTarget === target) {
+        hideFloatingTooltip();
+    } else {
+        target.removeAttribute("aria-expanded");
+    }
+}
+
+function handleTooltipKeydown(event) {
+    if (event.key === "Escape") {
+        hideFloatingTooltip();
+        event.currentTarget.blur();
+    }
+}
+
+function showFloatingTooltip(target) {
+    const tooltipContent = target.querySelector(".tooltip-content");
+    if (!tooltipContent) {
+        return;
+    }
+    const tooltip = ensureFloatingTooltip();
+    tooltip.innerHTML = "";
+    if (tooltipContent.childElementCount > 0) {
+        tooltip.innerHTML = tooltipContent.innerHTML;
+    } else {
+        const text = tooltipContent.textContent || "";
+        if (!text.trim()) {
+            tooltip.style.display = "none";
+            return;
+        }
+        tooltip.textContent = text;
+    }
+    tooltip.style.display = "block";
+    tooltip.style.visibility = "hidden";
+    tooltip.style.left = "0px";
+    tooltip.style.top = "0px";
+    activeTooltipTarget = target;
+    requestAnimationFrame(() => {
+        positionFloatingTooltip(target);
+        tooltip.style.visibility = "visible";
+    });
+}
+
+function hideFloatingTooltip() {
+    if (activeTooltipTarget) {
+        activeTooltipTarget.removeAttribute("aria-expanded");
+    }
+    const tooltip = floatingTooltip;
+    if (!tooltip) {
+        activeTooltipTarget = null;
+        return;
+    }
+    tooltip.style.display = "none";
+    tooltip.style.visibility = "hidden";
+    activeTooltipTarget = null;
+}
+
+function positionFloatingTooltip(target) {
+    const tooltip = floatingTooltip;
+    if (!tooltip || tooltip.style.display === "none") {
+        return;
+    }
+    const rect = target.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const margin = 8;
+    let top = rect.bottom + margin;
+    let left = rect.left + rect.width / 2 - tooltipRect.width / 2;
+    if (left < margin) {
+        left = margin;
+    }
+    const maxLeft = window.innerWidth - tooltipRect.width - margin;
+    if (left > maxLeft) {
+        left = maxLeft;
+    }
+    if (top + tooltipRect.height > window.innerHeight - margin) {
+        top = rect.top - tooltipRect.height - margin;
+        if (top < margin) {
+            top = Math.min(window.innerHeight - tooltipRect.height - margin, rect.bottom + margin);
+        }
+    }
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+}
+
+function dismissFloatingTooltip() {
+    if (activeTooltipTarget) {
+        hideFloatingTooltip();
     }
 }
 
@@ -372,82 +748,6 @@ async function sendUpdate(column, type, nClasses, yDim) {
     } catch (error) {
         alert(`Failed to update column: ${error.message}`);
     }
-}
-
-function renderTable(columns) {
-    const body = document.getElementById("schema-body");
-    body.innerHTML = "";
-    columns.forEach((column) => {
-        const row = document.createElement("tr");
-        applyConfidence(row, column.confidence);
-
-        const nameCell = document.createElement("td");
-        nameCell.textContent = column.name;
-        row.appendChild(nameCell);
-
-        const typeCell = document.createElement("td");
-        const select = document.createElement("select");
-        TYPE_OPTIONS.forEach((option) => select.appendChild(createOption(option, column.type)));
-        const nClassesInput = document.createElement("input");
-        const yDimInput = document.createElement("input");
-        syncNClassState(select, nClassesInput);
-        select.addEventListener("change", () => {
-            syncNClassState(select, nClassesInput);
-            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
-        });
-        typeCell.appendChild(select);
-        row.appendChild(typeCell);
-
-        const nClassesCell = document.createElement("td");
-        nClassesInput.type = "number";
-        nClassesInput.min = "2";
-        nClassesInput.placeholder = "cat / ordinal only";
-        nClassesInput.value = column.n_classes === null ? "" : column.n_classes;
-        nClassesInput.disabled = !(column.type === "cat" || column.type === "ordinal");
-        nClassesInput.addEventListener("change", () => {
-            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
-        });
-        nClassesCell.appendChild(nClassesInput);
-        row.appendChild(nClassesCell);
-
-        const yDimCell = document.createElement("td");
-        yDimInput.type = "number";
-        yDimInput.min = "1";
-        yDimInput.placeholder = "optional";
-        yDimInput.value = column.y_dim === null ? "" : column.y_dim;
-        yDimInput.addEventListener("change", () => {
-            sendUpdate(column.name, select.value, nClassesInput.value, yDimInput.value);
-        });
-        yDimCell.appendChild(yDimInput);
-        row.appendChild(yDimCell);
-
-        const distributionCell = document.createElement("td");
-        const distributionButton = document.createElement("button");
-        distributionButton.type = "button";
-        distributionButton.className = "secondary";
-        distributionButton.textContent = "View";
-        distributionButton.addEventListener("click", () => showDistribution(column.name));
-        distributionCell.appendChild(distributionButton);
-        row.appendChild(distributionCell);
-
-        const summaryCell = document.createElement("td");
-        const summary = document.createElement("div");
-        summary.innerHTML = `<strong>dtype:</strong> ${column.dtype} · <strong>nunique:</strong> ${column.nunique} · <strong>missing:</strong> ${column.missing}`;
-        const sample = document.createElement("div");
-        sample.className = "summary-note";
-        sample.textContent = `sample: ${JSON.stringify(column.sample)}`;
-        summaryCell.appendChild(summary);
-        summaryCell.appendChild(sample);
-        if (column.note) {
-            const note = document.createElement("div");
-            note.className = "summary-note";
-            note.textContent = column.note;
-            summaryCell.appendChild(note);
-        }
-        row.appendChild(summaryCell);
-
-        body.appendChild(row);
-    });
 }
 
 async function showDistribution(column) {
@@ -580,6 +880,17 @@ function handlePageExit() {
 
 window.addEventListener("beforeunload", handlePageExit);
 window.addEventListener("pagehide", handlePageExit);
+window.addEventListener("scroll", dismissFloatingTooltip, true);
+window.addEventListener("resize", dismissFloatingTooltip);
+document.addEventListener("pointerdown", (event) => {
+    const tooltip = floatingTooltip;
+    if (tooltip && tooltip.contains(event.target)) {
+        return;
+    }
+    dismissFloatingTooltip();
+});
+
+attachTooltipHandlers();
 
 loadState();
 </script>
@@ -741,7 +1052,8 @@ class _SchemaBuilder:
             with self._lock:
                 payload = {
                     "columns": [
-                        self._column_state(name).to_dict() for name in self._schema_dict
+                        self._column_state(name, index).to_dict()
+                        for index, name in enumerate(self._schema_dict)
                     ],
                     "messages": list(self._messages),
                 }
@@ -795,7 +1107,8 @@ class _SchemaBuilder:
 
             with self._lock:
                 self._schema_dict[column] = updated_spec
-                payload = self._column_state(column).to_dict()
+                position = list(self._schema_dict).index(column)
+                payload = self._column_state(column, position).to_dict()
             return jsonify(payload)
 
         @app.get("/api/distribution")
@@ -824,7 +1137,7 @@ class _SchemaBuilder:
                 self._stop_event.set()
             return jsonify({"status": "cancelled"})
 
-    def _column_state(self, column: str) -> _ColumnState:
+    def _column_state(self, column: str, position: int) -> _ColumnState:
         spec = self._schema_dict[column]
         series = self._df[column]
         summary = _summarise_series(series)
@@ -840,6 +1153,8 @@ class _SchemaBuilder:
             n_classes=spec.get("n_classes"),
             y_dim=spec.get("y_dim"),
             confidence=self._confidence_map.get(column, "high"),
+            position=position,
+            flagged=column in self._notes,
         )
 
 
