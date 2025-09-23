@@ -34,6 +34,11 @@ from .modules.prior import PriorMean
 from . import sampling as sampling_utils
 from .types import Schema, ColumnSpec
 from .evaluate import compute_brier, compute_ece
+from .defaults import (
+    parse_heuristic_hyperparameters,
+    recommend_hyperparameters,
+    serialise_heuristic_hyperparameters,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,29 +89,57 @@ class SUAVE:
         Dataset description including column types and cardinalities.  When not
         supplied during initialisation, a schema must be provided to
         :meth:`fit`.
-    latent_dim : int, default 32
+    behaviour : {"supervised", "unsupervised"}, default "supervised"
+        Selects the feature set exposed by the estimator.  ``"supervised"``
+        enables the classification head whereas ``"unsupervised"`` activates the
+        generative-only workflow.
+    latent_dim : int, optional
         Dimensionality of the latent representation shared between the encoder
-        and decoder networks.
+        and decoder networks.  When ``None`` the value is selected
+        heuristically during :meth:`fit` based on dataset statistics.
     n_components : int, default 1
         Number of mixture components parameterising the hierarchical latent
         prior.  ``1`` corresponds to a standard Gaussian encoder.
     beta : float, default 1.5
         Weight applied to the KL divergence term in the evidence lower bound
         objective.
-    hidden_dims : Iterable[int], default (256, 128)
+    hidden_dims : Iterable[int], optional
         Width of each hidden layer used in the encoder and decoder multilayer
-        perceptrons.
-    dropout : float, default 0.1
-        Dropout probability applied inside the neural modules.
+        perceptrons.  ``None`` defers to the heuristic defaults chosen at
+        training time.
     head_hidden_dims : Iterable[int], default ()
         Width of optional hidden layers inserted into the classification head.
         Each hidden layer follows a ``Linear → ReLU → Dropout`` pattern before
         the final ``n_classes`` projection.
-    learning_rate : float, default 1e-3
+    dropout : float, optional
+        Dropout probability applied inside the neural modules.  When omitted a
+        dataset-size-aware default is selected during :meth:`fit`.
+    learning_rate : float, optional
         Learning rate for the Adam optimiser driving all optimisation stages.
-    batch_size : int, default 128
+        ``None`` enables heuristic selection at training time.
+    batch_size : int, optional
         Mini-batch size consumed by :meth:`fit` and downstream inference
-        utilities.
+        utilities.  Leaving this ``None`` delegates the choice to the
+        heuristics.
+    warmup_epochs : int, optional
+        Number of epochs dedicated to ELBO-only optimisation before the
+        classifier head is trained.  ``None`` activates heuristic scheduling.
+    kl_warmup_epochs : int, optional
+        Number of epochs used to linearly anneal the KL divergence weight during
+        the warm-up phase.  ``None`` activates heuristic scheduling.
+    head_epochs : int, optional
+        Number of epochs allocated to the classifier-head-only optimisation
+        stage.  ``None`` activates heuristic scheduling.
+    finetune_epochs : int, optional
+        Duration of the joint fine-tuning phase performed after the head stage.
+        ``None`` activates heuristic scheduling.
+    early_stop_patience : int, optional
+        Patience of the validation early-stopping monitor used during joint
+        fine-tuning before the best checkpoint is restored.  ``None`` activates
+        heuristic scheduling.
+    joint_decoder_lr_scale : float, default 0.1
+        Multiplicative factor applied to the decoder and prior learning rates
+        during joint fine-tuning relative to the encoder rate.
     val_split : float, default 0.2
         Ratio of samples assigned to the internal validation split constructed
         inside :meth:`fit`.
@@ -117,10 +150,6 @@ class SUAVE:
     gumbel_temperature : float, default 1.0
         Temperature applied by the straight-through Gumbel-Softmax estimator
         when sampling mixture assignments during training.
-    behaviour : {"supervised", "unsupervised"}, default "supervised"
-        Selects the feature set exposed by the estimator.  ``"supervised"``
-        enables the classification head whereas ``"unsupervised"`` activates the
-        generative-only workflow.
     tau_start : float, default 1.0
         Initial temperature used by the unsupervised mixture sampler prior to
         annealing.
@@ -130,34 +159,13 @@ class SUAVE:
     tau_decay : float, default 0.01
         Linear decrement applied to the temperature at each epoch when
         ``behaviour="unsupervised"``.
-    warmup_epochs : int, default 10
-        Number of epochs dedicated to ELBO-only optimisation before the
-        classifier head is trained.
-    kl_warmup_epochs : int, default 10
-        Number of epochs used to linearly anneal the KL divergence weight during
-        the warm-up phase.
-    head_epochs : int, default 5
-        Number of epochs allocated to the classifier-head-only optimisation
-        stage.
-    finetune_epochs : int, default 10
-        Duration of the joint fine-tuning phase performed after the head stage.
-    joint_decoder_lr_scale : float, default 0.1
-        Multiplicative factor applied to the decoder and prior learning rates
-        during joint fine-tuning relative to the encoder rate.
-    early_stop_patience : int, default 5
-        Patience of the validation early-stopping monitor used during joint
-        fine-tuning before the best checkpoint is restored.
-    auto_parameters : bool, default True
-        When ``True`` the estimator adapts selected hyperparameters using
-        heuristics derived from the training data.  Disable to retain full
-        manual control over optimisation settings.
 
     Attributes
     ----------
     auto_hyperparameters_ : dict[str, object] or None
-        Description of automatically tuned hyperparameters after calling
-        :meth:`fit`.  ``None`` when :paramref:`auto_parameters` is ``False`` or
-        before training commences.
+        Description of heuristically selected hyperparameters after calling
+        :meth:`fit`.  ``None`` when every configurable value was supplied by the
+        user.
 
     See Also
     --------
@@ -234,105 +242,153 @@ class SUAVE:
         self,
         schema: Optional[Schema] = None,
         *,
-        latent_dim: int = _DEFAULT_LATENT_DIM,
+        behaviour: Literal["supervised", "unsupervised"] = "supervised",
+        latent_dim: Optional[int] = None,
         n_components: int = _DEFAULT_N_COMPONENTS,
         beta: float = _DEFAULT_BETA,
-        hidden_dims: Iterable[int] = _DEFAULT_HIDDEN_DIMS,
-        dropout: float = _DEFAULT_DROPOUT,
+        hidden_dims: Optional[Iterable[int]] = None,
         head_hidden_dims: Iterable[int] = _DEFAULT_HEAD_HIDDEN_DIMS,
-        learning_rate: float = _DEFAULT_LEARNING_RATE,
-        batch_size: int = _DEFAULT_BATCH_SIZE,
-        kl_warmup_epochs: int = _DEFAULT_KL_WARMUP_EPOCHS,
+        dropout: Optional[float] = None,
+        learning_rate: Optional[float] = None,
+        batch_size: Optional[int] = None,
+        warmup_epochs: Optional[int] = None,
+        kl_warmup_epochs: Optional[int] = None,
+        head_epochs: Optional[int] = None,
+        finetune_epochs: Optional[int] = None,
+        early_stop_patience: Optional[int] = None,
+        joint_decoder_lr_scale: float = _DEFAULT_JOINT_DECODER_LR_SCALE,
         val_split: float = _DEFAULT_VAL_SPLIT,
         stratify: bool = _DEFAULT_STRATIFY,
         random_state: int = _DEFAULT_RANDOM_STATE,
         gumbel_temperature: float = _DEFAULT_GUMBEL_TEMPERATURE,
-        behaviour: Literal["supervised", "unsupervised"] = "supervised",
         tau_start: float = 1.0,
         tau_min: float = 1e-3,
         tau_decay: float = 0.01,
-        warmup_epochs: int = _DEFAULT_WARMUP_EPOCHS,
-        head_epochs: int = _DEFAULT_HEAD_EPOCHS,
-        finetune_epochs: int = _DEFAULT_FINETUNE_EPOCHS,
-        joint_decoder_lr_scale: float = _DEFAULT_JOINT_DECODER_LR_SCALE,
-        early_stop_patience: int = _DEFAULT_EARLY_STOP_PATIENCE,
-        auto_parameters: bool = True,
     ) -> None:
         self.schema = schema
-        self.latent_dim = latent_dim
-        if n_components <= 0:
-            raise ValueError("n_components must be positive")
-        self.n_components = int(n_components)
-        self.beta = beta
-        self.hidden_dims = tuple(hidden_dims)
-        self.dropout = dropout
-        head_hidden_dims = tuple(int(dim) for dim in head_hidden_dims)
-        if any(dim <= 0 for dim in head_hidden_dims):
-            raise ValueError("head_hidden_dims must contain positive integers")
-        self.head_hidden_dims = head_hidden_dims
-        self.learning_rate = learning_rate
-        self.batch_size = batch_size
-        self.kl_warmup_epochs = kl_warmup_epochs
-        self.val_split = val_split
-        self.stratify = stratify
-        self.random_state = random_state
-        if gumbel_temperature <= 0:
-            raise ValueError("gumbel_temperature must be positive")
-        self.gumbel_temperature = float(gumbel_temperature)
+
         behaviour_normalised = _normalise_behaviour(str(behaviour))
         if behaviour_normalised not in {"supervised", "unsupervised"}:
             raise ValueError("behaviour must be either 'supervised' or 'unsupervised'")
         self.behaviour = behaviour_normalised
 
-        for name, value in {
-            "warmup_epochs": warmup_epochs,
-            "head_epochs": head_epochs,
-            "finetune_epochs": finetune_epochs,
-        }.items():
-            if int(value) < 0:
-                raise ValueError(f"{name} must be non-negative")
+        if n_components <= 0:
+            raise ValueError("n_components must be positive")
+        self.n_components = int(n_components)
+        self.beta = float(beta)
+
+        latent_dim_user = latent_dim is not None
+        latent_dim_value = (
+            _DEFAULT_LATENT_DIM if latent_dim is None else int(latent_dim)
+        )
+        if latent_dim_value <= 0:
+            raise ValueError("latent_dim must be positive")
+        self.latent_dim = latent_dim_value
+
+        if hidden_dims is None:
+            hidden_dims_value = tuple(int(dim) for dim in _DEFAULT_HIDDEN_DIMS)
+            hidden_dims_user = False
+        else:
+            hidden_dims_value = tuple(int(dim) for dim in hidden_dims)
+            hidden_dims_user = True
+        if any(dim <= 0 for dim in hidden_dims_value):
+            raise ValueError("hidden_dims must contain positive integers")
+        self.hidden_dims = hidden_dims_value
+
+        head_hidden_dims = tuple(int(dim) for dim in head_hidden_dims)
+        if any(dim <= 0 for dim in head_hidden_dims):
+            raise ValueError("head_hidden_dims must contain positive integers")
+        self.head_hidden_dims = head_hidden_dims
+
+        dropout_user = dropout is not None
+        dropout_value = float(_DEFAULT_DROPOUT if dropout is None else dropout)
+        if dropout_value < 0 or dropout_value >= 1:
+            raise ValueError("dropout must lie in the [0, 1) range")
+        self.dropout = dropout_value
+
+        learning_rate_user = learning_rate is not None
+        learning_rate_value = float(
+            _DEFAULT_LEARNING_RATE if learning_rate is None else learning_rate
+        )
+        if learning_rate_value <= 0:
+            raise ValueError("learning_rate must be positive")
+        self.learning_rate = learning_rate_value
+
+        batch_size_user = batch_size is not None
+        batch_size_value = int(
+            _DEFAULT_BATCH_SIZE if batch_size is None else batch_size
+        )
+        if batch_size_value <= 0:
+            raise ValueError("batch_size must be positive")
+        self.batch_size = batch_size_value
+
+        kl_user = kl_warmup_epochs is not None
+        kl_value = int(
+            _DEFAULT_KL_WARMUP_EPOCHS if kl_warmup_epochs is None else kl_warmup_epochs
+        )
+        if kl_value < 0:
+            raise ValueError("kl_warmup_epochs must be non-negative")
+        self.kl_warmup_epochs = kl_value
+
+        warmup_user = warmup_epochs is not None
+        warmup_value = int(
+            _DEFAULT_WARMUP_EPOCHS if warmup_epochs is None else warmup_epochs
+        )
+        if warmup_value < 0:
+            raise ValueError("warmup_epochs must be non-negative")
+        self.warmup_epochs = warmup_value
+
+        head_user = head_epochs is not None
+        head_value = int(_DEFAULT_HEAD_EPOCHS if head_epochs is None else head_epochs)
+        if head_value < 0:
+            raise ValueError("head_epochs must be non-negative")
+        self.head_epochs = head_value
+
+        finetune_user = finetune_epochs is not None
+        finetune_value = int(
+            _DEFAULT_FINETUNE_EPOCHS if finetune_epochs is None else finetune_epochs
+        )
+        if finetune_value < 0:
+            raise ValueError("finetune_epochs must be non-negative")
+        self.finetune_epochs = finetune_value
+
+        patience_user = early_stop_patience is not None
+        patience_value = int(
+            _DEFAULT_EARLY_STOP_PATIENCE
+            if early_stop_patience is None
+            else early_stop_patience
+        )
+        if patience_value < 0:
+            raise ValueError("early_stop_patience must be non-negative")
+        self.early_stop_patience = patience_value
+
         if joint_decoder_lr_scale <= 0:
             raise ValueError("joint_decoder_lr_scale must be positive")
-        if int(early_stop_patience) < 0:
-            raise ValueError("early_stop_patience must be non-negative")
-        self.warmup_epochs = int(warmup_epochs)
-        self.head_epochs = int(head_epochs)
-        self.finetune_epochs = int(finetune_epochs)
         self.joint_decoder_lr_scale = float(joint_decoder_lr_scale)
-        self.early_stop_patience = int(early_stop_patience)
-        self.auto_parameters = bool(auto_parameters)
+
+        self.val_split = float(val_split)
+        self.stratify = bool(stratify)
+        self.random_state = int(random_state)
+
+        if gumbel_temperature <= 0:
+            raise ValueError("gumbel_temperature must be positive")
+        self.gumbel_temperature = float(gumbel_temperature)
+
         self.auto_hyperparameters_: dict[str, int | float | tuple[int, ...]] | None = (
             None
         )
         self._auto_configured: dict[str, bool] = {
-            "latent_dim": self.auto_parameters and latent_dim == _DEFAULT_LATENT_DIM,
-            "hidden_dims": self.auto_parameters
-            and tuple(hidden_dims) == _DEFAULT_HIDDEN_DIMS,
-            "head_hidden_dims": self.auto_parameters
-            and head_hidden_dims == _DEFAULT_HEAD_HIDDEN_DIMS,
-            "dropout": self.auto_parameters
-            and math.isclose(
-                float(dropout), _DEFAULT_DROPOUT, rel_tol=1e-6, abs_tol=1e-6
-            ),
-            "learning_rate": self.auto_parameters
-            and math.isclose(
-                float(learning_rate),
-                _DEFAULT_LEARNING_RATE,
-                rel_tol=1e-9,
-                abs_tol=1e-12,
-            ),
-            "batch_size": self.auto_parameters
-            and int(batch_size) == _DEFAULT_BATCH_SIZE,
-            "kl_warmup_epochs": self.auto_parameters
-            and int(kl_warmup_epochs) == _DEFAULT_KL_WARMUP_EPOCHS,
-            "warmup_epochs": self.auto_parameters
-            and int(warmup_epochs) == _DEFAULT_WARMUP_EPOCHS,
-            "head_epochs": self.auto_parameters
-            and int(head_epochs) == _DEFAULT_HEAD_EPOCHS,
-            "finetune_epochs": self.auto_parameters
-            and int(finetune_epochs) == _DEFAULT_FINETUNE_EPOCHS,
-            "early_stop_patience": self.auto_parameters
-            and int(early_stop_patience) == _DEFAULT_EARLY_STOP_PATIENCE,
+            "latent_dim": not latent_dim_user,
+            "hidden_dims": not hidden_dims_user,
+            "head_hidden_dims": False,
+            "dropout": not dropout_user,
+            "learning_rate": not learning_rate_user,
+            "batch_size": not batch_size_user,
+            "kl_warmup_epochs": not kl_user,
+            "warmup_epochs": not warmup_user,
+            "head_epochs": not head_user,
+            "finetune_epochs": not finetune_user,
+            "early_stop_patience": not patience_user,
         }
 
         self._tau_start: float | None = None
@@ -520,7 +576,22 @@ class SUAVE:
     ) -> tuple[int, int, int, int, int, int, bool]:
         """Return updated hyperparameters using automatic heuristics."""
 
-        if not self.auto_parameters:
+        heuristic_targets = (
+            "latent_dim",
+            "hidden_dims",
+            "dropout",
+            "learning_rate",
+            "batch_size",
+            "kl_warmup_epochs",
+            "warmup_epochs",
+            "head_epochs",
+            "finetune_epochs",
+            "early_stop_patience",
+        )
+        needs_heuristic = any(
+            self._auto_configured.get(name, False) for name in heuristic_targets
+        )
+        if not needs_heuristic:
             self.auto_hyperparameters_ = None
             return (
                 int(batch_size),
@@ -534,16 +605,16 @@ class SUAVE:
 
         input_dim = int(encoder_inputs.size(-1))
         n_train = max(int(n_train_samples), 1)
-        recommendations = self._recommend_auto_hyperparameters(
+        recommendations = recommend_hyperparameters(
             input_dim=input_dim,
             n_train_samples=n_train,
             class_counts=class_counts,
         )
-        self.auto_hyperparameters_ = recommendations
+        self.auto_hyperparameters_ = recommendations.to_dict()
 
         reset_prior = False
 
-        latent_dim = int(recommendations.get("latent_dim", self.latent_dim))
+        latent_dim = int(recommendations.latent_dim)
         if self._auto_configured.get("latent_dim", False) and latent_dim > 0:
             if latent_dim != self.latent_dim:
                 LOGGER.info(
@@ -554,7 +625,7 @@ class SUAVE:
                 self.latent_dim = latent_dim
                 reset_prior = True
 
-        hidden_dims = recommendations.get("hidden_dims", self.hidden_dims)
+        hidden_dims = tuple(int(v) for v in recommendations.hidden_dims)
         if self._auto_configured.get("hidden_dims", False) and hidden_dims:
             hidden_tuple = tuple(int(v) for v in hidden_dims)
             if hidden_tuple and hidden_tuple != self.hidden_dims:
@@ -565,7 +636,7 @@ class SUAVE:
                 )
                 self.hidden_dims = hidden_tuple
 
-        dropout = float(recommendations.get("dropout", self.dropout))
+        dropout = float(recommendations.dropout)
         if self._auto_configured.get("dropout", False):
             dropout = float(np.clip(dropout, 0.0, 0.95))
             if not math.isclose(
@@ -578,7 +649,7 @@ class SUAVE:
                 )
                 self.dropout = dropout
 
-        learning_rate = float(recommendations.get("learning_rate", self.learning_rate))
+        learning_rate = float(recommendations.learning_rate)
         if self._auto_configured.get("learning_rate", False) and learning_rate > 0:
             if not math.isclose(
                 learning_rate, float(self.learning_rate), rel_tol=1e-9, abs_tol=1e-12
@@ -593,9 +664,7 @@ class SUAVE:
         if self._auto_configured.get("batch_size", False) and not overrides.get(
             "batch_size", False
         ):
-            recommended_batch = int(
-                max(1, recommendations.get("batch_size", batch_size))
-            )
+            recommended_batch = int(max(1, recommendations.batch_size))
             if recommended_batch != self.batch_size:
                 LOGGER.info(
                     "Auto-configuring batch_size=%s (previously %s)",
@@ -604,13 +673,13 @@ class SUAVE:
                 )
                 self.batch_size = recommended_batch
             batch_size = self.batch_size
+        elif overrides.get("batch_size", False):
+            self.batch_size = int(batch_size)
 
         if self._auto_configured.get("kl_warmup_epochs", False) and not overrides.get(
             "kl_warmup_epochs", False
         ):
-            recommended_kl = int(
-                max(1, recommendations.get("kl_warmup_epochs", kl_warmup_epochs))
-            )
+            recommended_kl = int(max(1, recommendations.kl_warmup_epochs))
             if recommended_kl != self.kl_warmup_epochs:
                 LOGGER.info(
                     "Auto-configuring kl_warmup_epochs=%s (previously %s)",
@@ -619,13 +688,13 @@ class SUAVE:
                 )
                 self.kl_warmup_epochs = recommended_kl
             kl_warmup_epochs = self.kl_warmup_epochs
+        elif overrides.get("kl_warmup_epochs", False):
+            self.kl_warmup_epochs = int(kl_warmup_epochs)
 
         if self._auto_configured.get("warmup_epochs", False) and not overrides.get(
             "warmup_epochs", False
         ):
-            recommended_warmup = int(
-                max(1, recommendations.get("warmup_epochs", warmup_epochs))
-            )
+            recommended_warmup = int(max(1, recommendations.warmup_epochs))
             if recommended_warmup != self.warmup_epochs:
                 LOGGER.info(
                     "Auto-configuring warmup_epochs=%s (previously %s)",
@@ -634,13 +703,13 @@ class SUAVE:
                 )
                 self.warmup_epochs = recommended_warmup
             warmup_epochs = self.warmup_epochs
+        elif overrides.get("warmup_epochs", False):
+            self.warmup_epochs = int(warmup_epochs)
 
         if self._auto_configured.get("head_epochs", False) and not overrides.get(
             "head_epochs", False
         ):
-            recommended_head = int(
-                max(1, recommendations.get("head_epochs", head_epochs))
-            )
+            recommended_head = int(max(1, recommendations.head_epochs))
             if recommended_head != self.head_epochs:
                 LOGGER.info(
                     "Auto-configuring head_epochs=%s (previously %s)",
@@ -649,13 +718,13 @@ class SUAVE:
                 )
                 self.head_epochs = recommended_head
             head_epochs = self.head_epochs
+        elif overrides.get("head_epochs", False):
+            self.head_epochs = int(head_epochs)
 
         if self._auto_configured.get("finetune_epochs", False) and not overrides.get(
             "finetune_epochs", False
         ):
-            recommended_finetune = int(
-                max(1, recommendations.get("finetune_epochs", finetune_epochs))
-            )
+            recommended_finetune = int(max(1, recommendations.finetune_epochs))
             if recommended_finetune != self.finetune_epochs:
                 LOGGER.info(
                     "Auto-configuring finetune_epochs=%s (previously %s)",
@@ -664,13 +733,13 @@ class SUAVE:
                 )
                 self.finetune_epochs = recommended_finetune
             finetune_epochs = self.finetune_epochs
+        elif overrides.get("finetune_epochs", False):
+            self.finetune_epochs = int(finetune_epochs)
 
         if self._auto_configured.get(
             "early_stop_patience", False
         ) and not overrides.get("early_stop_patience", False):
-            recommended_patience = int(
-                max(1, recommendations.get("early_stop_patience", early_stop_patience))
-            )
+            recommended_patience = int(max(1, recommendations.early_stop_patience))
             if recommended_patience != self.early_stop_patience:
                 LOGGER.info(
                     "Auto-configuring early_stop_patience=%s (previously %s)",
@@ -679,6 +748,8 @@ class SUAVE:
                 )
                 self.early_stop_patience = recommended_patience
             early_stop_patience = self.early_stop_patience
+        elif overrides.get("early_stop_patience", False):
+            self.early_stop_patience = int(early_stop_patience)
 
         return (
             int(batch_size),
@@ -689,274 +760,6 @@ class SUAVE:
             int(early_stop_patience),
             reset_prior,
         )
-
-    def _recommend_auto_hyperparameters(
-        self,
-        *,
-        input_dim: int,
-        n_train_samples: int,
-        class_counts: np.ndarray | None,
-    ) -> dict[str, int | float | tuple[int, ...]]:
-        """Return heuristic hyperparameters tailored to the dataset."""
-
-        latent_dim = self._recommend_latent_dim(input_dim, n_train_samples)
-        hidden_dims = self._recommend_hidden_dims(
-            input_dim, latent_dim, n_train_samples
-        )
-        dropout = self._recommend_dropout(n_train_samples)
-        batch_size = self._recommend_batch_size(n_train_samples)
-        learning_rate = self._recommend_learning_rate(n_train_samples)
-        kl_epochs = self._recommend_kl_warmup_epochs(n_train_samples)
-        warmup_epochs = self._recommend_warmup_epochs(n_train_samples)
-        head_epochs = self._recommend_head_epochs(n_train_samples, class_counts)
-        finetune_epochs = self._recommend_finetune_epochs(n_train_samples)
-        patience = self._recommend_early_stop_patience(n_train_samples)
-
-        return {
-            "latent_dim": latent_dim,
-            "hidden_dims": hidden_dims,
-            "dropout": dropout,
-            "learning_rate": learning_rate,
-            "batch_size": batch_size,
-            "kl_warmup_epochs": kl_epochs,
-            "warmup_epochs": warmup_epochs,
-            "head_epochs": head_epochs,
-            "finetune_epochs": finetune_epochs,
-            "early_stop_patience": patience,
-        }
-
-    @staticmethod
-    def _dataset_size_bucket(n_samples: int) -> str:
-        """Categorise ``n_samples`` into coarse dataset regimes."""
-
-        if n_samples <= 0 or n_samples <= 512:
-            return "tiny"
-        if n_samples <= 5000:
-            return "small"
-        if n_samples <= 20000:
-            return "medium"
-        return "large"
-
-    @classmethod
-    def _recommend_latent_dim(cls, input_dim: int, n_samples: int) -> int:
-        """Return a latent dimensionality matching dataset complexity."""
-
-        base = max(8, min(128, int(round(math.sqrt(max(input_dim, 1)) * 4))))
-        bucket = cls._dataset_size_bucket(n_samples)
-        if bucket == "tiny":
-            return int(max(8, min(base, 24)))
-        if bucket == "small":
-            return int(max(16, min(base, 40)))
-        if bucket == "medium":
-            return int(max(24, min(base, 64)))
-        return int(max(32, min(base, 96)))
-
-    @classmethod
-    def _round_up(cls, value: int, multiple: int) -> int:
-        """Return ``value`` rounded up to the nearest ``multiple``."""
-
-        if multiple <= 0:
-            return int(value)
-        value = int(value)
-        if value % multiple == 0:
-            return value
-        return int(((value // multiple) + 1) * multiple)
-
-    @classmethod
-    def _recommend_hidden_dims(
-        cls, input_dim: int, latent_dim: int, n_samples: int
-    ) -> tuple[int, int]:
-        """Return a two-layer MLP width suited to ``input_dim``."""
-
-        bucket = cls._dataset_size_bucket(n_samples)
-        width = max(input_dim, latent_dim * 4)
-        width = cls._round_up(width, 16)
-        if bucket == "tiny":
-            width = max(96, min(width, 192))
-        elif bucket == "small":
-            width = max(128, min(width, 256))
-        elif bucket == "medium":
-            width = max(192, min(width, 320))
-        else:
-            width = max(256, min(width, 384))
-        second = max(latent_dim * 2, width // 2)
-        second = cls._round_up(second, 16)
-        second = min(second, width)
-        second = max(16, second)
-        return int(width), int(second)
-
-    @classmethod
-    def _recommend_dropout(cls, n_samples: int) -> float:
-        """Return a dropout level inversely proportional to dataset size."""
-
-        bucket = cls._dataset_size_bucket(n_samples)
-        if bucket == "tiny":
-            return 0.2
-        if bucket == "small":
-            return 0.15
-        if bucket == "medium":
-            return 0.1
-        return 0.05
-
-    @classmethod
-    def _round_to_power_of_two(cls, value: int) -> int:
-        """Return ``value`` rounded to the closest power of two."""
-
-        value = max(int(value), 1)
-        exponent = int(round(math.log2(value))) if value > 0 else 0
-        return int(2 ** max(exponent, 0))
-
-    @classmethod
-    def _recommend_batch_size(cls, n_samples: int) -> int:
-        """Return a mini-batch size bounded by ``n_samples``."""
-
-        n_samples = max(int(n_samples), 1)
-        bucket = cls._dataset_size_bucket(n_samples)
-        if bucket == "tiny":
-            candidate = cls._round_to_power_of_two(max(n_samples // 4, 1))
-            candidate = max(4, min(candidate, 64))
-        elif bucket == "small":
-            candidate = 128
-        elif bucket == "medium":
-            candidate = 192
-        else:
-            candidate = 256
-        return int(max(1, min(candidate, n_samples)))
-
-    @classmethod
-    def _recommend_learning_rate(cls, n_samples: int) -> float:
-        """Return an Adam learning rate tuned for ``n_samples``."""
-
-        bucket = cls._dataset_size_bucket(n_samples)
-        if bucket == "tiny":
-            return 2e-3
-        if bucket == "small":
-            return 1e-3
-        if bucket == "medium":
-            return 8e-4
-        return 5e-4
-
-    @classmethod
-    def _recommend_kl_warmup_epochs(cls, n_samples: int) -> int:
-        """Return KL warm-up epochs scaled to dataset size."""
-
-        bucket = cls._dataset_size_bucket(n_samples)
-        if bucket == "tiny":
-            return 5
-        if bucket == "small":
-            return 10
-        if bucket == "medium":
-            return 15
-        return 20
-
-    @classmethod
-    def _recommend_warmup_epochs(cls, n_samples: int) -> int:
-        """Return warm-up epochs before classifier training."""
-
-        bucket = cls._dataset_size_bucket(n_samples)
-        if bucket == "tiny":
-            return 15
-        if bucket == "small":
-            return 20
-        if bucket == "medium":
-            return 25
-        return 30
-
-    @classmethod
-    def _recommend_head_epochs(
-        cls, n_samples: int, class_counts: np.ndarray | None
-    ) -> int:
-        """Return classifier head epochs factoring class balance."""
-
-        bucket = cls._dataset_size_bucket(n_samples)
-        base = {"tiny": 5, "small": 6, "medium": 8, "large": 10}[bucket]
-        if class_counts is not None and class_counts.size > 0:
-            total = float(class_counts.sum())
-            if total > 0:
-                frequencies = class_counts / total
-                min_freq = float(frequencies.min())
-                if min_freq < 0.1:
-                    base += 2
-                elif min_freq < 0.2:
-                    base += 1
-        return int(base)
-
-    @classmethod
-    def _recommend_finetune_epochs(cls, n_samples: int) -> int:
-        """Return fine-tuning epochs for the joint stage."""
-
-        bucket = cls._dataset_size_bucket(n_samples)
-        if bucket == "tiny":
-            return 8
-        if bucket == "small":
-            return 10
-        if bucket == "medium":
-            return 15
-        return 20
-
-    @classmethod
-    def _recommend_early_stop_patience(cls, n_samples: int) -> int:
-        """Return early-stopping patience suited to ``n_samples``."""
-
-        bucket = cls._dataset_size_bucket(n_samples)
-        if bucket == "tiny":
-            return 3
-        if bucket == "small":
-            return 5
-        if bucket == "medium":
-            return 6
-        return 8
-
-    def _serialise_auto_hyperparameters(self) -> dict[str, object] | None:
-        """Return a JSON-friendly representation of auto-tuned hyperparameters."""
-
-        if not self.auto_hyperparameters_:
-            return None
-        serialised: dict[str, object] = {}
-        for key, value in self.auto_hyperparameters_.items():
-            if value is None:
-                continue
-            if key == "hidden_dims":
-                serialised[key] = [int(v) for v in value]
-            elif isinstance(value, (tuple, list)):
-                serialised[key] = [int(v) for v in value]
-            elif isinstance(value, np.ndarray):
-                serialised[key] = value.tolist()
-            elif isinstance(value, (np.generic,)):
-                serialised[key] = value.item()
-            elif isinstance(value, float):
-                serialised[key] = float(value)
-            elif isinstance(value, int):
-                serialised[key] = int(value)
-            else:
-                serialised[key] = value
-        return serialised or None
-
-    @staticmethod
-    def _parse_auto_hyperparameters(data: dict[str, object]) -> dict[str, object]:
-        """Reconstruct auto hyperparameters from their serialised form."""
-
-        parsed: dict[str, object] = {}
-        for key, value in data.items():
-            if value is None:
-                continue
-            if key == "hidden_dims":
-                parsed[key] = tuple(int(v) for v in value)
-            elif key in {
-                "latent_dim",
-                "batch_size",
-                "kl_warmup_epochs",
-                "warmup_epochs",
-                "head_epochs",
-                "finetune_epochs",
-                "early_stop_patience",
-            }:
-                parsed[key] = int(value)
-            elif key in {"dropout", "learning_rate"}:
-                parsed[key] = float(value)
-            else:
-                parsed[key] = value
-        return parsed
 
     # ------------------------------------------------------------------
     # Training utilities
@@ -3613,11 +3416,15 @@ class SUAVE:
             "finetune_epochs": self.finetune_epochs,
             "joint_decoder_lr_scale": self.joint_decoder_lr_scale,
             "early_stop_patience": self.early_stop_patience,
-            "auto_parameters": self.auto_parameters,
             "auto_configured": {
                 key: bool(value) for key, value in self._auto_configured.items()
             },
-            "auto_hyperparameters": self._serialise_auto_hyperparameters(),
+            "heuristic_overrides": {
+                key: bool(value) for key, value in self._auto_configured.items()
+            },
+            "auto_hyperparameters": serialise_heuristic_hyperparameters(
+                self.auto_hyperparameters_
+            ),
         }
         classifier_state: dict[str, Any] | None = None
         if self._classifier is not None:
@@ -3758,7 +3565,6 @@ class SUAVE:
             "finetune_epochs",
             "joint_decoder_lr_scale",
             "early_stop_patience",
-            "auto_parameters",
         ):
             if key in metadata and metadata[key] is not None:
                 value = metadata[key]
@@ -3766,8 +3572,6 @@ class SUAVE:
                     value = tuple(int(v) for v in value)
                 elif key == "head_hidden_dims":
                     value = tuple(int(v) for v in value)
-                elif key == "auto_parameters":
-                    value = bool(value)
                 elif key in {
                     "tau_start",
                     "tau_min",
@@ -3789,15 +3593,18 @@ class SUAVE:
                 init_kwargs[key] = value
         model = cls(schema=schema, behaviour=behaviour, **init_kwargs)
 
-        auto_configured = metadata.get("auto_configured")
+        auto_configured = metadata.get("heuristic_overrides")
+        if not isinstance(auto_configured, dict):
+            auto_configured = metadata.get("auto_configured")
         if isinstance(auto_configured, dict):
-            for config_key, config_value in auto_configured.items():
-                model._auto_configured[config_key] = bool(config_value)
+            model._auto_configured = {
+                config_key: bool(config_value)
+                for config_key, config_value in auto_configured.items()
+            }
         auto_hparams = metadata.get("auto_hyperparameters")
         if isinstance(auto_hparams, dict):
-            model.auto_hyperparameters_ = model._parse_auto_hyperparameters(
-                auto_hparams
-            )
+            parsed = parse_heuristic_hyperparameters(auto_hparams)
+            model.auto_hyperparameters_ = parsed or None
         else:
             model.auto_hyperparameters_ = None
 

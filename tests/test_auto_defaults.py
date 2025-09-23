@@ -1,5 +1,5 @@
-import sys
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
@@ -76,27 +76,22 @@ def test_auto_defaults_respects_manual_overrides():
     assert model.head_epochs == 4
     assert model.finetune_epochs == 6
     assert model.early_stop_patience == 2
+    assert model.auto_hyperparameters_ is None
     assert model._auto_configured["latent_dim"] is False
     assert model._auto_configured["hidden_dims"] is False
 
 
-def test_auto_defaults_disabled(tmp_path):
+def test_auto_defaults_respects_fit_overrides():
     X, y, schema = _build_dataset()
-    model = SUAVE(schema=schema, auto_parameters=False)
-    model.fit(X, y)
+    model = SUAVE(schema=schema)
+    model.fit(X, y, batch_size=4)
 
-    assert model.auto_hyperparameters_ is None
-    assert model.latent_dim == 32
-    assert pytest.approx(model.dropout, rel=1e-6) == 0.1
-
-    path = tmp_path / "auto_defaults.pt"
-    model.save(path)
-    restored = SUAVE.load(path)
-    assert restored.auto_parameters is False
-    assert restored.auto_hyperparameters_ is None
+    assert model.batch_size == 4
+    assert model.auto_hyperparameters_ is not None
+    assert model._auto_configured["batch_size"] is True
 
 
-def test_auto_defaults_persist_after_serialisation(tmp_path):
+def test_auto_defaults_persist_after_serialisation(tmp_path: Path):
     X, y, schema = _build_dataset()
     model = SUAVE(schema=schema)
     model.fit(X, y)
@@ -105,6 +100,5 @@ def test_auto_defaults_persist_after_serialisation(tmp_path):
     model.save(path)
     restored = SUAVE.load(path)
 
-    assert restored.auto_parameters is True
     assert restored.auto_hyperparameters_ == model.auto_hyperparameters_
     assert restored._auto_configured == model._auto_configured
