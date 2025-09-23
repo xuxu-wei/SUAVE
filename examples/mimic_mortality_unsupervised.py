@@ -686,10 +686,14 @@ def main() -> None:
         X_train_full = prepare_features(train_df, feature_columns)
         y_train_full = train_df[primary_target]
         numeric_train = to_numeric_frame(X_train_full)
+        train_means = numeric_train.mean(axis=0)
+        train_means = train_means.fillna(0.0)
+        numeric_train = numeric_train.fillna(train_means)
 
         synthetic_features = model.sample(len(X_train_full))
         synthetic_features = synthetic_features[feature_columns]
         numeric_synthetic = to_numeric_frame(synthetic_features)
+        numeric_synthetic = numeric_synthetic.fillna(train_means)
 
         synthetic_latents = model.encode(synthetic_features)
         synthetic_probs = latent_classifier.predict_proba(synthetic_latents)[:, 1]
@@ -697,6 +701,7 @@ def main() -> None:
         synthetic_labels = rng.binomial(1, synthetic_probs)
 
         numeric_test = to_numeric_frame(prepare_features(test_df, feature_columns))
+        numeric_test = numeric_test.fillna(train_means)
         y_test = test_df[primary_target]
 
         tstr_metrics = evaluate_tstr(
