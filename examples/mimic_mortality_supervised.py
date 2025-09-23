@@ -58,9 +58,11 @@ CALIBRATION_SIZE = 0.2
 VALIDATION_SIZE = 0.2
 OUTPUT_DIR_NAME = "analysis_outputs"
 HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, int]] = {
+    "compact": (96, 48),
     "small": (128, 64),
     "medium": (256, 128),
     "wide": (384, 192),
+    "extra_wide": (512, 256),
 }
 
 
@@ -172,9 +174,12 @@ def compute_binary_metrics(
     metrics: Dict[str, float] = {}
 
     try:
-        metrics["AUC"] = float(roc_auc_score(labels, positive_probs))
+        roauc = float(roc_auc_score(labels, positive_probs))
     except ValueError:
-        metrics["AUC"] = float("nan")
+        roauc = float("nan")
+
+    metrics["ROAUC"] = roauc
+    metrics["AUC"] = roauc
 
     metrics["ACC"] = float(accuracy_score(labels, predictions))
     tn, fp, fn, tp = confusion_matrix(labels, predictions, labels=[0, 1]).ravel()
@@ -205,17 +210,17 @@ def run_optuna_search(
         timeout = None
 
     def objective(trial: "optuna.trial.Trial") -> float:
-        latent_dim = trial.suggest_categorical("latent_dim", [8, 16, 32, 64])
+        latent_dim = trial.suggest_categorical("latent_dim", [8, 16, 32, 48, 64, 96])
         hidden_key = trial.suggest_categorical(
             "hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys())
         )
-        dropout = trial.suggest_float("dropout", 0.0, 0.4)
-        learning_rate = trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True)
-        batch_size = trial.suggest_categorical("batch_size", [128, 256, 512])
-        beta = trial.suggest_float("beta", 0.5, 3.0)
-        warmup_epochs = trial.suggest_int("warmup_epochs", 2, 8)
-        head_epochs = trial.suggest_int("head_epochs", 1, 5)
-        finetune_epochs = trial.suggest_int("finetune_epochs", 1, 6)
+        dropout = trial.suggest_float("dropout", 0.0, 0.5)
+        learning_rate = trial.suggest_float("learning_rate", 5e-5, 2e-2, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [128, 256, 384, 512, 768])
+        beta = trial.suggest_float("beta", 0.3, 4.0)
+        warmup_epochs = trial.suggest_int("warmup_epochs", 2, 12)
+        head_epochs = trial.suggest_int("head_epochs", 1, 8)
+        finetune_epochs = trial.suggest_int("finetune_epochs", 1, 10)
 
         model = SUAVE(
             schema=schema,
@@ -227,6 +232,7 @@ def run_optuna_search(
             beta=beta,
             random_state=random_state,
             auto_parameters=False,
+            behaviour="supervised",
         )
 
         start_time = time.perf_counter()
@@ -243,10 +249,10 @@ def run_optuna_search(
         trial.set_user_attr("validation_metrics", validation_metrics)
         trial.set_user_attr("fit_seconds", fit_seconds)
 
-        auc = validation_metrics.get("AUC", float("nan"))
-        if not np.isfinite(auc):
-            raise optuna.exceptions.TrialPruned("Non-finite validation AUC")
-        return auc
+        roauc = validation_metrics.get("ROAUC", float("nan"))
+        if not np.isfinite(roauc):
+            raise optuna.exceptions.TrialPruned("Non-finite validation ROAUC")
+        return roauc
 
     study = optuna.create_study(
         direction="maximize",
@@ -614,6 +620,7 @@ def main() -> None:
             beta=float(best_params.get("beta", 1.5)),
             random_state=RANDOM_STATE,
             auto_parameters=False,
+            behaviour="supervised",
 
         )
         model.fit(
@@ -807,7 +814,7 @@ def main() -> None:
             f"{best_value:.4f}" if isinstance(best_value, (int, float)) else "n/a"
         )
         summary_lines.append(
-            f"Best Optuna trial #{best.get('trial_number')} with validation AUC {value_text}"
+            f"Best Optuna trial #{best.get('trial_number')} with validation ROAUC {value_text}"
         )
         summary_lines.append("Best parameters:")
         summary_lines.append("```json")
@@ -839,14 +846,14 @@ def main() -> None:
 
     if tstr_results is not None:
         summary_lines.append("## TSTR vs TRTR")
-        summary_lines.append("| Setting | Accuracy | AUC | AUPRC | Brier | ECE |")
+        summary_lines.append("| Setting | Accuracy | AUROC | AUPRC | Brier | ECE |")
         summary_lines.append("| --- | --- | --- | --- | --- | --- |")
         for _, row in tstr_results.iterrows():
             summary_lines.append(
-                "| {setting} | {acc:.3f} | {auc:.3f} | {auprc:.3f} | {brier:.3f} | {ece:.3f} |".format(
+                "| {setting} | {acc:.3f} | {auroc:.3f} | {auprc:.3f} | {brier:.3f} | {ece:.3f} |".format(
                     setting=row["setting"],
                     acc=row.get("accuracy", np.nan),
-                    auc=row.get("auc", np.nan),
+                    auroc=row.get("auroc", row.get("auc", np.nan)),
                     auprc=row.get("auprc", np.nan),
                     brier=row.get("brier", np.nan),
                     ece=row.get("ece", np.nan),
@@ -877,15 +884,18 @@ def main() -> None:
 
     if not membership_df.empty:
         summary_lines.append("Membership inference results:")
-        summary_lines.append("| Target | auc | accuracy | threshold |")
-        summary_lines.append("| --- | --- | --- | --- |")
+        summary_lines.append(
+            "| Target | Attack AUC | Best accuracy | Threshold | Majority baseline |"
+        )
+        summary_lines.append("| --- | --- | --- | --- | --- |")
         for _, row in membership_df.iterrows():
             summary_lines.append(
-                "| {target} | {auc:.3f} | {accuracy:.3f} | {threshold:.3f} |".format(
+                "| {target} | {auc:.3f} | {best_acc:.3f} | {threshold:.3f} | {majority:.3f} |".format(
                     target=row["target"],
-                    auc=row.get("auc", np.nan),
-                    accuracy=row.get("accuracy", np.nan),
-                    threshold=row.get("threshold", np.nan),
+                    auc=row.get("attack_auc", np.nan),
+                    best_acc=row.get("attack_best_accuracy", np.nan),
+                    threshold=row.get("attack_best_threshold", np.nan),
+                    majority=row.get("attack_majority_class_accuracy", np.nan),
                 )
             )
         summary_lines.append(
