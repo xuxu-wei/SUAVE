@@ -67,8 +67,16 @@ def _normalise_behaviour(value: str) -> str:
 
 
 class SUAVE:
-    """Model for mixed tabular data with supervised and unsupervised branches.
+    """
+    Model for mixed tabular data with supervised and unsupervised branches.
 
+    This estimator couples a VAE-style latent model for heterogeneous features
+    with an optional supervised classification head. It supports two operating
+    modes:
+
+    - ``behaviour="supervised"``: encoder/decoder + classifier head.
+    - ``behaviour="unsupervised"``: encoder/decoder only (head is disabled).
+    
     Parameters
     ----------
     schema : Schema, optional
@@ -152,6 +160,49 @@ class SUAVE:
     SUAVE.predict_proba : Produce calibrated class probabilities.
     SUAVE.sample : Generate synthetic samples from the learned model.
 
+    --------
+    Training schedule (how the epoch knobs interact)
+    --------
+    The full training routine is divided into stages. Understanding the schedule
+    clarifies how ``warmup_epochs``, ``kl_warmup_epochs``, ``head_epochs`` and
+    ``finetune_epochs`` work together.
+
+    1) Warm-up (ELBO-only):
+       Controlled by ``warmup_epochs``.
+       - Only the encoder/decoder/prior are optimized against the ELBO
+         (reconstruction - β·KL). The classifier head is **not** used here.
+       - ``kl_warmup_epochs`` controls the *annealing of β* **within** this
+         warm-up stage: β is linearly ramped from ~0 to the configured ``beta``
+         across ``kl_warmup_epochs * n_batches`` steps.
+       - Practical implication:
+         * If ``kl_warmup_epochs <= warmup_epochs``, β typically reaches its
+           target by the end of warm-up.
+         * If ``kl_warmup_epochs > warmup_epochs``, β may still be < target at
+           warm-up end (intentional if you want a gentler KL schedule).
+         * If ``warmup_epochs == 0``, no ELBO warm-up or KL annealing occurs.
+
+    2) Head-only (supervised mode only):
+       Controlled by ``head_epochs`` (ignored in unsupervised mode).
+       - The classifier head is trained **alone** on cached latent means; the
+         encoder/decoder are frozen. This isolates the head’s optimization.
+
+    3) Joint fine-tuning (supervised mode only):
+       Controlled by ``finetune_epochs`` (ignored in unsupervised mode).
+       - Encoder, decoder, prior and head are optimized **together**.
+       - ``joint_decoder_lr_scale`` scales decoder/prior LR relative to the
+         encoder/head (often < 1 to stabilize updates).
+       - Early stopping is applied with ``early_stop_patience`` on validation
+         metrics; the best checkpoint is restored at the end.
+
+    Visual timeline (supervised):
+        [ ELBO warm-up ]  ->  [ head-only ]  ->  [ joint fine-tune ]
+        warmup_epochs         head_epochs          finetune_epochs
+
+    Visual timeline (unsupervised):
+        [ ELBO warm-up only ]
+        warmup_epochs
+        (``head_epochs`` and ``finetune_epochs`` are ignored)
+        
     Examples
     --------
     >>> import pandas as pd
