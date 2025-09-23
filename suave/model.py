@@ -102,9 +102,6 @@ class SUAVE:
     batch_size : int, default 128
         Mini-batch size consumed by :meth:`fit` and downstream inference
         utilities.
-    kl_warmup_epochs : int, default 10
-        Number of epochs used to linearly anneal the KL divergence weight during
-        the warm-up phase.
     val_split : float, default 0.2
         Ratio of samples assigned to the internal validation split constructed
         inside :meth:`fit`.
@@ -131,6 +128,9 @@ class SUAVE:
     warmup_epochs : int, default 10
         Number of epochs dedicated to ELBO-only optimisation before the
         classifier head is trained.
+    kl_warmup_epochs : int, default 10
+        Number of epochs used to linearly anneal the KL divergence weight during
+        the warm-up phase.
     head_epochs : int, default 5
         Number of epochs allocated to the classifier-head-only optimisation
         stage.
@@ -156,9 +156,16 @@ class SUAVE:
 
     See Also
     --------
-    SUAVE.fit : Optimise the encoder/decoder and optional classifier head.
-    SUAVE.predict_proba : Produce calibrated class probabilities.
-    SUAVE.sample : Generate synthetic samples from the learned model.
+    fit : Optimize encoder/decoder and (when supervised) the classifier head.
+    calibrate : Temperature-scale logits on held-out data for better calibration.
+    predict_proba : Calibrated class probabilities (or posterior predictive for an attribute).
+    predict : Class labels (supervised) or attribute predictions/samples.
+    predict_confidence_interval : Posterior predictive mean/median and CI for real/pos/count.
+    encode : Latent posterior means (optionally component assignments/params).
+    impute : Single-pass decoder imputation of missing entries.
+    sample : Draw synthetic rows (optionally conditional on labels in supervised mode).
+    save : Serialize a trained model to disk.
+    load : Restore a serialized model and make it ready for inference.
 
     --------
     Training schedule (how the epoch knobs interact)
