@@ -50,7 +50,7 @@ class Schema:
         Mapping of column names to dictionaries with at least the ``"type"``
         key. Supported types are:
             - ``"real"`` : continuous values (Gaussian head),
-            - ``"pos"`` : positive real values (log-normal head),
+            - ``"pos"`` : non-negative real values (``log1p`` + log-normal head),
             - ``"count"`` : non-negative integers (Poisson head),
             - ``"cat"`` : categorical (requires ``"n_classes"``),
             - ``"ordinal"`` : ordered discrete (requires ``"n_classes"``).
