@@ -159,3 +159,27 @@ def test_long_integer_ladder_prefers_count_over_categorical() -> None:
     result = inferencer.infer(df, mode=SchemaInferenceMode.SILENT)
 
     assert result.schema.to_dict()["cycled_counts"] == {"type": "count"}
+
+
+def test_low_cardinality_integer_with_wide_dispersion_prefers_real() -> None:
+    repeated = np.tile(np.array([0.0, 100.0, 200.0, 300.0]), 25)
+    series = pd.Series(repeated)
+
+    inferencer = SchemaInferencer()
+    spec, note, confidence = inferencer._infer_numeric_schema(series)
+
+    assert spec == {"type": "real"}
+    assert "Dispersion suggests continuous behaviour despite low cardinality." in note
+    assert confidence is InferenceConfidence.MEDIUM
+
+
+def test_low_dispersion_float_prefers_categorical() -> None:
+    tiny_variation = np.repeat(np.array([0.1, 0.1000005]), 50)
+    series = pd.Series(tiny_variation)
+
+    inferencer = SchemaInferencer()
+    spec, note, confidence = inferencer._infer_numeric_schema(series)
+
+    assert spec == {"type": "cat", "n_classes": 2}
+    assert note == "Dispersion too small; defaulting to categorical."
+    assert confidence is InferenceConfidence.LOW

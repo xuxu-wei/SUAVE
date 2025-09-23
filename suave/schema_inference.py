@@ -424,14 +424,6 @@ class SchemaInferencer:
                     review_reasons.append("Count ladder close to categorical ratio boundary.")
                 return finalize({"type": "count"}, reasons=review_reasons)
 
-            if nunique <= MAX_CATEGORICAL_UNIQUE and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD:
-                if (
-                    abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN
-                    or nunique >= MAX_CATEGORICAL_UNIQUE - REVIEW_UNIQUE_MARGIN
-                ):
-                    review_reasons.append("Discrete integer near categorical thresholds.")
-                return finalize(self._categorical_spec(nunique), reasons=review_reasons)
-
             if std <= SMALL_STD_THRESHOLD or value_range <= SMALL_RANGE_THRESHOLD:
                 review_reasons.append("Dispersion too small; treating as categorical.")
                 return finalize(
@@ -439,6 +431,19 @@ class SchemaInferencer:
                     reasons=review_reasons,
                     forced=InferenceConfidence.LOW,
                 )
+
+            if nunique <= MAX_CATEGORICAL_UNIQUE and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD:
+                if std >= STD_REAL_FALLBACK or value_range >= RANGE_REAL_FALLBACK:
+                    review_reasons.append(
+                        "Dispersion suggests continuous behaviour despite low cardinality."
+                    )
+                    return finalize({"type": "real"}, reasons=review_reasons)
+                if (
+                    abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN
+                    or nunique >= MAX_CATEGORICAL_UNIQUE - REVIEW_UNIQUE_MARGIN
+                ):
+                    review_reasons.append("Discrete integer near categorical thresholds.")
+                return finalize(self._categorical_spec(nunique), reasons=review_reasons)
 
             if non_negative and (
                 skewness >= POSITIVE_SKEW_THRESHOLD or ratio >= POSITIVE_MAX_MEAN_RATIO
@@ -451,23 +456,6 @@ class SchemaInferencer:
                 review_reasons.append("Integer feature near categorical threshold.")
             return finalize({"type": "real"}, reasons=review_reasons)
 
-        if nunique <= MAX_CATEGORICAL_UNIQUE and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD:
-            if non_missing and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD + REVIEW_RATIO_MARGIN:
-                review_reasons.append("Binary ratio near categorical threshold.")
-            return finalize(self._categorical_spec(nunique), reasons=review_reasons)
-
-        if std <= SMALL_STD_THRESHOLD or value_range <= SMALL_RANGE_THRESHOLD:
-            review_reasons.append("Dispersion suggests continuous behaviour despite low cardinality.")
-            return finalize({"type": "real"}, reasons=review_reasons)
-
-        if nunique <= MAX_CATEGORICAL_UNIQUE and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD:
-            if (
-                abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN
-                or nunique >= MAX_CATEGORICAL_UNIQUE - REVIEW_UNIQUE_MARGIN
-            ):
-                review_reasons.append("Floating feature near categorical thresholds.")
-            return finalize(self._categorical_spec(nunique), reasons=review_reasons)
-
         if std <= SMALL_STD_THRESHOLD or value_range <= SMALL_RANGE_THRESHOLD:
             review_reasons.append("Dispersion too small; defaulting to categorical.")
             return finalize(
@@ -475,6 +463,21 @@ class SchemaInferencer:
                 reasons=review_reasons,
                 forced=InferenceConfidence.LOW,
             )
+
+        if nunique <= MAX_CATEGORICAL_UNIQUE and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD:
+            if std >= STD_REAL_FALLBACK or value_range >= RANGE_REAL_FALLBACK:
+                review_reasons.append(
+                    "Dispersion suggests continuous behaviour despite low cardinality."
+                )
+                return finalize({"type": "real"}, reasons=review_reasons)
+            if non_missing and unique_ratio <= NUMERIC_CATEGORICAL_THRESHOLD + REVIEW_RATIO_MARGIN:
+                review_reasons.append("Binary ratio near categorical threshold.")
+            if (
+                abs(unique_ratio - NUMERIC_CATEGORICAL_THRESHOLD) <= REVIEW_RATIO_MARGIN
+                or nunique >= MAX_CATEGORICAL_UNIQUE - REVIEW_UNIQUE_MARGIN
+            ):
+                review_reasons.append("Floating feature near categorical thresholds.")
+            return finalize(self._categorical_spec(nunique), reasons=review_reasons)
 
         positive_support = min_value > 0 or (min_value == 0 and max_value > 0)
         if positive_support and (
