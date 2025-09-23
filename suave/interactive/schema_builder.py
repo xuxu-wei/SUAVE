@@ -600,7 +600,7 @@ def launch_schema_builder(
     Examples
     --------
     >>> import pandas as pd
-    >>> from SUAVE.interactive import launch_schema_builder
+    >>> from suave.interactive import launch_schema_builder
     >>> df = pd.DataFrame({"age": [25, 30], "sex": ["F", "M"]})
     >>> schema = launch_schema_builder(df, open_browser=False)  # doctest: +SKIP
     >>> schema.to_dict()  # doctest: +SKIP
