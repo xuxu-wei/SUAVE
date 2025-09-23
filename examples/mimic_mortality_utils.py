@@ -32,6 +32,8 @@ __all__ = [
     "CALIBRATION_SIZE",
     "VALIDATION_SIZE",
     "Schema",
+    "SchemaInferenceMode",
+    "SchemaInferencer",
     "load_dataset",
     "define_schema",
     "prepare_features",
@@ -52,14 +54,14 @@ def load_dataset(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, sep="\t")
 
 
-def define_schema(df: pd.DataFrame, feature_columns: Iterable[str]) -> Schema:
+def define_schema(df: pd.DataFrame, feature_columns: Iterable[str], mode=SchemaInferenceMode.INFO) -> Schema:
     """Create a :class:`Schema` describing ``df``'s feature columns."""
 
     inferencer = SchemaInferencer(categorical_overrides=CATEGORICAL_FEATURES)
     result = inferencer.infer(
         df,
         feature_columns,
-        mode=SchemaInferenceMode.INFO,
+        mode=mode,
     )
     for message in result.messages:
         print(f"[schema] {message}")

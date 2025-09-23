@@ -39,8 +39,28 @@ MIN_NUMERIC_COVERAGE = 0.95
 
 
 class SchemaInferenceMode(str, Enum):
-    """Enumeration of the available schema inference modes."""
+    """
+    Enumeration of available schema inference modes.
 
+    Members
+    -------
+    SILENT : str
+        Run inference without emitting human-readable messages or
+        launching any review UI.
+    INFO : str
+        Run inference and collect human-readable messages for columns
+        that lie near heuristic thresholds. Does not launch an
+        interactive UI.
+    INTERACTIVE : str
+        Like ``INFO`` but attempts to launch an interactive
+        review/confirmation UI when the current environment supports it
+        (GUI backend and display available).
+
+    Notes
+    -----
+    The interactive mode falls back to non-interactive behavior when
+    a supported matplotlib backend or display server is not available.
+    """
     SILENT = "silent"
     INFO = "info"
     INTERACTIVE = "interactive"
@@ -48,7 +68,30 @@ class SchemaInferenceMode(str, Enum):
 
 @dataclass
 class SchemaInferenceResult:
-    """Container with the output of :class:`SchemaInferencer.infer`."""
+    """
+    Container for the output of :meth:`SchemaInferencer.infer`.
+
+    Parameters
+    ----------
+    schema : Schema
+        The inferred :class:`Schema` object describing feature types and
+        auxiliary attributes (e.g., ``n_classes`` for categorical/ordinal).
+    mode : SchemaInferenceMode
+        The mode in which inference was executed.
+    review_columns : list of str
+        Column names that were flagged for review based on proximity to
+        heuristic decision boundaries or other diagnostics.
+    column_notes : Mapping[str, str]
+        Per-column notes describing why a feature was flagged or how it
+        was treated during inference.
+    messages : list of str
+        Human-readable diagnostics and status messages suitable for logging
+        or console display.
+
+    See Also
+    --------
+    SchemaInferencer.infer : Runs schema inference and returns this object.
+    """
 
     schema: Schema
     mode: SchemaInferenceMode
@@ -58,16 +101,40 @@ class SchemaInferenceResult:
 
 
 class SchemaInferencer:
-    """Infer a :class:`Schema` from a dataframe using descriptive statistics.
+    """
+    Infer a :class:`Schema` from a pandas DataFrame using simple descriptive
+    statistics and heuristics, with optional human-in-the-loop review.
 
     Parameters
     ----------
-    categorical_overrides:
-        Columns that must always be considered categorical regardless of their
-        observed statistics.
+    categorical_overrides : iterable of str, optional
+        Columns that must always be treated as categorical regardless of the
+        observed statistics. Useful for ID-like integers, booleans encoded
+        as 0/1, or known enumerations.
+
+    Notes
+    -----
+    The inferencer first attempts to recognize numeric features (including
+    integer-like floats and strings convertible to numerics) and then decides
+    among ``real``, ``pos``, ``count``, ``cat``, or ``ordinal`` based on
+    distributional characteristics (cardinality, dispersion, skewness, range,
+    and support). Columns close to decision thresholds are flagged for review.
     """
 
     def __init__(self, *, categorical_overrides: Optional[Iterable[str]] = None):
+        """
+        Construct a new :class:`SchemaInferencer`.
+
+        Parameters
+        ----------
+        categorical_overrides : iterable of str, optional
+            Column names to force as categorical irrespective of measured
+            statistics.
+
+        Examples
+        --------
+        >>> inferencer = SchemaInferencer(categorical_overrides={"sex", "CRRT"})
+        """
         self._categorical_overrides = set(categorical_overrides or [])
 
     # ------------------------------------------------------------------
@@ -80,13 +147,36 @@ class SchemaInferencer:
         *,
         mode: SchemaInferenceMode = SchemaInferenceMode.SILENT,
     ) -> SchemaInferenceResult:
-        """Infer a :class:`Schema` from ``df`` under the requested ``mode``.
+        """
+        Infer a :class:`Schema` from ``df`` under the requested ``mode``.
 
-        The silent mode returns the automatically inferred schema.  Info mode
-        includes human-readable messages for columns that are close to the
-        heuristic thresholds.  Interactive mode optionally launches a review UI
-        when the environment supports it, allowing users to confirm or adjust
-        the inferred types.
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Input data frame containing candidate feature columns.
+        feature_columns : iterable of str, optional
+            Subset of columns to consider. If ``None``, all columns in ``df``
+            are processed.
+        mode : SchemaInferenceMode, default: ``SchemaInferenceMode.SILENT``
+            Controls verbosity and whether an interactive review UI is
+            attempted.
+
+        Returns
+        -------
+        SchemaInferenceResult
+            Object containing the inferred schema and review diagnostics.
+
+        See Also
+        --------
+        SchemaInferencer._infer_column_schema : Column-level inference routine.
+
+        Notes
+        -----
+        - In ``INFO`` and ``INTERACTIVE`` modes, columns near decision
+          thresholds are listed in ``result.review_columns`` and explanatory
+          notes are attached in ``result.column_notes``.
+        - In ``INTERACTIVE`` mode, a GUI may be launched (environment
+          permitting) to let users confirm/override inferred types.
         """
 
         columns = list(feature_columns) if feature_columns is not None else list(df.columns)
