@@ -54,7 +54,7 @@ labels = model.predict(train_X.tail(5))
 
 若跳过第 1 步，`SUAVE.fit` 会在 `mode="info"` 下自动推断 schema，便于快速验证流程；对于生产数据，推荐开启交互式审阅以突显需要手动检查的列。
 
-完整示例可参考 [`examples/sepsis_minimal.py`](examples/sepsis_minimal.py)。
+完整示例可参考 [`examples/mimic_mortality_supervised.ipynb`](examples/sepsis_minimal.py)。
 
 ## API 概览
 
@@ -167,11 +167,3 @@ restored.predict_proba(test_X)
 ```
 
 保存的模型文件包含 schema 信息、参数权重与校准状态，可直接复现部署推理。
-
-## 规划
-
-- 在保持显式控制的同时扩展自动 Schema 工具。
-- 引入基于后验分量分配的反事实采样接口。
-- 将模型可解释性报告整合到训练流程中。
-
-欢迎社区反馈与贡献！

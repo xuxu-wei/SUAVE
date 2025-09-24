@@ -57,7 +57,7 @@ If you skip step 1, ``SUAVE.fit`` automatically infers a schema using
 recommended for production datasets because it highlights columns that deserve a
 manual check.
 
-For an end-to-end demonstration, see [`examples/sepsis_minimal.py`](examples/sepsis_minimal.py).
+For an end-to-end demonstration, see  [`examples/mimic_mortality_supervised.ipynb`](examples/mimic_mortality_supervised.ipynb).
 
 ## API overview
 
