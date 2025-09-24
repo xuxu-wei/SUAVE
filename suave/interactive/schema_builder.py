@@ -12,6 +12,7 @@ import json
 import threading
 import time
 import webbrowser
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, MutableMapping, Optional
 
@@ -274,6 +275,80 @@ button.secondary {
     color: #5f6368;
     font-size: 0.82rem;
 }
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 3000;
+}
+.modal-overlay[hidden] {
+    display: none;
+}
+.modal-content {
+    background: #ffffff;
+    border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(15, 23, 42, 0.2);
+    max-width: min(520px, 95vw);
+    width: 100%;
+    padding: 24px;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+.modal-content h2 {
+    margin-top: 0;
+    margin-bottom: 8px;
+}
+.modal-content p {
+    margin-top: 0;
+}
+.summary-list {
+    margin-top: 12px;
+}
+.summary-entry + .summary-entry {
+    margin-top: 12px;
+}
+.summary-entry-title {
+    font-weight: 600;
+}
+.summary-entry-body {
+    margin-top: 4px;
+    font-size: 0.9rem;
+    color: #424242;
+}
+.code-container {
+    margin-top: 16px;
+}
+.code-label {
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #5f6368;
+    margin-bottom: 6px;
+}
+.code-block {
+    background: #1f1f1f;
+    color: #f5f5f5;
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-family: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+    font-size: 0.85rem;
+    white-space: pre;
+    overflow-x: auto;
+}
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 24px;
+    flex-wrap: wrap;
+}
+.is-hidden {
+    display: none !important;
+}
 </style>
 </head>
 <body>
@@ -324,6 +399,29 @@ button.secondary {
   <div style="margin-top:16px;">
     <button id="finalize" class="primary">Save schema</button>
   </div>
+  <div
+    id="summary-modal"
+    class="modal-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="summary-title"
+    tabindex="-1"
+    hidden
+  >
+    <div class="modal-content" role="document">
+      <h2 id="summary-title">Schema saved</h2>
+      <p id="summary-intro">Here is a summary of the adjustments you made.</p>
+      <div id="summary-details" class="summary-list"></div>
+      <div id="summary-code-container" class="code-container is-hidden">
+        <div class="code-label">Python snippet</div>
+        <pre id="summary-code" class="code-block"></pre>
+      </div>
+      <div class="modal-actions">
+        <button id="copy-summary" class="secondary" type="button">Copy code</button>
+        <button id="close-summary" class="primary" type="button">Close</button>
+      </div>
+    </div>
+  </div>
 </main>
 <script>
 const TYPE_OPTIONS = ["real", "pos", "count", "cat", "ordinal"];
@@ -333,6 +431,15 @@ let currentColumns = [];
 let sortConfig = { key: "position", direction: "asc" };
 let floatingTooltip = null;
 let activeTooltipTarget = null;
+const summaryModal = document.getElementById("summary-modal");
+const summaryIntro = document.getElementById("summary-intro");
+const summaryDetails = document.getElementById("summary-details");
+const summaryCodeContainer = document.getElementById("summary-code-container");
+const summaryCodeBlock = document.getElementById("summary-code");
+const copySummaryButton = document.getElementById("copy-summary");
+const closeSummaryButton = document.getElementById("close-summary");
+let latestPythonSnippet = "";
+let previousBodyOverflow = "";
 
 const sortKeySelect = document.getElementById("sort-key");
 const sortDirectionButton = document.getElementById("sort-direction");
@@ -358,6 +465,149 @@ function updateSortDirectionButton() {
     );
 }
 
+function formatSummaryValue(value) {
+    if (value === undefined) {
+        return "—";
+    }
+    if (value === null) {
+        return "null";
+    }
+    if (typeof value === "object") {
+        return JSON.stringify(value);
+    }
+    return String(value);
+}
+
+function describeChange(change) {
+    const before = change.before || {};
+    const after = change.after || {};
+    const keys = new Set([
+        ...Object.keys(before || {}),
+        ...Object.keys(after || {}),
+    ]);
+    const details = [];
+    keys.forEach((key) => {
+        const beforeValue = before ? before[key] : undefined;
+        const afterValue = after ? after[key] : undefined;
+        if (JSON.stringify(beforeValue) === JSON.stringify(afterValue)) {
+            return;
+        }
+        details.push(
+            `${key}: ${formatSummaryValue(beforeValue)} → ${formatSummaryValue(afterValue)}`,
+        );
+    });
+    return details.join("; ");
+}
+
+function clearSummaryModal() {
+    if (summaryDetails) {
+        summaryDetails.innerHTML = "";
+    }
+    if (summaryCodeBlock) {
+        summaryCodeBlock.textContent = "";
+    }
+    if (copySummaryButton) {
+        copySummaryButton.textContent = "Copy code";
+    }
+}
+
+function openSummaryModal(payload) {
+    if (!summaryModal) {
+        return;
+    }
+    clearSummaryModal();
+    const hasPayload = typeof payload === "object" && payload !== null;
+    const changes = hasPayload && Array.isArray(payload.changes) ? payload.changes : [];
+    latestPythonSnippet = hasPayload && typeof payload.python === "string" ? payload.python : "";
+
+    if (summaryIntro) {
+        summaryIntro.textContent = changes.length
+            ? "Here is a summary of the adjustments you made."
+            : "No columns were modified. The inferred schema was saved as-is.";
+    }
+
+    if (summaryDetails && changes.length) {
+        changes.forEach((change) => {
+            const container = document.createElement("div");
+            container.className = "summary-entry";
+            const title = document.createElement("div");
+            title.className = "summary-entry-title";
+            title.textContent = change.column;
+            container.appendChild(title);
+            const body = document.createElement("div");
+            body.className = "summary-entry-body";
+            body.textContent = describeChange(change) || "Column updated.";
+            container.appendChild(body);
+            summaryDetails.appendChild(container);
+        });
+    }
+
+    if (summaryCodeContainer) {
+        if (latestPythonSnippet) {
+            summaryCodeContainer.classList.remove("is-hidden");
+        } else {
+            summaryCodeContainer.classList.add("is-hidden");
+        }
+    }
+
+    if (summaryCodeBlock && latestPythonSnippet) {
+        summaryCodeBlock.textContent = latestPythonSnippet;
+    }
+
+    if (copySummaryButton) {
+        copySummaryButton.disabled = latestPythonSnippet.length === 0;
+        copySummaryButton.textContent = "Copy code";
+    }
+
+    previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    summaryModal.removeAttribute("hidden");
+    summaryModal.focus({ preventScroll: true });
+    if (closeSummaryButton) {
+        closeSummaryButton.focus({ preventScroll: true });
+    }
+}
+
+function closeSummaryModal() {
+    if (!summaryModal) {
+        return;
+    }
+    summaryModal.setAttribute("hidden", "hidden");
+    document.body.style.overflow = previousBodyOverflow;
+}
+
+async function copySummaryCode() {
+    if (!latestPythonSnippet) {
+        return;
+    }
+    if (!copySummaryButton) {
+        return;
+    }
+    try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+            await navigator.clipboard.writeText(latestPythonSnippet);
+        } else {
+            const helper = document.createElement("textarea");
+            helper.value = latestPythonSnippet;
+            helper.setAttribute("readonly", "");
+            helper.style.position = "fixed";
+            helper.style.opacity = "0";
+            document.body.appendChild(helper);
+            helper.select();
+            document.execCommand("copy");
+            document.body.removeChild(helper);
+        }
+        copySummaryButton.textContent = "Copied!";
+        setTimeout(() => {
+            if (copySummaryButton) {
+                copySummaryButton.textContent = "Copy code";
+            }
+        }, 2000);
+    } catch (error) {
+        alert("Unable to copy code automatically. Please copy it manually.");
+    }
+}
+
 if (sortKeySelect) {
     sortKeySelect.addEventListener("change", () => {
         sortConfig.key = sortKeySelect.value;
@@ -373,6 +623,32 @@ if (sortDirectionButton) {
     });
     updateSortDirectionButton();
 }
+
+if (copySummaryButton) {
+    copySummaryButton.addEventListener("click", () => {
+        void copySummaryCode();
+    });
+}
+
+if (closeSummaryButton) {
+    closeSummaryButton.addEventListener("click", () => {
+        closeSummaryModal();
+    });
+}
+
+if (summaryModal) {
+    summaryModal.addEventListener("click", (event) => {
+        if (event.target === summaryModal) {
+            closeSummaryModal();
+        }
+    });
+}
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && summaryModal && !summaryModal.hasAttribute("hidden")) {
+        closeSummaryModal();
+    }
+});
 
 function createOption(option, selected) {
     const choice = document.createElement("option");
@@ -832,9 +1108,13 @@ body { font-family: "Segoe UI", Arial, sans-serif; margin: 16px; }
 
 async function finalizeSchema() {
     const button = document.getElementById("finalize");
+    if (!button) {
+        return;
+    }
     button.disabled = true;
     const originalText = button.textContent;
     button.textContent = "Saving...";
+    let success = false;
     try {
         const response = await fetch("/api/finalize", { method: "POST" });
         const data = await response.json();
@@ -842,12 +1122,15 @@ async function finalizeSchema() {
             throw new Error(data.error || `Server responded with ${response.status}`);
         }
         window.__schemaFinalized = true;
-        alert('Schema saved. You can now close this tab.');
+        success = true;
+        openSummaryModal(data);
     } catch (error) {
         alert(`Failed to save schema: ${error.message}`);
     } finally {
-        button.disabled = false;
         button.textContent = originalText;
+        if (!success) {
+            button.disabled = false;
+        }
     }
 }
 
@@ -989,8 +1272,15 @@ class _SchemaBuilder:
         self._schema_dict: Dict[str, MutableMapping[str, object]] = json.loads(
             json.dumps(inference.schema.to_dict())
         )
+        self._initial_schema: Dict[str, Dict[str, object]] = json.loads(
+            json.dumps(self._schema_dict)
+        )
         self._notes = dict(inference.column_notes)
-        self._messages = list(inference.messages)
+        self._messages = [
+            message
+            for message in inference.messages
+            if "flagged for review" not in message.lower()
+        ]
         self._confidence_map: Dict[str, str] = {}
         for name in self._schema_dict:
             raw_confidence = inference.column_confidence.get(name, "high")
@@ -1127,8 +1417,18 @@ class _SchemaBuilder:
                     self._result_schema = Schema(dict(self._schema_dict))
                 except ValueError as error:
                     return jsonify({"error": str(error)}), 400
+                changes, changed_specs = _summarise_schema_changes(
+                    self._initial_schema,
+                    self._schema_dict,
+                )
+                python_code = _format_python_update(changed_specs)
+                response_payload = {
+                    "status": "ok",
+                    "changes": changes,
+                    "python": python_code,
+                }
                 self._stop_event.set()
-            return jsonify({"status": "ok"})
+            return jsonify(response_payload)
 
         @app.post("/api/cancel")
         def cancel():
@@ -1204,6 +1504,42 @@ def _distribution_payload(series: pd.Series, column: str) -> Dict[str, object]:
         "x_label": "Category",
         "y_label": "Count",
     }
+
+
+def _normalise_schema_spec(
+    spec: Optional[MutableMapping[str, object]] | Dict[str, object] | None,
+) -> Optional[Dict[str, object]]:
+    if spec is None:
+        return None
+    return json.loads(json.dumps(spec))
+
+
+def _summarise_schema_changes(
+    initial: Dict[str, Dict[str, object]],
+    current: Dict[str, MutableMapping[str, object]],
+) -> tuple[List[Dict[str, object]], OrderedDict[str, Dict[str, object]]]:
+    changes: List[Dict[str, object]] = []
+    changed_specs: OrderedDict[str, Dict[str, object]] = OrderedDict()
+    for column, spec in current.items():
+        after = _normalise_schema_spec(spec)
+        before = _normalise_schema_spec(initial.get(column))
+        if before != after:
+            changes.append({"column": column, "before": before, "after": after})
+            if after is not None:
+                changed_specs[column] = after
+    return changes, changed_specs
+
+
+def _format_python_update(
+    changed_specs: OrderedDict[str, Dict[str, object]],
+) -> str:
+    if not changed_specs:
+        return ""
+    lines = ["schema.update({"]
+    for column, spec in changed_specs.items():
+        lines.append(f"    {column!r}: {spec!r},")
+    lines.append("})")
+    return "\n".join(lines)
 
 
 def _coerce_optional_positive_int(value: object) -> Optional[int]:
