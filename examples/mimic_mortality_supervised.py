@@ -47,7 +47,7 @@ from mimic_mortality_utils import (
     VALIDATION_SIZE,
     Schema,
     define_schema,
-    
+
     kolmogorov_smirnov_statistic,
     load_dataset,
     mutual_information_feature,
@@ -56,6 +56,7 @@ from mimic_mortality_utils import (
     split_train_validation_calibration,
     to_numeric_frame,
 )
+from cls_eval import evaluate_predictions, write_results_to_excel_unique
 
 from suave import SUAVE
 from suave.evaluate import evaluate_tstr, evaluate_trtr, simple_membership_inference
@@ -739,6 +740,164 @@ render_dataframe(
 
 
 #%% [markdown]
+# ## Bootstrap benchmarking
+#
+# Derive confidence intervals for each cohort using the reusable classification
+# evaluation helpers. The exported artefacts include per-dataset Excel sheets,
+# summary tables, and optional warnings when probability columns require
+# renormalisation.
+
+# %%
+
+bootstrap_results: Dict[str, Dict[str, pd.DataFrame]] = {}
+bootstrap_overall_frames: List[pd.DataFrame] = []
+bootstrap_per_class_frames: List[pd.DataFrame] = []
+bootstrap_warnings_frames: List[pd.DataFrame] = []
+
+model_classes_array = getattr(model, "_classes", None)
+if model_classes_array is None or len(model_classes_array) == 0:
+    model_classes_array = np.unique(np.asarray(y_train_model))
+class_value_list = list(model_classes_array)
+class_name_strings = [str(value) for value in class_value_list]
+positive_label_name = class_name_strings[-1] if len(class_name_strings) == 2 else None
+
+
+def build_prediction_dataframe(
+    probabilities: np.ndarray,
+    labels: pd.Series | np.ndarray,
+    predictions: np.ndarray,
+) -> pd.DataFrame:
+    """Assemble a dataframe compatible with :func:`evaluate_predictions`."""
+
+    prob_matrix = np.asarray(probabilities)
+    if prob_matrix.ndim == 1:
+        if len(class_name_strings) == 2:
+            negative_name, positive_name = class_name_strings[0], class_name_strings[-1]
+            proba_dict = {
+                f"pred_proba_{negative_name}": 1.0 - prob_matrix,
+                f"pred_proba_{positive_name}": prob_matrix,
+            }
+        else:
+            proba_dict = {"pred_proba_0": prob_matrix}
+    else:
+        if prob_matrix.shape[1] == len(class_name_strings) and len(class_name_strings) > 0:
+            proba_dict = {
+                f"pred_proba_{class_name_strings[idx]}": prob_matrix[:, idx]
+                for idx in range(prob_matrix.shape[1])
+            }
+        else:
+            proba_dict = {
+                f"pred_proba_{idx}": prob_matrix[:, idx]
+                for idx in range(prob_matrix.shape[1])
+            }
+
+    base_df = pd.DataFrame(
+        {
+            "label": np.asarray(labels),
+            "y_pred": np.asarray(predictions),
+        }
+    )
+    if proba_dict:
+        proba_df = pd.DataFrame(proba_dict)
+        base_df = pd.concat([base_df.reset_index(drop=True), proba_df], axis=1)
+    else:
+        base_df = base_df.reset_index(drop=True)
+    return base_df
+
+
+for dataset_name, (features, labels) in evaluation_datasets.items():
+    dataset_predictions = model.predict(features)
+    dataset_probabilities = probability_map[dataset_name]
+    prediction_df = build_prediction_dataframe(
+        dataset_probabilities,
+        labels,
+        dataset_predictions,
+    )
+
+    results = evaluate_predictions(
+        prediction_df,
+        label_col="label",
+        pred_col="y_pred",
+        positive_label=positive_label_name,
+        bootstrap_n=1000,
+        random_state=RANDOM_STATE,
+    )
+    bootstrap_results[dataset_name] = results
+
+    overall_df = results["overall"].copy()
+    overall_df.insert(0, "Dataset", dataset_name)
+    overall_df.insert(0, "Target", TARGET_LABEL)
+    bootstrap_overall_frames.append(overall_df)
+
+    per_class_df = results["per_class"].copy()
+    per_class_df.insert(0, "Dataset", dataset_name)
+    per_class_df.insert(0, "Target", TARGET_LABEL)
+    bootstrap_per_class_frames.append(per_class_df)
+
+    warnings_df = results.get("warnings")
+    if warnings_df is not None and not warnings_df.empty:
+        warnings_copy = warnings_df.copy()
+        warnings_copy.insert(0, "Dataset", dataset_name)
+        warnings_copy.insert(0, "Target", TARGET_LABEL)
+        bootstrap_warnings_frames.append(warnings_copy)
+
+
+bootstrap_overall_df = pd.concat(bootstrap_overall_frames, ignore_index=True)
+bootstrap_per_class_df = pd.concat(bootstrap_per_class_frames, ignore_index=True)
+bootstrap_overall_path = OUTPUT_DIR / f"bootstrap_overall_{TARGET_LABEL}.csv"
+bootstrap_per_class_path = OUTPUT_DIR / f"bootstrap_per_class_{TARGET_LABEL}.csv"
+bootstrap_overall_df.to_csv(bootstrap_overall_path, index=False)
+bootstrap_per_class_df.to_csv(bootstrap_per_class_path, index=False)
+
+bootstrap_warning_path: Optional[Path]
+if bootstrap_warnings_frames:
+    bootstrap_warning_df = pd.concat(bootstrap_warnings_frames, ignore_index=True)
+    bootstrap_warning_path = OUTPUT_DIR / f"bootstrap_warnings_{TARGET_LABEL}.csv"
+    bootstrap_warning_df.to_csv(bootstrap_warning_path, index=False)
+else:
+    bootstrap_warning_path = None
+
+bootstrap_excel_path = OUTPUT_DIR / f"bootstrap_{TARGET_LABEL}.xlsx"
+write_results_to_excel_unique(
+    bootstrap_results,
+    str(bootstrap_excel_path),
+    include_warnings_sheet=True,
+)
+
+summary_metric_candidates = [
+    "accuracy",
+    "balanced_accuracy",
+    "f1_macro",
+    "recall_macro",
+    "specificity_macro",
+    "sensitivity_pos",
+    "specificity_pos",
+    "roc_auc",
+    "pr_auc",
+]
+summary_columns: List[str] = ["Target", "Dataset"]
+for metric_name in summary_metric_candidates:
+    if metric_name in bootstrap_overall_df.columns:
+        summary_columns.append(metric_name)
+        low_col = f"{metric_name}_ci_low"
+        high_col = f"{metric_name}_ci_high"
+        if low_col in bootstrap_overall_df.columns:
+            summary_columns.append(low_col)
+        if high_col in bootstrap_overall_df.columns:
+            summary_columns.append(high_col)
+
+
+bootstrap_summary_df = bootstrap_overall_df.loc[:, summary_columns]
+bootstrap_summary_path = OUTPUT_DIR / f"bootstrap_summary_{TARGET_LABEL}.csv"
+bootstrap_summary_df.to_csv(bootstrap_summary_path, index=False)
+render_dataframe(
+    bootstrap_summary_df,
+    title=f"Bootstrap performance with confidence intervals for {TARGET_LABEL}",
+    floatfmt=".3f",
+)
+
+
+#%% [markdown]
 # ## TSTR/TRTR comparison
 #
 # Compare models trained on synthetic versus real data. The analysis is only
@@ -894,6 +1053,25 @@ summary_lines.append(
 summary_lines.append(
     f"Latent projection: {latent_path.relative_to(OUTPUT_DIR)}"
 )
+summary_lines.append("")
+
+summary_lines.append("Bootstrap evaluation artefacts:")
+summary_lines.append(
+    f"- Summary table: {bootstrap_summary_path.relative_to(OUTPUT_DIR)}"
+)
+summary_lines.append(
+    f"- Overall metrics: {bootstrap_overall_path.relative_to(OUTPUT_DIR)}"
+)
+summary_lines.append(
+    f"- Per-class metrics: {bootstrap_per_class_path.relative_to(OUTPUT_DIR)}"
+)
+summary_lines.append(
+    f"- Excel workbook: {bootstrap_excel_path.relative_to(OUTPUT_DIR)}"
+)
+if bootstrap_warning_path is not None:
+    summary_lines.append(
+        f"- Warnings: {bootstrap_warning_path.relative_to(OUTPUT_DIR)}"
+    )
 summary_lines.append("")
 
 if tstr_results is not None and tstr_path is not None:
