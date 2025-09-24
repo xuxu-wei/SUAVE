@@ -1,6 +1,6 @@
 # %% [markdown]
 # # MIMIC mortality (supervised)
-# 
+#
 # This notebook reproduces the supervised SUAVE mortality analysis with Optuna-based hyperparameter tuning.
 
 # %%
@@ -11,25 +11,11 @@ from pathlib import Path
 import time
 from typing import Dict, List, Mapping, Optional, Tuple
 
-from IPython.display import display
-from tabulate import tabulate
-
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
-from sklearn.calibration import calibration_curve
-from sklearn.decomposition import PCA
-from sklearn.experimental import enable_iterative_imputer  # noqa: F401
-from sklearn.impute import IterativeImputer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    accuracy_score,
-    brier_score_loss,
-    confusion_matrix,
-    roc_auc_score,
-    roc_curve,
-)
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
@@ -39,27 +25,46 @@ from sklearn.tree import DecisionTreeClassifier
 
 EXAMPLES_DIR = Path().resolve()
 if not EXAMPLES_DIR.exists():
-    raise RuntimeError("Run this notebook from the repository root so 'examples' is available.")
+    raise RuntimeError(
+        "Run this notebook from the repository root so 'examples' is available."
+    )
 if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
-from mimic_mortality_utils import (
+from mimic_mortality_utils import (  # noqa: E402
     RANDOM_STATE,
     TARGET_COLUMNS,
     VALIDATION_SIZE,
     Schema,
+    apply_isotonic_calibration,
+    build_prediction_dataframe,
+    compute_binary_metrics,
+    dataframe_to_markdown,
     define_schema,
+    extract_positive_probabilities,
+    fit_isotonic_calibrator,
     kolmogorov_smirnov_statistic,
     load_dataset,
+    load_or_create_iteratively_imputed_features,
+    make_logistic_pipeline,
     mutual_information_feature,
+    plot_benchmark_curves,
+    plot_calibration_curves,
+    plot_latent_space,
     prepare_features,
+    render_dataframe,
     rbf_mmd,
+    schema_to_dataframe,
     to_numeric_frame,
 )
-from cls_eval import evaluate_predictions, write_results_to_excel_unique
+from cls_eval import evaluate_predictions, write_results_to_excel_unique  # noqa: E402
 
-from suave import SUAVE
-from suave.evaluate import evaluate_tstr, evaluate_trtr, simple_membership_inference
+from suave import SUAVE  # noqa: E402
+from suave.evaluate import (  # noqa: E402
+    evaluate_tstr,
+    evaluate_trtr,
+    simple_membership_inference,
+)
 
 try:
     import optuna
@@ -67,140 +72,7 @@ except ImportError as exc:  # pragma: no cover - optuna provided via requirement
     raise RuntimeError(
         "Optuna is required for the mortality analysis. Install it via 'pip install optuna'."
     ) from exc
-
-
-def is_interactive_session() -> bool:
-    """Return ``True`` when running inside an interactive IPython session."""
-
-    try:
-        from IPython import get_ipython
-    except ImportError:
-        return False
-    return get_ipython() is not None
-
-
-def render_dataframe(
-    df: pd.DataFrame,
-    *,
-    title: Optional[str] = None,
-    floatfmt: Optional[str] = ".3f",
-) -> None:
-    """Display ``df`` using ``display`` when interactive, otherwise print via tabulate."""
-
-    if title:
-        print(title)
-    if df.empty:
-        print("(empty table)")
-        return
-    if is_interactive_session():
-        display(df)
-    else:
-        tabulate_kwargs = {"headers": "keys", "tablefmt": "github", "showindex": False}
-        if floatfmt is not None:
-            tabulate_kwargs["floatfmt"] = floatfmt
-        print(tabulate(df, **tabulate_kwargs))
-
-
-def dataframe_to_markdown(df: pd.DataFrame, *, floatfmt: Optional[str] = ".3f") -> str:
-    """Return a GitHub-flavoured Markdown table representing ``df``."""
-
-    if df.empty:
-        return "_No data available._"
-    tabulate_kwargs = {"headers": "keys", "tablefmt": "github", "showindex": False}
-    if floatfmt is not None:
-        tabulate_kwargs["floatfmt"] = floatfmt
-    return tabulate(df, **tabulate_kwargs)
-
-
-def schema_to_dataframe(schema: Schema) -> pd.DataFrame:
-    """Convert a :class:`Schema` into a tidy :class:`pandas.DataFrame`."""
-
-    schema_records: List[Dict[str, object]] = []
-    for column, spec in schema.to_dict().items():
-        schema_records.append(
-            {
-                "Column": column,
-                "Type": spec.get("type", ""),
-                "n_classes": spec.get("n_classes", ""),
-                "y_dim": spec.get("y_dim", ""),
-            }
-        )
-    return pd.DataFrame(schema_records)
-
-
-def slugify_identifier(value: str) -> str:
-    """Return a filesystem-friendly identifier based on ``value``."""
-
-    cleaned = [char.lower() if char.isalnum() else "_" for char in value.strip()]
-    slug = "".join(cleaned)
-    while "__" in slug:
-        slug = slug.replace("__", "_")
-    return slug.strip("_")
-
-
-def load_or_create_iteratively_imputed_features(
-    feature_sets: Mapping[str, pd.DataFrame],
-    *,
-    output_dir: Path,
-    target_label: str,
-    reference_key: str,
-) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Path], bool]:
-    """Load cached iterative imputations or fit a new :class:`IterativeImputer`."""
-
-    if reference_key not in feature_sets:
-        raise KeyError(
-            f"Reference key '{reference_key}' missing from feature sets: {list(feature_sets)}"
-        )
-
-    dataset_paths: Dict[str, Path] = {
-        name: output_dir
-        / f"iterative_imputed_{slugify_identifier(name)}_{slugify_identifier(target_label)}.csv"
-        for name in feature_sets
-    }
-
-    loaded_features: Dict[str, pd.DataFrame] = {}
-    load_successful = True
-    for name, path in dataset_paths.items():
-        features = feature_sets[name]
-        if not path.exists():
-            load_successful = False
-            break
-        cached = pd.read_csv(path, index_col=0)
-        column_match = list(cached.columns) == list(features.columns)
-        length_match = len(cached) == len(features)
-        if not (column_match and length_match):
-            load_successful = False
-            break
-        try:
-            cached = cached.loc[features.index]
-        except KeyError:
-            load_successful = False
-            break
-        loaded_features[name] = cached
-
-    if load_successful:
-        return loaded_features, dataset_paths, True
-
-    imputer = IterativeImputer()
-    imputer.fit(feature_sets[reference_key])
-
-    imputed_features: Dict[str, pd.DataFrame] = {}
-    for name, features in feature_sets.items():
-        transformed = imputer.transform(features)
-        imputed_df = pd.DataFrame(
-            transformed,
-            columns=features.columns,
-            index=features.index,
-        )
-        path = dataset_paths[name]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        imputed_df.to_csv(path)
-        imputed_features[name] = imputed_df
-
-    return imputed_features, dataset_paths, False
-
-
-#%% [markdown]
+# %% [markdown]
 # ## Analysis configuration
 #
 # Define the label to model and tuning/runtime parameters. Setting the label up
@@ -222,7 +94,7 @@ analysis_config = {
     "output_dir_name": "analysis_outputs_supervised",
 }
 
-#%% [markdown]
+# %% [markdown]
 # ## Data loading and schema definition
 #
 # Load train/test/external splits, construct the schema, and validate the
@@ -247,7 +119,9 @@ if TARGET_LABEL not in TARGET_COLUMNS:
         f"Target label '{TARGET_LABEL}' is not one of the configured targets: {TARGET_COLUMNS}"
     )
 
-FEATURE_COLUMNS = [column for column in train_df.columns if column not in TARGET_COLUMNS]
+FEATURE_COLUMNS = [
+    column for column in train_df.columns if column not in TARGET_COLUMNS
+]
 schema = define_schema(train_df, FEATURE_COLUMNS, mode="interactive")
 
 # Manual schema corrections ensure columns with ambiguous types are treated
@@ -285,52 +159,6 @@ HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, int]] = {
     "extra_wide": (64, 128, 64, 16),
     "deep": (128, 64, 32),
 }
-def make_logistic_pipeline() -> Pipeline:
-    """Factory for the baseline classifier used in TSTR/TRTR."""
-
-    return Pipeline(
-        [
-            ("imputer", IterativeImputer()),
-            ("scaler", StandardScaler()),
-            ("classifier", LogisticRegression(max_iter=200)),
-        ]
-    )
-
-
-def extract_positive_probabilities(probabilities: np.ndarray) -> np.ndarray:
-    """Return the positive-class probabilities as a 1-D array."""
-
-    prob_matrix = np.asarray(probabilities)
-    if prob_matrix.ndim == 1:
-        return prob_matrix
-    return prob_matrix[:, -1]
-
-
-def compute_binary_metrics(
-    probabilities: np.ndarray, targets: pd.Series | np.ndarray
-) -> Dict[str, float]:
-    """Compute AUROC, accuracy, specificity, sensitivity, and Brier score."""
-
-    positive_probs = extract_positive_probabilities(probabilities)
-    labels = np.asarray(targets)
-    predictions = (positive_probs >= 0.5).astype(int)
-
-    metrics: Dict[str, float] = {}
-
-    try:
-        roauc = float(roc_auc_score(labels, positive_probs))
-    except ValueError:
-        roauc = float("nan")
-
-    metrics["ROAUC"] = roauc
-    metrics["AUC"] = roauc
-
-    metrics["ACC"] = float(accuracy_score(labels, predictions))
-    tn, fp, fn, tp = confusion_matrix(labels, predictions, labels=[0, 1]).ravel()
-    metrics["SPE"] = float(tn / (tn + fp)) if (tn + fp) > 0 else float("nan")
-    metrics["SEN"] = float(tp / (tp + fn)) if (tp + fn) > 0 else float("nan")
-    metrics["Brier"] = float(brier_score_loss(labels, positive_probs))
-    return metrics
 
 
 def run_optuna_search(
@@ -356,15 +184,28 @@ def run_optuna_search(
     def objective(trial: "optuna.trial.Trial") -> float:
         latent_dim = trial.suggest_categorical("latent_dim", [8, 16, 24, 32, 48, 64])
         n_components = trial.suggest_categorical("n_components", [1, 2, 4, 6])
-        hidden_key = trial.suggest_categorical("hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys()))
-        head_hidden_key = trial.suggest_categorical("head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys()))
-        beta = trial.suggest_float("beta", 0.1, 6.0)
-        classification_loss_weight = trial.suggest_float(
-            "classification_loss_weight", 0.1, 5.0, log=True
+        hidden_key = trial.suggest_categorical(
+            "hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys())
         )
+        head_hidden_key = trial.suggest_categorical(
+            "head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys())
+        )
+        beta = trial.suggest_float("beta", 0.1, 6.0)
+        use_classification_loss_weight = trial.suggest_categorical(
+            "use_classification_loss_weight", [True, False]
+        )
+        classification_loss_weight: Optional[float]
+        if use_classification_loss_weight:
+            classification_loss_weight = trial.suggest_float(
+                "classification_loss_weight", 1.0, 200.0, log=True
+            )
+        else:
+            classification_loss_weight = None
         dropout = trial.suggest_float("dropout", 0.0, 0.7)
         learning_rate = trial.suggest_float("learning_rate", 1e-5, 5e-2, log=True)
-        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512, 1024])
+        batch_size = trial.suggest_categorical(
+            "batch_size", [32, 64, 128, 256, 512, 1024]
+        )
         warmup_epochs = trial.suggest_int("warmup_epochs", 1, 100)
         kl_warmup_epochs = trial.suggest_int("kl_warmup_epochs", 0, 80)
         head_epochs = trial.suggest_int("head_epochs", 1, 80)
@@ -431,110 +272,7 @@ def run_optuna_search(
     return study, best_attributes
 
 
-def plot_calibration_curves(
-    probability_map: Mapping[str, np.ndarray],
-    label_map: Mapping[str, np.ndarray],
-    *,
-    target_name: str,
-    output_path: Path,
-    n_bins: int = 10,
-) -> None:
-    """Generate calibration curves with Brier scores annotated in the legend."""
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(
-        [0, 1], [0, 1], linestyle="--", color="tab:gray", label="Perfect calibration"
-    )
-
-    for dataset_name, probs in probability_map.items():
-        labels = label_map[dataset_name]
-        if probs.ndim == 2:
-            pos_probs = probs[:, -1]
-        else:
-            pos_probs = probs
-        try:
-            frac_pos, mean_pred = calibration_curve(labels, pos_probs, n_bins=n_bins)
-        except ValueError:
-            continue
-        brier = brier_score_loss(labels, pos_probs)
-        ax.plot(
-            mean_pred, frac_pos, marker="o", label=f"{dataset_name} (Brier={brier:.3f})"
-        )
-
-    ax.set_xlabel("Predicted probability")
-    ax.set_ylabel("Observed frequency")
-    ax.set_title(f"Calibration: {target_name}")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
-    plt.close(fig)
-
-
-def plot_latent_space(
-    model: SUAVE,
-    feature_map: Mapping[str, pd.DataFrame],
-    label_map: Mapping[str, pd.Series | np.ndarray],
-    *,
-    target_name: str,
-    output_path: Path,
-) -> None:
-    """Project latent representations with PCA and create scatter plots."""
-
-    latent_blocks: List[np.ndarray] = []
-    dataset_keys: List[str] = []
-    for name, features in feature_map.items():
-        if features.empty:
-            continue
-        latents = model.encode(features)
-        if latents.size == 0:
-            continue
-        latent_blocks.append(latents)
-        dataset_keys.append(name)
-
-    if not latent_blocks:
-        return
-
-    concatenated = np.vstack(latent_blocks)
-    pca = PCA(n_components=2)
-    projected = pca.fit_transform(concatenated)
-
-    offsets = np.cumsum([0] + [block.shape[0] for block in latent_blocks])
-    fig, axes = plt.subplots(
-        1,
-        len(latent_blocks),
-        figsize=(6 * len(latent_blocks), 5),
-        sharex=True,
-        sharey=True,
-    )
-
-    if len(latent_blocks) == 1:
-        axes = [axes]
-
-    for idx, (ax, name) in enumerate(zip(axes, dataset_keys)):
-        start, end = offsets[idx], offsets[idx + 1]
-        subset = projected[start:end]
-        labels = np.asarray(label_map[name])
-        scatter = ax.scatter(
-            subset[:, 0],
-            subset[:, 1],
-            c=labels,
-            cmap="coolwarm",
-            alpha=0.7,
-            edgecolor="none",
-        )
-        ax.set_title(f"{name}")
-        ax.set_xlabel("PC1")
-        ax.set_ylabel("PC2")
-        legend = ax.legend(*scatter.legend_elements(), title="Label")
-        ax.add_artist(legend)
-
-    fig.suptitle(f"Latent space projection: {target_name}")
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    fig.savefig(output_path, dpi=300)
-    plt.close(fig)
-
-
-#%% [markdown]
+# %% [markdown]
 # ## Prepare modelling datasets
 #
 # Split the training cohort into train and validation folds for the selected
@@ -573,7 +311,7 @@ else:
     external_labels = None
 
 
-#%% [markdown]
+# %% [markdown]
 # ## Classical model benchmarks
 #
 # Fit a suite of scikit-learn classifiers as quick baselines before training
@@ -677,8 +415,8 @@ for model_name, estimator in baseline_models.items():
     fitted_estimator = estimator.fit(train_features_imputed, train_labels)
     for dataset_name, (features, labels) in baseline_evaluation_sets.items():
         probabilities = fitted_estimator.predict_proba(features)
-        baseline_probability_map[dataset_name][model_name] = extract_positive_probabilities(
-            probabilities
+        baseline_probability_map[dataset_name][model_name] = (
+            extract_positive_probabilities(probabilities)
         )
         metrics = compute_binary_metrics(probabilities, labels)
         row = {
@@ -686,7 +424,9 @@ for model_name, estimator in baseline_models.items():
             "Dataset": dataset_name,
             "Notes": "",
         }
-        row.update({column: metrics.get(column, float("nan")) for column in metric_columns})
+        row.update(
+            {column: metrics.get(column, float("nan")) for column in metric_columns}
+        )
         baseline_rows.append(row)
 
     if "eICU external" not in baseline_evaluation_sets:
@@ -711,7 +451,7 @@ render_dataframe(
 )
 
 
-#%% [markdown]
+# %% [markdown]
 # ## Hyperparameter search with Optuna
 #
 # Optimise SUAVE hyperparameters on the training/validation split. The trial
@@ -763,7 +503,7 @@ else:
     optuna_trials_path.write_text("trial_number,value")
 
 
-#%% [markdown]
+# %% [markdown]
 # ## Model training
 #
 # Instantiate SUAVE with the best Optuna configuration and fit/calibrate on the
@@ -773,10 +513,22 @@ else:
 
 hidden_key = str(optuna_best_params.get("hidden_dims", "medium"))
 head_hidden_key = str(optuna_best_params.get("head_hidden_dims", "medium"))
-hidden_dims = HIDDEN_DIMENSION_OPTIONS.get(hidden_key, HIDDEN_DIMENSION_OPTIONS["medium"])
+hidden_dims = HIDDEN_DIMENSION_OPTIONS.get(
+    hidden_key, HIDDEN_DIMENSION_OPTIONS["medium"]
+)
 head_hidden_dims = HEAD_HIDDEN_DIMENSION_OPTIONS.get(
     head_hidden_key, HEAD_HIDDEN_DIMENSION_OPTIONS["medium"]
 )
+
+classification_loss_weight_param = optuna_best_params.get("classification_loss_weight")
+use_classification_weight = optuna_best_params.get(
+    "use_classification_loss_weight",
+    classification_loss_weight_param is not None,
+)
+if not use_classification_weight:
+    classification_loss_weight_param = None
+elif classification_loss_weight_param is None:
+    classification_loss_weight_param = 1.0
 
 model = SUAVE(
     schema=schema,
@@ -788,9 +540,7 @@ model = SUAVE(
     learning_rate=float(optuna_best_params.get("learning_rate", 1e-3)),
     batch_size=int(optuna_best_params.get("batch_size", 256)),
     beta=float(optuna_best_params.get("beta", 1.5)),
-    classification_loss_weight=float(
-        optuna_best_params.get("classification_loss_weight", 1.0)
-    ),
+    classification_loss_weight=classification_loss_weight_param,
     random_state=RANDOM_STATE,
     behaviour="supervised",
 )
@@ -805,10 +555,13 @@ model.fit(
     joint_decoder_lr_scale=float(optuna_best_params.get("joint_decoder_lr_scale", 0.1)),
     early_stop_patience=int(optuna_best_params.get("early_stop_patience", 10)),
 )
-model.calibrate(X_validation, y_validation)
+validation_raw_probabilities = model.predict_proba(X_validation)
+isotonic_calibrator = fit_isotonic_calibrator(
+    validation_raw_probabilities, y_validation
+)
 
 
-#%% [markdown]
+# %% [markdown]
 # ## Prognosis prediction and evaluation
 #
 # Evaluate the trained model on train/validation/test/eICU cohorts, generate
@@ -829,7 +582,11 @@ label_map: Dict[str, np.ndarray] = {}
 metrics_rows: List[Dict[str, object]] = []
 
 for dataset_name, (features, labels) in evaluation_datasets.items():
-    probs = model.predict_proba(features)
+    if dataset_name == "Validation":
+        raw_probs = validation_raw_probabilities
+    else:
+        raw_probs = model.predict_proba(features)
+    probs = apply_isotonic_calibration(raw_probs, isotonic_calibrator)
     probability_map[dataset_name] = probs
     label_map[dataset_name] = np.asarray(labels)
     metrics = compute_binary_metrics(probs, labels)
@@ -845,7 +602,9 @@ ordered_metric_columns = [
     "SEN",
     "Brier",
 ]
-existing_columns = [column for column in ordered_metric_columns if column in metrics_df.columns]
+existing_columns = [
+    column for column in ordered_metric_columns if column in metrics_df.columns
+]
 if existing_columns:
     metrics_df = metrics_df.loc[:, existing_columns]
 metrics_path = OUTPUT_DIR / "evaluation_metrics.csv"
@@ -879,7 +638,7 @@ render_dataframe(
 )
 
 
-#%% [markdown]
+# %% [markdown]
 # ## Benchmark ROC and calibration curves
 #
 # Visualise the discriminative and calibration performance of the classical
@@ -890,67 +649,6 @@ render_dataframe(
 # %%
 
 plt.rcParams["font.family"] = "Times New Roman"
-
-
-def plot_benchmark_curves(
-    dataset_name: str,
-    y_true: np.ndarray,
-    model_probability_lookup: Mapping[str, np.ndarray],
-) -> Optional[Path]:
-    """Plot ROC and calibration curves for the supplied dataset."""
-
-    unique_labels = np.unique(y_true)
-    if unique_labels.size < 2:
-        print(f"Skipping {dataset_name} curves because only one class is present.")
-        return None
-
-    roc_ax: plt.Axes
-    cal_ax: plt.Axes
-    fig, (roc_ax, cal_ax) = plt.subplots(1, 2, figsize=(12, 5))
-
-    roc_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Chance")
-    roc_ax.set_title(f"ROC – {dataset_name}")
-    roc_ax.set_xlabel("False positive rate")
-    roc_ax.set_ylabel("True positive rate")
-
-    cal_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect")
-    cal_ax.set_title(f"Calibration – {dataset_name}")
-    cal_ax.set_xlabel("Mean predicted probability")
-    cal_ax.set_ylabel("Fraction of positives")
-
-    for model_name, probs in model_probability_lookup.items():
-        abbrev = model_abbreviation_lookup.get(model_name, model_name)
-        fpr, tpr, _ = roc_curve(y_true, probs)
-        roc_ax.plot(fpr, tpr, label=abbrev)
-
-        try:
-            frac_pos, mean_pred = calibration_curve(
-                y_true, probs, n_bins=10, strategy="quantile"
-            )
-        except ValueError:
-            print(
-                f"Calibration curve for {model_name} on {dataset_name} skipped due to insufficient variation."
-            )
-        else:
-            cal_ax.plot(mean_pred, frac_pos, marker="o", label=abbrev)
-
-    roc_ax.legend(loc="lower right")
-    cal_ax.legend(loc="upper left")
-    fig.suptitle(f"Benchmark ROC & calibration – {dataset_name}")
-    fig.tight_layout()
-
-    dataset_slug = dataset_name.lower().replace(" ", "_")
-    figure_path = OUTPUT_DIR / f"benchmark_curves_{dataset_slug}_{TARGET_LABEL}.png"
-    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
-
-    if is_interactive_session():
-        display(fig)
-
-    plt.close(fig)
-    print(f"Saved benchmark curves for {dataset_name} to {figure_path}")
-    return figure_path
-
-
 benchmark_datasets = ["Train", "MIMIC test", "eICU external"]
 benchmark_curve_paths: List[Path] = []
 
@@ -963,19 +661,28 @@ for dataset_name in benchmark_datasets:
     suave_probs = extract_positive_probabilities(probability_map[dataset_name])
     model_probabilities["SUAVE"] = suave_probs
 
-    for baseline_name, baseline_probs in baseline_probability_map.get(dataset_name, {}).items():
+    for baseline_name, baseline_probs in baseline_probability_map.get(
+        dataset_name, {}
+    ).items():
         model_probabilities[baseline_name] = baseline_probs
 
     if not model_probabilities:
         print(f"No model probabilities available for {dataset_name}.")
         continue
 
-    figure_path = plot_benchmark_curves(dataset_name, label_map[dataset_name], model_probabilities)
+    figure_path = plot_benchmark_curves(
+        dataset_name,
+        label_map[dataset_name],
+        model_probabilities,
+        output_dir=OUTPUT_DIR,
+        target_label=TARGET_LABEL,
+        abbreviation_lookup=model_abbreviation_lookup,
+    )
     if figure_path is not None:
         benchmark_curve_paths.append(figure_path)
 
 
-#%% [markdown]
+# %% [markdown]
 # ## Bootstrap benchmarking
 #
 # Derive confidence intervals for each cohort using the reusable classification
@@ -996,58 +703,22 @@ if model_classes_array is None or len(model_classes_array) == 0:
 class_value_list = list(model_classes_array)
 class_name_strings = [str(value) for value in class_value_list]
 positive_label_name = class_name_strings[-1] if len(class_name_strings) == 2 else None
-
-
-def build_prediction_dataframe(
-    probabilities: np.ndarray,
-    labels: pd.Series | np.ndarray,
-    predictions: np.ndarray,
-) -> pd.DataFrame:
-    """Assemble a dataframe compatible with :func:`evaluate_predictions`."""
-
-    prob_matrix = np.asarray(probabilities)
-    if prob_matrix.ndim == 1:
-        if len(class_name_strings) == 2:
-            negative_name, positive_name = class_name_strings[0], class_name_strings[-1]
-            proba_dict = {
-                f"pred_proba_{negative_name}": 1.0 - prob_matrix,
-                f"pred_proba_{positive_name}": prob_matrix,
-            }
-        else:
-            proba_dict = {"pred_proba_0": prob_matrix}
-    else:
-        if prob_matrix.shape[1] == len(class_name_strings) and len(class_name_strings) > 0:
-            proba_dict = {
-                f"pred_proba_{class_name_strings[idx]}": prob_matrix[:, idx]
-                for idx in range(prob_matrix.shape[1])
-            }
-        else:
-            proba_dict = {
-                f"pred_proba_{idx}": prob_matrix[:, idx]
-                for idx in range(prob_matrix.shape[1])
-            }
-
-    base_df = pd.DataFrame(
-        {
-            "label": np.asarray(labels),
-            "y_pred": np.asarray(predictions),
-        }
-    )
-    if proba_dict:
-        proba_df = pd.DataFrame(proba_dict)
-        base_df = pd.concat([base_df.reset_index(drop=True), proba_df], axis=1)
-    else:
-        base_df = base_df.reset_index(drop=True)
-    return base_df
-
-
 for dataset_name, (features, labels) in evaluation_datasets.items():
-    dataset_predictions = model.predict(features)
     dataset_probabilities = probability_map[dataset_name]
+    positive_probs = extract_positive_probabilities(dataset_probabilities)
+    if len(class_value_list) == 2:
+        negative_label = class_value_list[0]
+        positive_label = class_value_list[-1]
+        dataset_predictions = np.where(
+            positive_probs >= 0.5, positive_label, negative_label
+        )
+    else:
+        dataset_predictions = model.predict(features)
     prediction_df = build_prediction_dataframe(
         dataset_probabilities,
         labels,
         dataset_predictions,
+        class_name_strings,
     )
 
     results = evaluate_predictions(
@@ -1133,7 +804,7 @@ render_dataframe(
 )
 
 
-#%% [markdown]
+# %% [markdown]
 # ## TSTR/TRTR comparison
 #
 # Compare models trained on synthetic versus real data. The analysis is only
@@ -1195,7 +866,9 @@ else:
             {
                 "feature": column,
                 "ks": kolmogorov_smirnov_statistic(real_values, synthetic_values),
-                "mmd": rbf_mmd(real_values, synthetic_values, random_state=RANDOM_STATE),
+                "mmd": rbf_mmd(
+                    real_values, synthetic_values, random_state=RANDOM_STATE
+                ),
                 "mutual_information": mutual_information_feature(
                     real_values, synthetic_values
                 ),
@@ -1205,7 +878,9 @@ else:
     distribution_path = OUTPUT_DIR / "distribution_shift_metrics.csv"
     distribution_df.to_csv(distribution_path, index=False)
     distribution_top = (
-        distribution_df.sort_values("ks", ascending=False).head(10).reset_index(drop=True)
+        distribution_df.sort_values("ks", ascending=False)
+        .head(10)
+        .reset_index(drop=True)
     )
     render_dataframe(
         distribution_top,
@@ -1214,7 +889,7 @@ else:
     )
 
 
-#%% [markdown]
+# %% [markdown]
 # ## Latent space interpretation
 #
 # Project latent representations using PCA for qualitative assessment of class
@@ -1222,7 +897,9 @@ else:
 
 # %%
 
-latent_features = {name: features for name, (features, _) in evaluation_datasets.items()}
+latent_features = {
+    name: features for name, (features, _) in evaluation_datasets.items()
+}
 latent_labels = {name: labels for name, (_, labels) in evaluation_datasets.items()}
 latent_path = OUTPUT_DIR / f"latent_{TARGET_LABEL}.png"
 plot_latent_space(
@@ -1234,7 +911,7 @@ plot_latent_space(
 )
 
 
-#%% [markdown]
+# %% [markdown]
 # ## Reporting
 #
 # Collate metrics, Optuna summary, and artifact locations into a Markdown
@@ -1283,12 +960,8 @@ summary_lines.append(dataframe_to_markdown(metrics_summary_df, floatfmt=".3f"))
 summary_lines.append(
     f"Optuna trials logged at: {optuna_trials_path.relative_to(OUTPUT_DIR)}"
 )
-summary_lines.append(
-    f"Calibration plot: {calibration_path.relative_to(OUTPUT_DIR)}"
-)
-summary_lines.append(
-    f"Latent projection: {latent_path.relative_to(OUTPUT_DIR)}"
-)
+summary_lines.append(f"Calibration plot: {calibration_path.relative_to(OUTPUT_DIR)}")
+summary_lines.append(f"Latent projection: {latent_path.relative_to(OUTPUT_DIR)}")
 summary_lines.append("")
 
 summary_lines.append("Bootstrap evaluation artefacts:")
@@ -1336,10 +1009,14 @@ if distribution_df is not None and distribution_path is not None:
         "Mutual information",
     ]
     existing_distribution_columns = [
-        column for column in distribution_columns if column in distribution_summary_df.columns
+        column
+        for column in distribution_columns
+        if column in distribution_summary_df.columns
     ]
     if existing_distribution_columns:
-        distribution_summary_df = distribution_summary_df.loc[:, existing_distribution_columns]
+        distribution_summary_df = distribution_summary_df.loc[
+            :, existing_distribution_columns
+        ]
     distribution_summary_df = distribution_summary_df.reset_index(drop=True)
     summary_lines.append("Top 10 features by KS statistic:")
     summary_lines.append(dataframe_to_markdown(distribution_summary_df, floatfmt=".3f"))
@@ -1369,7 +1046,9 @@ else:
         "Majority baseline",
     ]
     existing_membership_columns = [
-        column for column in membership_columns if column in membership_summary_df.columns
+        column
+        for column in membership_columns
+        if column in membership_summary_df.columns
     ]
     if existing_membership_columns:
         membership_summary_df = membership_summary_df.loc[
@@ -1397,6 +1076,3 @@ print(f"Summary written to {summary_path}")
 
 
 # %%
-
-
-
