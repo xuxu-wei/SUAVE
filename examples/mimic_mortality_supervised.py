@@ -9,7 +9,7 @@ import sys
 import json
 from pathlib import Path
 import time
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -165,8 +165,9 @@ def run_optuna_search(
     y_train: pd.Series,
     X_validation: pd.DataFrame,
     y_validation: pd.Series,
-    schema: Schema,
     *,
+    feature_columns: Sequence[str],
+    schema: Schema,
     random_state: int,
     n_trials: Optional[int],
     timeout: Optional[int],
@@ -180,7 +181,7 @@ def run_optuna_search(
     if timeout is not None and timeout <= 0:
         timeout = None
 
-    def objective(trial: "optuna.trial.Trial") -> float:
+    def objective(trial: "optuna.trial.Trial") -> Tuple[float, float]:
         latent_dim = trial.suggest_categorical("latent_dim", [8, 16, 24, 32, 48, 64])
         n_components = trial.suggest_categorical("n_components", [1, 2, 4, 6])
         hidden_key = trial.suggest_categorical(
@@ -249,24 +250,93 @@ def run_optuna_search(
         roauc = validation_metrics.get("ROAUC", float("nan"))
         if not np.isfinite(roauc):
             raise optuna.exceptions.TrialPruned("Non-finite validation ROAUC")
-        return roauc
+
+        delta_auc: float
+        try:
+            numeric_train = to_numeric_frame(X_train.loc[:, feature_columns])
+            numeric_validation = to_numeric_frame(X_validation.loc[:, feature_columns])
+
+            rng = np.random.default_rng(random_state + trial.number)
+            synthetic_labels = rng.choice(y_train, size=len(y_train), replace=True)
+            synthetic_samples = model.sample(
+                len(synthetic_labels), conditional=True, y=synthetic_labels
+            )
+            if not isinstance(synthetic_samples, pd.DataFrame):
+                synthetic_features = pd.DataFrame(
+                    synthetic_samples, columns=feature_columns
+                )
+            else:
+                synthetic_features = synthetic_samples.loc[:, feature_columns].copy()
+            numeric_synthetic = to_numeric_frame(synthetic_features)
+
+            tstr_metrics = evaluate_tstr(
+                (
+                    numeric_synthetic.to_numpy(),
+                    np.asarray(synthetic_labels),
+                ),
+                (
+                    numeric_validation.to_numpy(),
+                    y_validation.to_numpy(),
+                ),
+                make_logistic_pipeline,
+            )
+            trtr_metrics = evaluate_trtr(
+                (
+                    numeric_train.to_numpy(),
+                    y_train.to_numpy(),
+                ),
+                (
+                    numeric_validation.to_numpy(),
+                    y_validation.to_numpy(),
+                ),
+                make_logistic_pipeline,
+            )
+            trial.set_user_attr("tstr_metrics", tstr_metrics)
+            trial.set_user_attr("trtr_metrics", trtr_metrics)
+
+            delta_auc = abs(
+                float(trtr_metrics.get("auroc", float("nan")))
+                - float(tstr_metrics.get("auroc", float("nan")))
+            )
+            if not np.isfinite(delta_auc):
+                raise ValueError("Non-finite TSTR/TRTR delta AUC")
+        except Exception as error:
+            trial.set_user_attr("tstr_trtr_error", repr(error))
+            raise optuna.exceptions.TrialPruned(
+                f"Failed to compute TSTR/TRTR delta AUC: {error}"
+            ) from error
+
+        trial.set_user_attr("tstr_trtr_delta_auc", delta_auc)
+        return roauc, delta_auc
 
     study = optuna.create_study(
-        direction="maximize",
+        directions=("maximize", "minimize"),
         study_name=study_name,
         storage=storage,
         load_if_exists=bool(storage and study_name),
     )
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
 
-    if study.best_trial is None:
-        raise RuntimeError("Optuna search did not produce a best trial")
+    feasible_trials = [trial for trial in study.trials if trial.values is not None]
+    if not feasible_trials:
+        raise RuntimeError("Optuna search did not produce any completed trials")
+
+    def sort_key(trial: "optuna.trial.Trial") -> Tuple[float, float]:
+        values = trial.values or (float("nan"), float("inf"))
+        primary = values[0]
+        secondary = values[1]
+        return (primary, -secondary if np.isfinite(secondary) else float("-inf"))
+
+    best_trial = max(feasible_trials, key=sort_key)
     best_attributes: Dict[str, object] = {
-        "trial_number": study.best_trial.number,
-        "value": study.best_value,
-        "params": dict(study.best_trial.params),
-        "validation_metrics": study.best_trial.user_attrs.get("validation_metrics", {}),
-        "fit_seconds": study.best_trial.user_attrs.get("fit_seconds"),
+        "trial_number": best_trial.number,
+        "values": tuple(best_trial.values or ()),
+        "params": dict(best_trial.params),
+        "validation_metrics": best_trial.user_attrs.get("validation_metrics", {}),
+        "fit_seconds": best_trial.user_attrs.get("fit_seconds"),
+        "tstr_metrics": best_trial.user_attrs.get("tstr_metrics", {}),
+        "trtr_metrics": best_trial.user_attrs.get("trtr_metrics", {}),
+        "tstr_trtr_delta_auc": best_trial.user_attrs.get("tstr_trtr_delta_auc"),
     }
     return study, best_attributes
 
@@ -468,7 +538,8 @@ study, optuna_best_info = run_optuna_search(
     y_train_model,
     X_validation,
     y_validation,
-    schema,
+    feature_columns=FEATURE_COLUMNS,
+    schema=schema,
     random_state=RANDOM_STATE,
     n_trials=analysis_config["optuna_trials"],
     timeout=analysis_config["optuna_timeout"],
@@ -482,8 +553,10 @@ trial_rows: List[Dict[str, object]] = []
 for trial in study.trials:
     record: Dict[str, object] = {
         "trial_number": trial.number,
-        "value": trial.value,
     }
+    if trial.values is not None:
+        record["validation_roauc"] = trial.values[0]
+        record["delta_auc"] = trial.values[1]
     record.update(trial.params)
     val_metrics = trial.user_attrs.get("validation_metrics")
     if isinstance(val_metrics, Mapping):
@@ -928,11 +1001,26 @@ summary_lines: List[str] = [
     f"### {TARGET_LABEL}",
 ]
 
-best_value = optuna_best_info.get("value")
-value_text = f"{best_value:.4f}" if isinstance(best_value, (int, float)) else "n/a"
-summary_lines.append(
-    f"Best Optuna trial #{optuna_best_info.get('trial_number')} with validation ROAUC {value_text}"
+best_values = optuna_best_info.get("values")
+if isinstance(best_values, (list, tuple)) and best_values:
+    best_roauc = best_values[0]
+    roauc_text = f"{best_roauc:.4f}" if np.isfinite(best_roauc) else "n/a"
+    delta_text: Optional[str]
+    if len(best_values) > 1 and np.isfinite(best_values[1]):
+        delta_text = f" (ΔAUC {best_values[1]:.4f})"
+    else:
+        delta_text = None
+else:
+    roauc_text = "n/a"
+    delta_text = None
+
+summary_line = (
+    f"Best Optuna trial #{optuna_best_info.get('trial_number')} "
+    f"with validation ROAUC {roauc_text}"
 )
+if delta_text:
+    summary_line += delta_text
+summary_lines.append(summary_line)
 summary_lines.append("Best parameters:")
 summary_lines.append("```json")
 summary_lines.append(json.dumps(optuna_best_params, indent=2, ensure_ascii=False))
