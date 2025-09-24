@@ -79,6 +79,8 @@ def test_training_monitor_keeps_elbo_semantics(monkeypatch):
             epoch: int,
             train_metrics: dict[str, float | None] | None = None,
             val_metrics: dict[str, float | None] | None = None,
+            beta: float | None = None,
+            classification_loss_weight: float | None = None,
         ) -> None:
             updates.append(
                 (
