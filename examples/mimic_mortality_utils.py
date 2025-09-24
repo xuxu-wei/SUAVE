@@ -45,6 +45,26 @@ TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
 CALIBRATION_SIZE: float = 0.2
 VALIDATION_SIZE: float = 0.2
 
+HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
+    "lean": (64, 32),
+    "compact": (96, 48),
+    "small": (128, 64),
+    "medium": (256, 128),
+    "wide": (384, 192),
+    "extra_wide": (512, 256),
+    "ultra_wide": (640, 320),
+}
+
+HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
+    "minimal": (16,),
+    "compact": (32,),
+    "small": (48,),
+    "medium": (48, 32),
+    "wide": (96, 48, 16),
+    "extra_wide": (64, 128, 64, 16),
+    "deep": (128, 64, 32),
+}
+
 __all__ = [
     "RANDOM_STATE",
     "TARGET_COLUMNS",
@@ -52,6 +72,8 @@ __all__ = [
     "VALIDATION_SIZE",
     "Schema",
     "SchemaInferencer",
+    "HIDDEN_DIMENSION_OPTIONS",
+    "HEAD_HIDDEN_DIMENSION_OPTIONS",
     "build_prediction_dataframe",
     "compute_auc",
     "compute_binary_metrics",
@@ -77,6 +99,8 @@ __all__ = [
     "slugify_identifier",
     "split_train_validation_calibration",
     "to_numeric_frame",
+    "build_suave_model",
+    "resolve_classification_loss_weight",
 ]
 
 
@@ -711,3 +735,54 @@ def build_prediction_dataframe(
     else:
         base_df = base_df.reset_index(drop=True)
     return base_df
+
+
+def resolve_classification_loss_weight(params: Mapping[str, object]) -> Optional[float]:
+    """Normalise ``classification_loss_weight`` from Optuna parameters."""
+
+    use_weight = params.get("use_classification_loss_weight")
+    if isinstance(use_weight, str):
+        use_weight = use_weight.lower() in {"1", "true", "yes"}
+    elif isinstance(use_weight, (np.bool_,)):
+        use_weight = bool(use_weight)
+    if not use_weight:
+        return None
+    weight = params.get("classification_loss_weight")
+    if weight is None:
+        return 1.0
+    if isinstance(weight, (np.floating, np.integer)):
+        return float(weight)
+    return float(weight)
+
+
+def build_suave_model(
+    params: Mapping[str, object],
+    schema: Schema,
+    *,
+    random_state: int,
+) -> SUAVE:
+    """Instantiate :class:`SUAVE` using Optuna-style parameters."""
+
+    hidden_key = str(params.get("hidden_dims", "medium"))
+    head_hidden_key = str(params.get("head_hidden_dims", "medium"))
+    hidden_dims = HIDDEN_DIMENSION_OPTIONS.get(
+        hidden_key, HIDDEN_DIMENSION_OPTIONS["medium"]
+    )
+    head_hidden_dims = HEAD_HIDDEN_DIMENSION_OPTIONS.get(
+        head_hidden_key, HEAD_HIDDEN_DIMENSION_OPTIONS["medium"]
+    )
+    classification_loss_weight = resolve_classification_loss_weight(params)
+    return SUAVE(
+        schema=schema,
+        latent_dim=int(params.get("latent_dim", 16)),
+        n_components=int(params.get("n_components", 1)),
+        hidden_dims=hidden_dims,
+        head_hidden_dims=head_hidden_dims,
+        dropout=float(params.get("dropout", 0.1)),
+        learning_rate=float(params.get("learning_rate", 1e-3)),
+        batch_size=int(params.get("batch_size", 256)),
+        beta=float(params.get("beta", 1.5)),
+        classification_loss_weight=classification_loss_weight,
+        random_state=random_state,
+        behaviour="supervised",
+    )

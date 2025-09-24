@@ -1,19 +1,23 @@
 # %% [markdown]
-# # MIMIC mortality (supervised)
+# # MIMIC mortality (evaluation)
 #
-# This notebook reproduces the supervised SUAVE mortality analysis with Optuna-based hyperparameter tuning.
+# This notebook-style script loads the artefacts produced by the Optuna
+# optimisation pipeline, ensures a calibrated SUAVE model is available, and runs
+# the downstream evaluation suite (classical baselines, prognosis metrics,
+# synthetic-vs-real analysis, and reporting).
 
 # %%
 
-import sys
-import json
-from pathlib import Path
-import time
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from __future__ import annotations
 
+import json
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+import joblib
 import numpy as np
 import pandas as pd
-from matplotlib import pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
@@ -23,7 +27,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
-EXAMPLES_DIR = Path().resolve()
+EXAMPLES_DIR = Path(__file__).resolve().parent
 if not EXAMPLES_DIR.exists():
     raise RuntimeError(
         "Run this notebook from the repository root so 'examples' is available."
@@ -35,8 +39,8 @@ from mimic_mortality_utils import (  # noqa: E402
     RANDOM_STATE,
     TARGET_COLUMNS,
     VALIDATION_SIZE,
-    Schema,
     build_prediction_dataframe,
+    build_suave_model,
     compute_binary_metrics,
     dataframe_to_markdown,
     define_schema,
@@ -65,26 +69,17 @@ from suave.evaluate import (  # noqa: E402
     simple_membership_inference,
 )
 
-try:
-    import optuna
-except ImportError as exc:  # pragma: no cover - optuna provided via requirements
-    raise RuntimeError(
-        "Optuna is required for the mortality analysis. Install it via 'pip install optuna'."
-    ) from exc
+
 # %% [markdown]
 # ## Analysis configuration
 #
-# Define the label to model and tuning/runtime parameters. Setting the label up
-# front avoids looping over every possible prediction task so that the analysis
-# remains focused on a single clinical question.
+# Define the label of interest and locations for cached outputs from the
+# optimisation script.
 
 # %%
 
-# Select the target label to model. Choose from the columns listed in
-# ``TARGET_COLUMNS`` loaded from ``mimic_mortality_utils``.
 TARGET_LABEL = "in_hospital_mortality"
 
-# Configuration for Optuna search and output artifacts.
 analysis_config = {
     "optuna_trials": 60,
     "optuna_timeout": 3600 * 48,
@@ -92,6 +87,7 @@ analysis_config = {
     "optuna_storage": None,
     "output_dir_name": "analysis_outputs_supervised",
 }
+
 
 # %% [markdown]
 # ## Data loading and schema definition
@@ -139,214 +135,104 @@ render_dataframe(schema_df, title="Schema overview", floatfmt=None)
 
 # %%
 
-HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, int]] = {
-    "lean": (64, 32),
-    "compact": (96, 48),
-    "small": (128, 64),
-    "medium": (256, 128),
-    "wide": (384, 192),
-    "extra_wide": (512, 256),
-    "ultra_wide": (640, 320),
-}
 
-HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, int]] = {
-    "minimal": (16,),
-    "compact": (32,),
-    "small": (48,),
-    "medium": (48, 32),
-    "wide": (96, 48, 16),
-    "extra_wide": (64, 128, 64, 16),
-    "deep": (128, 64, 32),
-}
+def make_study_name(prefix: Optional[str], target_label: str) -> Optional[str]:
+    """Return the Optuna study name for ``target_label`` given ``prefix``."""
+
+    if not prefix:
+        return None
+    return f"{prefix}_{target_label}"
 
 
-def run_optuna_search(
-    X_train: pd.DataFrame,
-    y_train: pd.Series,
-    X_validation: pd.DataFrame,
-    y_validation: pd.Series,
+def load_optuna_results(
+    output_dir: Path,
+    target_label: str,
     *,
-    feature_columns: Sequence[str],
-    schema: Schema,
-    random_state: int,
-    n_trials: Optional[int],
-    timeout: Optional[int],
-    study_name: Optional[str] = None,
-    storage: Optional[str] = None,
-) -> tuple["optuna.study.Study", Dict[str, object]]:
-    """Perform Optuna hyperparameter optimisation for :class:`SUAVE`."""
+    study_prefix: Optional[str],
+    storage: Optional[str],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Load the best Optuna trial metadata and parameters if available."""
 
-    if n_trials is not None and n_trials <= 0:
-        n_trials = None
-    if timeout is not None and timeout <= 0:
-        timeout = None
+    best_info_path = output_dir / f"optuna_best_info_{target_label}.json"
+    best_params_path = output_dir / f"optuna_best_params_{target_label}.json"
 
-    def objective(trial: "optuna.trial.Trial") -> Tuple[float, float]:
-        latent_dim = trial.suggest_categorical("latent_dim", [8, 16, 24, 32, 48, 64])
-        n_components = trial.suggest_categorical("n_components", [1, 2, 4, 6])
-        hidden_key = trial.suggest_categorical(
-            "hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys())
-        )
-        head_hidden_key = trial.suggest_categorical(
-            "head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys())
-        )
-        beta = trial.suggest_float("beta", 0.1, 6.0)
-        use_classification_loss_weight = trial.suggest_categorical(
-            "use_classification_loss_weight", [True, False]
-        )
-        classification_loss_weight: Optional[float]
-        if use_classification_loss_weight:
-            classification_loss_weight = trial.suggest_float(
-                "classification_loss_weight", 1.0, 200.0, log=True
-            )
-        else:
-            classification_loss_weight = None
-        dropout = trial.suggest_float("dropout", 0.0, 0.7)
-        learning_rate = trial.suggest_float("learning_rate", 1e-5, 5e-2, log=True)
-        batch_size = trial.suggest_categorical(
-            "batch_size", [32, 64, 128, 256, 512, 1024]
-        )
-        warmup_epochs = trial.suggest_int("warmup_epochs", 1, 100)
-        kl_warmup_epochs = trial.suggest_int("kl_warmup_epochs", 0, 80)
-        head_epochs = trial.suggest_int("head_epochs", 1, 80)
-        finetune_epochs = trial.suggest_int("finetune_epochs", 1, 60)
-        early_stop_patience = trial.suggest_int("early_stop_patience", 3, 30)
-        joint_decoder_lr_scale = trial.suggest_float(
-            "joint_decoder_lr_scale", 1e-4, 1.0, log=True
-        )
-
-        model = SUAVE(
-            schema=schema,
-            latent_dim=latent_dim,
-            n_components=int(n_components),
-            hidden_dims=HIDDEN_DIMENSION_OPTIONS[hidden_key],
-            head_hidden_dims=HEAD_HIDDEN_DIMENSION_OPTIONS[head_hidden_key],
-            dropout=dropout,
-            learning_rate=learning_rate,
-            batch_size=batch_size,
-            beta=beta,
-            classification_loss_weight=classification_loss_weight,
-            random_state=random_state,
-            behaviour="supervised",
-        )
-
-        start_time = time.perf_counter()
-        model.fit(
-            X_train,
-            y_train,
-            warmup_epochs=warmup_epochs,
-            kl_warmup_epochs=kl_warmup_epochs,
-            head_epochs=head_epochs,
-            finetune_epochs=finetune_epochs,
-            joint_decoder_lr_scale=joint_decoder_lr_scale,
-            early_stop_patience=early_stop_patience,
-        )
-        fit_seconds = time.perf_counter() - start_time
-        validation_probs = model.predict_proba(X_validation)
-        validation_metrics = compute_binary_metrics(validation_probs, y_validation)
-        trial.set_user_attr("validation_metrics", validation_metrics)
-        trial.set_user_attr("fit_seconds", fit_seconds)
-
-        roauc = validation_metrics.get("ROAUC", float("nan"))
-        if not np.isfinite(roauc):
-            raise optuna.exceptions.TrialPruned("Non-finite validation ROAUC")
-
-        delta_auc: float
-        try:
-            numeric_train = to_numeric_frame(X_train.loc[:, feature_columns])
-            numeric_validation = to_numeric_frame(X_validation.loc[:, feature_columns])
-
-            rng = np.random.default_rng(random_state + trial.number)
-            synthetic_labels = rng.choice(y_train, size=len(y_train), replace=True)
-            synthetic_samples = model.sample(
-                len(synthetic_labels), conditional=True, y=synthetic_labels
-            )
-            if not isinstance(synthetic_samples, pd.DataFrame):
-                synthetic_features = pd.DataFrame(
-                    synthetic_samples, columns=feature_columns
-                )
-            else:
-                synthetic_features = synthetic_samples.loc[:, feature_columns].copy()
-            numeric_synthetic = to_numeric_frame(synthetic_features)
-
-            tstr_metrics = evaluate_tstr(
-                (
-                    numeric_synthetic.to_numpy(),
-                    np.asarray(synthetic_labels),
-                ),
-                (
-                    numeric_validation.to_numpy(),
-                    y_validation.to_numpy(),
-                ),
-                make_logistic_pipeline,
-            )
-            trtr_metrics = evaluate_trtr(
-                (
-                    numeric_train.to_numpy(),
-                    y_train.to_numpy(),
-                ),
-                (
-                    numeric_validation.to_numpy(),
-                    y_validation.to_numpy(),
-                ),
-                make_logistic_pipeline,
-            )
-            trial.set_user_attr("tstr_metrics", tstr_metrics)
-            trial.set_user_attr("trtr_metrics", trtr_metrics)
-
-            delta_auc = abs(
-                float(trtr_metrics.get("auroc", float("nan")))
-                - float(tstr_metrics.get("auroc", float("nan")))
-            )
-            if not np.isfinite(delta_auc):
-                raise ValueError("Non-finite TSTR/TRTR delta AUC")
-        except Exception as error:
-            trial.set_user_attr("tstr_trtr_error", repr(error))
-            raise optuna.exceptions.TrialPruned(
-                f"Failed to compute TSTR/TRTR delta AUC: {error}"
-            ) from error
-
-        trial.set_user_attr("tstr_trtr_delta_auc", delta_auc)
-        return roauc, delta_auc
-
-    study = optuna.create_study(
-        directions=("maximize", "minimize"),
-        study_name=study_name,
-        storage=storage,
-        load_if_exists=bool(storage and study_name),
+    best_info: Dict[str, Any] = (
+        json.loads(best_info_path.read_text()) if best_info_path.exists() else {}
     )
-    study.optimize(objective, n_trials=n_trials, timeout=timeout)
+    best_params: Dict[str, Any] = (
+        json.loads(best_params_path.read_text()) if best_params_path.exists() else {}
+    )
 
-    feasible_trials = [trial for trial in study.trials if trial.values is not None]
-    if not feasible_trials:
-        raise RuntimeError("Optuna search did not produce any completed trials")
+    study_name = make_study_name(study_prefix, target_label)
+    if (not best_info or not best_params) and storage and study_name:
+        try:
+            import optuna  # type: ignore
+        except ImportError:
+            optuna = None  # type: ignore
+        if optuna is not None:  # pragma: no cover - optuna available in examples env
+            study = optuna.load_study(study_name=study_name, storage=storage)
+            feasible_trials = [
+                trial for trial in study.trials if trial.values is not None
+            ]
+            if feasible_trials:
 
-    def sort_key(trial: "optuna.trial.Trial") -> Tuple[float, float]:
-        values = trial.values or (float("nan"), float("inf"))
-        primary = values[0]
-        secondary = values[1]
-        return (primary, -secondary if np.isfinite(secondary) else float("-inf"))
+                def sort_key(trial: "optuna.trial.FrozenTrial") -> Tuple[float, float]:
+                    values = trial.values or (float("nan"), float("inf"))
+                    primary = values[0]
+                    secondary = values[1]
+                    return (
+                        primary,
+                        -secondary if np.isfinite(secondary) else float("-inf"),
+                    )
 
-    best_trial = max(feasible_trials, key=sort_key)
-    best_attributes: Dict[str, object] = {
-        "trial_number": best_trial.number,
-        "values": tuple(best_trial.values or ()),
-        "params": dict(best_trial.params),
-        "validation_metrics": best_trial.user_attrs.get("validation_metrics", {}),
-        "fit_seconds": best_trial.user_attrs.get("fit_seconds"),
-        "tstr_metrics": best_trial.user_attrs.get("tstr_metrics", {}),
-        "trtr_metrics": best_trial.user_attrs.get("trtr_metrics", {}),
-        "tstr_trtr_delta_auc": best_trial.user_attrs.get("tstr_trtr_delta_auc"),
-    }
-    return study, best_attributes
+                best_trial = max(feasible_trials, key=sort_key)
+                best_info = {
+                    "trial_number": best_trial.number,
+                    "values": tuple(best_trial.values or ()),
+                    "params": dict(best_trial.params),
+                    "validation_metrics": best_trial.user_attrs.get(
+                        "validation_metrics", {}
+                    ),
+                    "fit_seconds": best_trial.user_attrs.get("fit_seconds"),
+                    "tstr_metrics": best_trial.user_attrs.get("tstr_metrics", {}),
+                    "trtr_metrics": best_trial.user_attrs.get("trtr_metrics", {}),
+                    "tstr_trtr_delta_auc": best_trial.user_attrs.get(
+                        "tstr_trtr_delta_auc"
+                    ),
+                }
+                best_params = dict(best_trial.params)
+    if not best_info:
+        best_info = {}
+    if not best_params and isinstance(best_info.get("params"), Mapping):
+        best_params = dict(best_info["params"])
+    return best_info, best_params
+
+
+def extract_calibrator_estimator(calibrator: Any) -> Optional[SUAVE]:
+    """Return the underlying SUAVE estimator from ``calibrator`` if present."""
+
+    if calibrator is None:
+        return None
+    candidate = getattr(calibrator, "base_estimator", None)
+    if isinstance(candidate, SUAVE):
+        return candidate
+    candidate = getattr(calibrator, "estimator", None)
+    if isinstance(candidate, SUAVE):
+        return candidate
+    calibrated_list = getattr(calibrator, "calibrated_classifiers_", None)
+    if calibrated_list:
+        base_est = getattr(calibrated_list[0], "base_estimator", None)
+        if isinstance(base_est, SUAVE):
+            return base_est
+    return None
 
 
 # %% [markdown]
 # ## Prepare modelling datasets
 #
 # Split the training cohort into train and validation folds for the selected
-# label. The validation fold later supports both Optuna model selection and
-# temperature calibration.
+# label. The validation fold later supports calibration if a saved model is
+# unavailable.
 
 # %%
 
@@ -383,7 +269,7 @@ else:
 # %% [markdown]
 # ## Classical model benchmarks
 #
-# Fit a suite of scikit-learn classifiers as quick baselines before training
+# Fit a suite of scikit-learn classifiers as quick baselines before evaluating
 # SUAVE. These provide a reference point for MIMIC test performance and, when
 # available, eICU external validation.
 
@@ -521,117 +407,90 @@ render_dataframe(
 
 
 # %% [markdown]
-# ## Hyperparameter search with Optuna
+# ## Load optimisation artefacts
 #
-# Optimise SUAVE hyperparameters on the training/validation split. The trial
-# history is persisted to CSV for later inspection.
+# Retrieve the best Optuna trial information saved by the optimisation script.
 
 # %%
 
-study_name = (
-    f"{analysis_config['optuna_study_prefix']}_{TARGET_LABEL}"
-    if analysis_config["optuna_study_prefix"]
-    else None
+optuna_best_info, optuna_best_params = load_optuna_results(
+    OUTPUT_DIR,
+    TARGET_LABEL,
+    study_prefix=analysis_config.get("optuna_study_prefix"),
+    storage=analysis_config.get("optuna_storage"),
 )
-study, optuna_best_info = run_optuna_search(
-    X_train_model,
-    y_train_model,
-    X_validation,
-    y_validation,
-    feature_columns=FEATURE_COLUMNS,
-    schema=schema,
-    random_state=RANDOM_STATE,
-    n_trials=analysis_config["optuna_trials"],
-    timeout=analysis_config["optuna_timeout"],
-    study_name=study_name,
-    storage=analysis_config["optuna_storage"],
-)
-
-optuna_best_params = dict(optuna_best_info.get("params", {}))
-
-trial_rows: List[Dict[str, object]] = []
-for trial in study.trials:
-    record: Dict[str, object] = {
-        "trial_number": trial.number,
-    }
-    if trial.values is not None:
-        record["validation_roauc"] = trial.values[0]
-        record["delta_auc"] = trial.values[1]
-    record.update(trial.params)
-    val_metrics = trial.user_attrs.get("validation_metrics")
-    if isinstance(val_metrics, Mapping):
-        for metric_name, metric_value in val_metrics.items():
-            record[f"validation_{metric_name.lower()}"] = metric_value
-    fit_seconds = trial.user_attrs.get("fit_seconds")
-    if fit_seconds is not None:
-        record["fit_seconds"] = fit_seconds
-    trial_rows.append(record)
-
-optuna_trials_df = pd.DataFrame(trial_rows)
 optuna_trials_path = OUTPUT_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
-if not optuna_trials_df.empty:
-    optuna_trials_df.to_csv(optuna_trials_path, index=False)
-else:
-    optuna_trials_path.write_text("trial_number,value")
+
+if not optuna_best_params:
+    print(
+        "Optuna best parameters were not found on disk; subsequent steps will "
+        "rely on defaults unless the storage backend is available."
+    )
 
 
 # %% [markdown]
-# ## Model training
+# ## Ensure calibrated SUAVE model
 #
-# Instantiate SUAVE with the best Optuna configuration and fit/calibrate on the
-# appropriate subsets.
+# Load the trained SUAVE model and isotonic calibrator if they were saved by the
+# optimisation pipeline. When the artefacts are unavailable, retrain the model
+# using the best Optuna parameters and calibrate on the validation split.
 
 # %%
 
-hidden_key = str(optuna_best_params.get("hidden_dims", "medium"))
-head_hidden_key = str(optuna_best_params.get("head_hidden_dims", "medium"))
-hidden_dims = HIDDEN_DIMENSION_OPTIONS.get(
-    hidden_key, HIDDEN_DIMENSION_OPTIONS["medium"]
-)
-head_hidden_dims = HEAD_HIDDEN_DIMENSION_OPTIONS.get(
-    head_hidden_key, HEAD_HIDDEN_DIMENSION_OPTIONS["medium"]
-)
+model_path = OUTPUT_DIR / f"suave_best_{TARGET_LABEL}.pt"
+calibrator_path = OUTPUT_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
 
-classification_loss_weight_param = optuna_best_params.get("classification_loss_weight")
-use_classification_weight = optuna_best_params.get(
-    "use_classification_loss_weight",
-    classification_loss_weight_param is not None,
-)
-if not use_classification_weight:
-    classification_loss_weight_param = None
-elif classification_loss_weight_param is None:
-    classification_loss_weight_param = 1.0
+model: Optional[SUAVE] = None
+calibrator: Optional[Any] = None
 
-model = SUAVE(
-    schema=schema,
-    latent_dim=int(optuna_best_params.get("latent_dim", 16)),
-    n_components=int(optuna_best_params.get("n_components", 1)),
-    hidden_dims=hidden_dims,
-    head_hidden_dims=head_hidden_dims,
-    dropout=float(optuna_best_params.get("dropout", 0.1)),
-    learning_rate=float(optuna_best_params.get("learning_rate", 1e-3)),
-    batch_size=int(optuna_best_params.get("batch_size", 256)),
-    beta=float(optuna_best_params.get("beta", 1.5)),
-    classification_loss_weight=classification_loss_weight_param,
-    random_state=RANDOM_STATE,
-    behaviour="supervised",
-)
+if calibrator_path.exists():
+    calibrator = joblib.load(calibrator_path)
+    model = extract_calibrator_estimator(calibrator)
+    if model is not None:
+        print(
+            f"Loaded isotonic calibrator and embedded SUAVE model from {calibrator_path}."
+        )
 
-model.fit(
-    X_train_model,
-    y_train_model,
-    warmup_epochs=int(optuna_best_params.get("warmup_epochs", 3)),
-    kl_warmup_epochs=int(optuna_best_params.get("kl_warmup_epochs", 0)),
-    head_epochs=int(optuna_best_params.get("head_epochs", 2)),
-    finetune_epochs=int(optuna_best_params.get("finetune_epochs", 2)),
-    joint_decoder_lr_scale=float(optuna_best_params.get("joint_decoder_lr_scale", 0.1)),
-    early_stop_patience=int(optuna_best_params.get("early_stop_patience", 10)),
-)
-isotonic_calibrator = fit_isotonic_calibrator(
-    model,
-    X_validation,
-    y_validation,
-)
+if model is None and model_path.exists():
+    model = SUAVE.load(model_path)
+    print(f"Loaded SUAVE model from {model_path}.")
+
+if model is None and optuna_best_params:
+    print(
+        "Training SUAVE with best Optuna parameters because no saved model was found…"
+    )
+    model = build_suave_model(optuna_best_params, schema, random_state=RANDOM_STATE)
+    model.fit(
+        X_train_model,
+        y_train_model,
+        warmup_epochs=int(optuna_best_params.get("warmup_epochs", 3)),
+        kl_warmup_epochs=int(optuna_best_params.get("kl_warmup_epochs", 0)),
+        head_epochs=int(optuna_best_params.get("head_epochs", 2)),
+        finetune_epochs=int(optuna_best_params.get("finetune_epochs", 2)),
+        joint_decoder_lr_scale=float(
+            optuna_best_params.get("joint_decoder_lr_scale", 0.1)
+        ),
+        early_stop_patience=int(optuna_best_params.get("early_stop_patience", 10)),
+    )
+else:
+    if model is None:
+        raise RuntimeError(
+            "Unable to load or reconstruct the SUAVE model. Ensure the optimisation "
+            "script has been executed to produce the necessary artefacts."
+        )
+
+if calibrator is None:
+    calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
+    print("Fitted a new isotonic calibrator on the validation split.")
+else:
+    embedded = extract_calibrator_estimator(calibrator)
+    if embedded is None:
+        print(
+            "Calibrator did not contain a usable SUAVE estimator; refitting calibrator."
+        )
+        calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
+    else:
+        model = embedded
 
 
 # %% [markdown]
@@ -655,8 +514,8 @@ label_map: Dict[str, np.ndarray] = {}
 metrics_rows: List[Dict[str, object]] = []
 
 for dataset_name, (features, labels) in evaluation_datasets.items():
-    if isotonic_calibrator is not None:
-        probs = isotonic_calibrator.predict_proba(features)
+    if calibrator is not None:
+        probs = calibrator.predict_proba(features)
     else:
         probs = model.predict_proba(features)
     probability_map[dataset_name] = probs
@@ -714,13 +573,10 @@ render_dataframe(
 # ## Benchmark ROC and calibration curves
 #
 # Visualise the discriminative and calibration performance of the classical
-# baselines alongside SUAVE across the train, test, and external cohorts. Each
-# figure contains ROC and calibration curves with Times New Roman styling and
-# abbreviated legend entries for clarity.
+# baselines alongside SUAVE across the train, test, and external cohorts.
 
 # %%
 
-plt.rcParams["font.family"] = "Times New Roman"
 benchmark_datasets = ["Train", "MIMIC test", "eICU external"]
 benchmark_curve_paths: List[Path] = []
 
@@ -865,7 +721,6 @@ for metric_name in summary_metric_candidates:
         if high_col in bootstrap_overall_df.columns:
             summary_columns.append(high_col)
 
-
 bootstrap_summary_df = bootstrap_overall_df.loc[:, summary_columns]
 bootstrap_summary_path = OUTPUT_DIR / f"bootstrap_summary_{TARGET_LABEL}.csv"
 bootstrap_summary_df.to_csv(bootstrap_summary_path, index=False)
@@ -1001,7 +856,7 @@ summary_lines: List[str] = [
     f"### {TARGET_LABEL}",
 ]
 
-best_values = optuna_best_info.get("values")
+best_values = optuna_best_info.get("values") if optuna_best_info else None
 if isinstance(best_values, (list, tuple)) and best_values:
     best_roauc = best_values[0]
     roauc_text = f"{best_roauc:.4f}" if np.isfinite(best_roauc) else "n/a"
@@ -1014,13 +869,17 @@ else:
     roauc_text = "n/a"
     delta_text = None
 
-summary_line = (
-    f"Best Optuna trial #{optuna_best_info.get('trial_number')} "
-    f"with validation ROAUC {roauc_text}"
-)
-if delta_text:
-    summary_line += delta_text
-summary_lines.append(summary_line)
+if optuna_best_info:
+    summary_line = (
+        f"Best Optuna trial #{optuna_best_info.get('trial_number')} "
+        f"with validation ROAUC {roauc_text}"
+    )
+    if delta_text:
+        summary_line += delta_text
+    summary_lines.append(summary_line)
+else:
+    summary_lines.append("Best Optuna trial: information unavailable.")
+
 summary_lines.append("Best parameters:")
 summary_lines.append("```json")
 summary_lines.append(json.dumps(optuna_best_params, indent=2, ensure_ascii=False))
@@ -1078,88 +937,18 @@ if tstr_results is not None and tstr_path is not None:
 
 summary_lines.append("## Distribution shift and privacy")
 if distribution_df is not None and distribution_path is not None:
-    base_distribution_df = (
-        distribution_top if distribution_top is not None else distribution_df
-    )
-    distribution_summary_df = base_distribution_df.rename(
-        columns={
-            "feature": "Feature",
-            "ks": "KS",
-            "mmd": "MMD",
-            "mutual_information": "Mutual information",
-        }
-    )
-    distribution_columns = [
-        "Feature",
-        "KS",
-        "MMD",
-        "Mutual information",
-    ]
-    existing_distribution_columns = [
-        column
-        for column in distribution_columns
-        if column in distribution_summary_df.columns
-    ]
-    if existing_distribution_columns:
-        distribution_summary_df = distribution_summary_df.loc[
-            :, existing_distribution_columns
-        ]
-    distribution_summary_df = distribution_summary_df.reset_index(drop=True)
-    summary_lines.append("Top 10 features by KS statistic:")
-    summary_lines.append(dataframe_to_markdown(distribution_summary_df, floatfmt=".3f"))
     summary_lines.append(
-        f"Full distribution metrics: {distribution_path.relative_to(OUTPUT_DIR)}"
+        f"- Distribution metrics: {distribution_path.relative_to(OUTPUT_DIR)}"
     )
-else:
-    summary_lines.append("Distribution metrics were not computed.")
-
-if membership_df.empty:
-    summary_lines.append("No membership inference metrics were recorded.")
-else:
-    membership_summary_df = membership_df.rename(
-        columns={
-            "target": "Target",
-            "attack_auc": "Attack AUC",
-            "attack_best_accuracy": "Best accuracy",
-            "attack_best_threshold": "Threshold",
-            "attack_majority_class_accuracy": "Majority baseline",
-        }
-    )
-    membership_columns = [
-        "Target",
-        "Attack AUC",
-        "Best accuracy",
-        "Threshold",
-        "Majority baseline",
-    ]
-    existing_membership_columns = [
-        column
-        for column in membership_columns
-        if column in membership_summary_df.columns
-    ]
-    if existing_membership_columns:
-        membership_summary_df = membership_summary_df.loc[
-            :, existing_membership_columns
-        ]
-    membership_summary_df = membership_summary_df.reset_index(drop=True)
-    summary_lines.append("Membership inference results:")
-    summary_lines.append(dataframe_to_markdown(membership_summary_df, floatfmt=".3f"))
+if membership_path.exists():
     summary_lines.append(
-        f"Membership metrics saved to: {membership_path.relative_to(OUTPUT_DIR)}"
+        f"- Membership inference: {membership_path.relative_to(OUTPUT_DIR)}"
     )
+summary_lines.append(f"- Baseline metrics: {baseline_path.relative_to(OUTPUT_DIR)}")
+for figure_path in benchmark_curve_paths:
+    summary_lines.append(f"- Benchmark curves: {figure_path.relative_to(OUTPUT_DIR)}")
+summary_lines.append("")
 
-summary_path = OUTPUT_DIR / "summary.md"
-summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
-
-print("Analysis complete.")
-print(f"Metric table saved to {metrics_path}")
-print(f"Calibration plot saved to {calibration_path}")
-print(f"Latent space plot saved to {latent_path}")
-print(f"Membership inference results saved to {membership_path}")
-if tstr_results is not None and tstr_path is not None and distribution_path is not None:
-    print(f"TSTR/TRTR comparison saved to {tstr_path}")
-    print(f"Distribution metrics saved to {distribution_path}")
+summary_path = OUTPUT_DIR / f"evaluation_summary_{TARGET_LABEL}.md"
+summary_path.write_text("\n".join(summary_lines))
 print(f"Summary written to {summary_path}")
-
-
-# %%
