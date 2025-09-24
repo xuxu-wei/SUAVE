@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
@@ -55,6 +56,64 @@ def _display_figure(figure: plt.Figure) -> object | None:
         return None
 
 
+def _coerce_metadata_value(
+    metadata: Mapping[str, Any] | None, key: str
+) -> float | None:
+    """Return ``metadata[key]`` coerced to ``float`` when possible."""
+
+    if not metadata:
+        return None
+    value = metadata.get(key)
+    if value is None:
+        return None
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(coerced):
+        return coerced
+    return None
+
+
+def _format_elbo_formula(metadata: Mapping[str, Any] | None) -> str:
+    """Return a textual ELBO formula with the current ``beta`` weight."""
+
+    beta = _coerce_metadata_value(metadata, "beta")
+    if beta is None:
+        beta_prefix = "β·"
+    else:
+        rounded = round(beta, 1)
+        if math.isclose(rounded, 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            beta_prefix = ""
+        else:
+            beta_prefix = f"β={rounded:.1f}·"
+
+    inner = "(KL_cat + KL_gauss)"
+    if beta_prefix:
+        formula = f"{beta_prefix}{inner} - reconstruction"
+    else:
+        formula = f"{inner} - reconstruction"
+    return f"ELBO\n({formula})"
+
+
+def _format_joint_objective_formula(metadata: Mapping[str, Any] | None) -> str:
+    """Return a textual joint objective formula including classifier weight."""
+
+    weight = _coerce_metadata_value(metadata, "classification_loss_weight")
+    if weight is None:
+        classification_term = "classification_loss"
+    else:
+        rounded = round(weight, 1)
+        if math.isclose(rounded, 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            classification_term = "classification_loss"
+        else:
+            classification_term = (
+                f"classification_loss_weight={rounded:.1f}·classification_loss"
+            )
+
+    return f"Joint Objective\n(ELBO + {classification_term})"
+
+
 class TrainingPlotMonitor:
     """Visualise training and validation metrics during ``fit``."""
 
@@ -69,12 +128,19 @@ class TrainingPlotMonitor:
         axes = axes.flatten()
 
         self._metrics = self._metric_configuration()
+        self._metric_configs: dict[str, dict[str, object]] = {
+            metric["name"]: metric for metric in self._metrics
+        }
         self._axes: dict[str, Axes] = {}
         self._lines: dict[str, dict[str, Line2D | None]] = {}
         self._history: dict[str, dict[str, list[float]]] = {}
 
         for axis, metric in zip(axes, self._metrics):
-            axis.set_title(metric["title"])
+            title = metric["title"]
+            title_factory = metric.get("title_factory")
+            if callable(title_factory):
+                title = title_factory(None)
+            axis.set_title(title)
             axis.set_xlabel("Epoch")
             axis.set_ylabel(metric["ylabel"])
 
@@ -120,6 +186,7 @@ class TrainingPlotMonitor:
         epoch: int,
         train_metrics: Mapping[str, float | int | None] | None = None,
         val_metrics: Mapping[str, float | int | None] | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         """Append metrics for ``epoch`` and refresh the visualisation."""
 
@@ -140,6 +207,11 @@ class TrainingPlotMonitor:
                 lines["train"].set_data(history["epoch"], history["train"])
             if lines["val"] is not None:
                 lines["val"].set_data(history["epoch"], history["val"])
+
+            config = self._metric_configs[name]
+            title_factory = config.get("title_factory")
+            if callable(title_factory):
+                axis.set_title(title_factory(metadata))
 
             axis.relim()
             axis.autoscale_view()
@@ -177,27 +249,6 @@ class TrainingPlotMonitor:
         if self._behaviour == "supervised":
             return [
                 {
-                    "name": "total_loss",
-                    "title": "Total Loss",
-                    "ylabel": "Loss",
-                    "plot_train": True,
-                    "plot_val": True,
-                },
-                {
-                    "name": "classification_loss",
-                    "title": "Classification Loss",
-                    "ylabel": "Loss",
-                    "plot_train": True,
-                    "plot_val": True,
-                },
-                {
-                    "name": "auroc",
-                    "title": "Validation AUROC",
-                    "ylabel": "AUROC",
-                    "plot_train": False,
-                    "plot_val": True,
-                },
-                {
                     "name": "reconstruction",
                     "title": "Reconstruction",
                     "ylabel": "Value",
@@ -211,16 +262,39 @@ class TrainingPlotMonitor:
                     "plot_train": True,
                     "plot_val": True,
                 },
+                {
+                    "name": "total_loss",
+                    "title": "ELBO",
+                    "ylabel": "Loss",
+                    "plot_train": True,
+                    "plot_val": True,
+                    "title_factory": _format_elbo_formula,
+                },
+                {
+                    "name": "auroc",
+                    "title": "Validation AUROC",
+                    "ylabel": "AUROC",
+                    "plot_train": False,
+                    "plot_val": True,
+                },
+                {
+                    "name": "classification_loss",
+                    "title": "Classification Loss",
+                    "ylabel": "Loss",
+                    "plot_train": True,
+                    "plot_val": True,
+                },
+                {
+                    "name": "joint_objective",
+                    "title": "Joint Objective",
+                    "ylabel": "Loss",
+                    "plot_train": True,
+                    "plot_val": True,
+                    "title_factory": _format_joint_objective_formula,
+                },
             ]
 
         return [
-            {
-                "name": "total_loss",
-                "title": "Total Loss",
-                "ylabel": "Loss",
-                "plot_train": True,
-                "plot_val": True,
-            },
             {
                 "name": "reconstruction",
                 "title": "Reconstruction",
@@ -234,6 +308,14 @@ class TrainingPlotMonitor:
                 "ylabel": "Value",
                 "plot_train": True,
                 "plot_val": True,
+            },
+            {
+                "name": "total_loss",
+                "title": "ELBO",
+                "ylabel": "Loss",
+                "plot_train": True,
+                "plot_val": True,
+                "title_factory": _format_elbo_formula,
             },
         ]
 
