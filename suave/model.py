@@ -575,7 +575,7 @@ class SUAVE:
 
         eps = 1e-8
         ratio = float(elbo_scale) / max(float(ce_scale), eps)
-        return float(np.clip(ratio, 0.1, 100.0))
+        return float(np.clip(ratio, 0.1, 1000.0))
 
     def _resolve_classification_loss_weight(
         self,
