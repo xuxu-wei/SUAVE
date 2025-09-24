@@ -116,6 +116,12 @@ class SUAVE:
         Width of optional hidden layers inserted into the classification head.
         Each hidden layer follows a ``Linear → ReLU → Dropout`` pattern before
         the final ``n_classes`` projection.
+    classification_loss_weight : float, optional
+        Relative weight applied to the classifier cross-entropy when optimising
+        jointly with the ELBO during the fine-tuning stage. ``None`` enables an
+        automatic heuristic that scales the classification term to match the
+        warm-up validation ELBO by comparing it against the held-out
+        cross-entropy measured after the head-only phase.
     dropout : float, optional
         Dropout probability applied inside the neural modules.  When omitted a
         dataset-size-aware default is selected during :meth:`fit`.
@@ -253,6 +259,7 @@ class SUAVE:
         beta: float = _DEFAULT_BETA,
         hidden_dims: Optional[Iterable[int]] = None,
         head_hidden_dims: Iterable[int] = _DEFAULT_HEAD_HIDDEN_DIMS,
+        classification_loss_weight: Optional[float] = None,
         dropout: Optional[float] = None,
         learning_rate: Optional[float] = None,
         batch_size: Optional[int] = None,
@@ -304,6 +311,15 @@ class SUAVE:
         if any(dim <= 0 for dim in head_hidden_dims):
             raise ValueError("head_hidden_dims must contain positive integers")
         self.head_hidden_dims = head_hidden_dims
+
+        if classification_loss_weight is not None:
+            weight_value = float(classification_loss_weight)
+            if weight_value < 0:
+                raise ValueError("classification_loss_weight must be non-negative")
+        else:
+            weight_value = None
+        self._classification_loss_weight_user = classification_loss_weight is not None
+        self.classification_loss_weight = weight_value
 
         dropout_user = dropout is not None
         dropout_value = float(_DEFAULT_DROPOUT if dropout is None else dropout)
@@ -386,6 +402,7 @@ class SUAVE:
             "latent_dim": not latent_dim_user,
             "hidden_dims": not hidden_dims_user,
             "head_hidden_dims": False,
+            "classification_loss_weight": classification_loss_weight is None,
             "dropout": not dropout_user,
             "learning_rate": not learning_rate_user,
             "batch_size": not batch_size_user,
@@ -551,6 +568,39 @@ class SUAVE:
         if temperature < tau_min:
             return tau_min
         return temperature
+
+    @staticmethod
+    def _derive_classification_loss_weight(elbo_scale: float, ce_scale: float) -> float:
+        """Return a clipped ratio aligning classification and ELBO magnitudes."""
+
+        eps = 1e-8
+        ratio = float(elbo_scale) / max(float(ce_scale), eps)
+        return float(np.clip(ratio, 0.1, 100.0))
+
+    def _resolve_classification_loss_weight(
+        self,
+        *,
+        warmup_elbo_scale: float | None,
+        ce_scale: float | None,
+    ) -> float:
+        """Determine the classifier weight used during joint optimisation."""
+
+        if (
+            self._classification_loss_weight_user
+            and self.classification_loss_weight is not None
+        ):
+            return float(self.classification_loss_weight)
+        if (
+            warmup_elbo_scale is None
+            or not math.isfinite(float(warmup_elbo_scale))
+            or ce_scale is None
+            or not math.isfinite(float(ce_scale))
+            or float(ce_scale) <= 0.0
+        ):
+            return 1.0
+        return self._derive_classification_loss_weight(
+            float(warmup_elbo_scale), float(ce_scale)
+        )
 
     def _gumbel_temperature_for_epoch(self, epoch: int) -> float:
         """Return the annealed Gumbel-Softmax temperature for ``epoch``."""
@@ -1077,6 +1127,15 @@ class SUAVE:
         )
         epoch_cursor += max(schedule_warmup, 0)
 
+        warmup_elbo_scale: float | None = None
+        warmup_metrics = warmup_history.get("history", [])
+        if warmup_metrics:
+            last_metrics = warmup_metrics[-1]
+            if last_metrics is not None:
+                nll_value = float(last_metrics.get("nll", float("nan")))
+                if math.isfinite(nll_value):
+                    warmup_elbo_scale = nll_value
+
         if self.behaviour == "unsupervised" and self._tau_start is not None:
             self._inference_tau = warmup_history.get("final_temperature", 1.0)
 
@@ -1123,6 +1182,30 @@ class SUAVE:
             )
             epoch_cursor += max(schedule_head, 0)
 
+            ce_scale: float | None = None
+            if y_val_tensor is not None:
+                validation_metrics = self._compute_validation_scores(
+                    val_encoder_inputs,
+                    val_data_tensors,
+                    val_mask_tensors,
+                    batch_size=batch_size,
+                    temperature=None,
+                    y_val_tensor=y_val_tensor,
+                    classification_loss_weight=None,
+                )
+                if validation_metrics:
+                    ce_value = float(
+                        validation_metrics.get("classification_loss", float("nan"))
+                    )
+                    if math.isfinite(ce_value):
+                        ce_scale = ce_value
+
+            resolved_weight = self._resolve_classification_loss_weight(
+                warmup_elbo_scale=warmup_elbo_scale,
+                ce_scale=ce_scale,
+            )
+            self.classification_loss_weight = float(resolved_weight)
+
             self._run_joint_finetune(
                 schedule_finetune,
                 encoder_inputs,
@@ -1138,6 +1221,7 @@ class SUAVE:
                 y_val_tensor=y_val_tensor,
                 plot_monitor=monitor,
                 epoch_offset=epoch_cursor,
+                classification_loss_weight=float(self.classification_loss_weight),
             )
             epoch_cursor += max(schedule_finetune, 0)
 
@@ -1213,6 +1297,7 @@ class SUAVE:
             if plot_monitor is not None:
                 val_metrics = {
                     "total_loss": metrics.get("nll") if metrics else None,
+                    "joint_objective": None,
                     "reconstruction": (
                         metrics.get("reconstruction") if metrics else None
                     ),
@@ -1322,6 +1407,7 @@ class SUAVE:
                 if metrics:
                     val_metrics = {
                         "total_loss": metrics.get("nll"),
+                        "joint_objective": None,
                         "reconstruction": metrics.get("reconstruction"),
                         "kl": metrics.get("categorical_kl", 0.0)
                         + metrics.get("gaussian_kl", 0.0),
@@ -1330,6 +1416,7 @@ class SUAVE:
                     epoch=epoch_offset + epoch,
                     train_metrics={
                         "total_loss": average_loss,
+                        "joint_objective": None,
                         "reconstruction": average_recon,
                         "kl": average_cat_kl + average_gauss_kl,
                     },
@@ -1603,7 +1690,8 @@ class SUAVE:
                         auroc = float("nan")
                     val_metrics = {
                         "classification_loss": float(val_loss.item()),
-                        "total_loss": float(val_loss.item()),
+                        "total_loss": None,
+                        "joint_objective": None,
                         "auroc": auroc,
                     }
 
@@ -1611,7 +1699,8 @@ class SUAVE:
                     epoch=epoch_offset + epoch,
                     train_metrics={
                         "classification_loss": average_loss,
-                        "total_loss": average_loss,
+                        "total_loss": None,
+                        "joint_objective": None,
                     },
                     val_metrics=val_metrics,
                 )
@@ -1640,6 +1729,7 @@ class SUAVE:
         y_val_tensor: Tensor | None,
         plot_monitor: TrainingPlotMonitor | None = None,
         epoch_offset: int = 0,
+        classification_loss_weight: float = 1.0,
     ) -> None:
         """Fine-tune all modules jointly with early stopping."""
 
@@ -1674,8 +1764,25 @@ class SUAVE:
         n_samples = encoder_inputs.size(0)
         effective_batch = min(batch_size, n_samples) if n_samples else batch_size
 
-        best_state: dict[str, Any] | None = None
-        best_metrics: dict[str, float] | None = None
+        classification_weight = float(max(classification_loss_weight, 0.0))
+
+        best_state: dict[str, Any] | None = self._capture_model_state()
+        baseline_metrics = self._compute_validation_scores(
+            val_inputs,
+            val_data_tensors,
+            val_mask_tensors,
+            batch_size=batch_size,
+            temperature=(
+                self._inference_tau if self.behaviour == "unsupervised" else None
+            ),
+            y_val_tensor=y_val_tensor,
+            classification_loss_weight=classification_weight,
+        )
+        best_metrics: dict[str, float] | None = (
+            baseline_metrics if baseline_metrics else None
+        )
+        if baseline_metrics:
+            self._joint_val_metrics = baseline_metrics
         patience_counter = 0
         progress = tqdm(range(finetune_epochs), desc="Joint fine-tune", leave=False)
         for epoch in progress:
@@ -1684,7 +1791,8 @@ class SUAVE:
                 if n_samples
                 else torch.tensor([], device=device, dtype=torch.long)
             )
-            epoch_loss = 0.0
+            epoch_joint_total = 0.0
+            epoch_elbo_total = 0.0
             epoch_samples = 0
             epoch_class_loss = 0.0
             epoch_class_samples = 0
@@ -1719,21 +1827,21 @@ class SUAVE:
                         else None
                     ),
                 )
-                loss = outputs["loss"]
+                elbo_loss = outputs["loss"]
+                joint_loss = elbo_loss
+                batch_count = batch_indices.numel()
                 if self._classifier is not None and y_train_tensor is not None:
                     logits = self._classifier(outputs["latent"])
                     targets = y_train_tensor[batch_indices]
                     class_loss = self._classifier.loss(logits, targets)
-                    loss = loss + class_loss
-                    batch_count = batch_indices.numel()
+                    joint_loss = joint_loss + class_loss * classification_weight
                     epoch_class_loss += float(class_loss.item()) * batch_count
                     epoch_class_samples += batch_count
-                else:
-                    batch_count = batch_indices.numel()
                 optimizer.zero_grad()
-                loss.backward()
+                joint_loss.backward()
                 optimizer.step()
-                epoch_loss += float(loss.item()) * batch_count
+                epoch_joint_total += float(joint_loss.item()) * batch_count
+                epoch_elbo_total += float(elbo_loss.item()) * batch_count
                 epoch_samples += batch_count
                 epoch_recon_total += float(outputs["reconstruction"].sum().item())
                 epoch_cat_kl_total += float(outputs["categorical_kl"].sum().item())
@@ -1748,19 +1856,27 @@ class SUAVE:
                     self._inference_tau if self.behaviour == "unsupervised" else None
                 ),
                 y_val_tensor=y_val_tensor,
+                classification_loss_weight=classification_weight,
             )
-            average_loss = epoch_loss / max(epoch_samples, 1)
+            average_joint = epoch_joint_total / max(epoch_samples, 1)
+            average_elbo = epoch_elbo_total / max(epoch_samples, 1)
             average_recon = epoch_recon_total / max(epoch_samples, 1)
             average_cat_kl = epoch_cat_kl_total / max(epoch_samples, 1)
             average_gauss_kl = epoch_gauss_kl_total / max(epoch_samples, 1)
             average_class_loss: float | None = None
             if epoch_class_samples > 0:
                 average_class_loss = epoch_class_loss / epoch_class_samples
-            progress.set_postfix({"loss": average_loss, "nll": metrics.get("nll")})
+            progress.set_postfix(
+                {
+                    "joint": average_joint,
+                    "nll": metrics.get("nll"),
+                }
+            )
 
             if plot_monitor is not None:
                 val_metrics = {
                     "total_loss": metrics.get("nll"),
+                    "joint_objective": metrics.get("joint_objective"),
                     "classification_loss": metrics.get("classification_loss"),
                     "reconstruction": metrics.get("reconstruction"),
                     "kl": metrics.get("categorical_kl", 0.0)
@@ -1770,7 +1886,8 @@ class SUAVE:
                 plot_monitor.update(
                     epoch=epoch_offset + epoch,
                     train_metrics={
-                        "total_loss": average_loss,
+                        "total_loss": average_elbo,
+                        "joint_objective": average_joint,
                         "classification_loss": average_class_loss,
                         "reconstruction": average_recon,
                         "kl": average_cat_kl + average_gauss_kl,
@@ -1864,8 +1981,9 @@ class SUAVE:
         batch_size: int,
         temperature: float | None,
         y_val_tensor: Tensor | None,
+        classification_loss_weight: float | None = None,
     ) -> dict[str, float]:
-        """Compute validation NLL, Brier score and ECE."""
+        """Compute validation NLL, classifier metrics and the joint objective."""
 
         metrics = self._compute_elbo_on_dataset(
             encoder_inputs,
@@ -1881,8 +1999,13 @@ class SUAVE:
         metrics.setdefault("ece", float("nan"))
         metrics.setdefault("classification_loss", float("nan"))
         metrics.setdefault("auroc", float("nan"))
+        metrics.setdefault("joint_objective", float("nan"))
 
         if self._classifier is None or y_val_tensor is None:
+            if classification_loss_weight is not None and math.isfinite(
+                float(metrics.get("nll", float("nan")))
+            ):
+                metrics["joint_objective"] = float(metrics.get("nll", float("nan")))
             return metrics
 
         was_training = self._classifier.training
@@ -1911,6 +2034,18 @@ class SUAVE:
             metrics["auroc"] = float(compute_auroc(probabilities, targets))
         except ValueError:
             metrics["auroc"] = float("nan")
+        if classification_loss_weight is not None:
+            class_loss_value = metrics.get("classification_loss", float("nan"))
+            nll_value = metrics.get("nll", float("nan"))
+            if math.isfinite(float(class_loss_value)) and math.isfinite(
+                float(nll_value)
+            ):
+                metrics["joint_objective"] = float(
+                    float(nll_value)
+                    + float(classification_loss_weight) * float(class_loss_value)
+                )
+            else:
+                metrics["joint_objective"] = float("nan")
         if was_training:
             self._classifier.train()
         return metrics
@@ -1919,17 +2054,41 @@ class SUAVE:
     def _is_better_metrics(candidate: dict[str, float], best: dict[str, float]) -> bool:
         """Return ``True`` when ``candidate`` improves upon ``best``."""
 
-        for key in ("nll", "brier", "ece"):
-            cand = float(candidate.get(key, float("inf")))
-            best_val = float(best.get(key, float("inf")))
-            if not math.isfinite(cand):
-                cand = float("inf")
-            if not math.isfinite(best_val):
-                best_val = float("inf")
-            if cand < best_val - 1e-8:
+        comparisons: tuple[tuple[str, str], ...] = (
+            ("joint_objective", "min"),
+            ("nll", "min"),
+            ("classification_loss", "min"),
+            ("brier", "min"),
+            ("ece", "min"),
+            ("auroc", "max"),
+        )
+        tolerance = 1e-8
+
+        for key, mode in comparisons:
+            cand_raw = candidate.get(key)
+            best_raw = best.get(key)
+            cand = float(cand_raw) if cand_raw is not None else float("nan")
+            best_val = float(best_raw) if best_raw is not None else float("nan")
+            cand_finite = math.isfinite(cand)
+            best_finite = math.isfinite(best_val)
+
+            if not cand_finite and not best_finite:
+                continue
+            if cand_finite and not best_finite:
                 return True
-            if cand > best_val + 1e-8:
+            if not cand_finite and best_finite:
                 return False
+
+            if mode == "min":
+                if cand < best_val - tolerance:
+                    return True
+                if cand > best_val + tolerance:
+                    return False
+            else:  # mode == "max"
+                if cand > best_val + tolerance:
+                    return True
+                if cand < best_val - tolerance:
+                    return False
         return False
 
     def _capture_model_state(self) -> dict[str, Any]:
@@ -3617,6 +3776,7 @@ class SUAVE:
             "finetune_epochs": self.finetune_epochs,
             "joint_decoder_lr_scale": self.joint_decoder_lr_scale,
             "early_stop_patience": self.early_stop_patience,
+            "classification_loss_weight": self.classification_loss_weight,
             "auto_configured": {
                 key: bool(value) for key, value in self._auto_configured.items()
             },
@@ -3751,6 +3911,7 @@ class SUAVE:
             "n_components",
             "hidden_dims",
             "head_hidden_dims",
+            "classification_loss_weight",
             "dropout",
             "learning_rate",
             "batch_size",
@@ -3778,6 +3939,7 @@ class SUAVE:
                     "tau_min",
                     "tau_decay",
                     "joint_decoder_lr_scale",
+                    "classification_loss_weight",
                 }:
                     value = float(value)
                 elif key in {
@@ -3802,6 +3964,9 @@ class SUAVE:
                 config_key: bool(config_value)
                 for config_key, config_value in auto_configured.items()
             }
+            model._classification_loss_weight_user = not bool(
+                model._auto_configured.get("classification_loss_weight", False)
+            )
         auto_hparams = metadata.get("auto_hyperparameters")
         if isinstance(auto_hparams, dict):
             parsed = parse_heuristic_hyperparameters(auto_hparams)
