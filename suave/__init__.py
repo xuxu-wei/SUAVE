@@ -16,7 +16,7 @@ from importlib import import_module
 from .model import SUAVE
 from .types import Schema
 from .schema_inference import (
-    SchemaInferenceMode,
+    SCHEMA_INFERENCE_MODES,
     SchemaInferenceResult,
     SchemaInferencer,
 )
@@ -35,7 +35,6 @@ __all__ = [
     "SUAVE",
     "Schema",
     "SchemaInferencer",
-    "SchemaInferenceMode",
     "SchemaInferenceResult",
     "data",
     "evaluate",
@@ -43,4 +42,5 @@ __all__ = [
     "sampling",
     "types",
     "schema_inference",
+    "SCHEMA_INFERENCE_MODES",
 ]

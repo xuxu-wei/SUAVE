@@ -184,6 +184,13 @@ class TrainingPlotMonitor:
                     "plot_val": True,
                 },
                 {
+                    "name": "joint_objective",
+                    "title": "Joint Objective",
+                    "ylabel": "Loss",
+                    "plot_train": True,
+                    "plot_val": True,
+                },
+                {
                     "name": "classification_loss",
                     "title": "Classification Loss",
                     "ylabel": "Loss",

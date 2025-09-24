@@ -35,20 +35,15 @@ SUAVE 依赖 Python 3.9+ 与 PyTorch。
 
 ```python
 import pandas as pd
-from suave import SUAVE, Schema
+from suave import SUAVE, SchemaInferencer
 
-# 1. 声明 schema
-schema = Schema(
-    {
-        "age": {"type": "real"},
-        "sofa": {"type": "count"},
-        "gender": {"type": "cat", "n_classes": 2},
-    }
-)
-
-# 2. 读取数据并训练模型
+# 1. 读取数据并通过交互式界面审阅 Schema
 train_X = pd.read_csv("data/train_features.csv")
 train_y = pd.read_csv("data/train_labels.csv")["label"]
+schema_result = SchemaInferencer().infer(train_X, mode="interactive")  # 打开 UI 并协助构建 schema
+schema = schema_result.schema
+
+# 2. 使用审阅后的 Schema 训练模型
 model = SUAVE(schema=schema)
 model.fit(train_X, train_y)
 
@@ -56,6 +51,8 @@ model.fit(train_X, train_y)
 probabilities = model.predict_proba(train_X.tail(5))
 labels = model.predict(train_X.tail(5))
 ```
+
+若跳过第 1 步，`SUAVE.fit` 会在 `mode="info"` 下自动推断 schema，便于快速验证流程；对于生产数据，推荐开启交互式审阅以突显需要手动检查的列。
 
 完整示例可参考 [`examples/sepsis_minimal.py`](examples/sepsis_minimal.py)。
 
