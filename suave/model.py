@@ -1312,6 +1312,7 @@ class SUAVE:
                     epoch=epoch_offset,
                     train_metrics={},
                     val_metrics=val_metrics,
+                    beta=self.beta,
                 )
             final_temperature = temperature if temperature is not None else 1.0
             return {"final_temperature": float(final_temperature), "history": history}
@@ -1333,6 +1334,7 @@ class SUAVE:
         )
         progress = tqdm(range(warmup_epochs), desc=description, leave=False)
         for epoch in progress:
+            last_beta_scale = 0.0
             temperature = (
                 self._gumbel_temperature_for_epoch(epoch)
                 if self.behaviour == "unsupervised"
@@ -1370,6 +1372,7 @@ class SUAVE:
 
                 global_step += 1
                 beta_scale = losses.kl_warmup(global_step, warmup_steps, self.beta)
+                last_beta_scale = float(beta_scale)
                 outputs = self._forward_elbo_batch(
                     batch_input,
                     batch_data,
@@ -1421,6 +1424,7 @@ class SUAVE:
                         "kl": average_cat_kl + average_gauss_kl,
                     },
                     val_metrics=val_metrics,
+                    beta=last_beta_scale if warmup_steps > 0 else self.beta,
                 )
 
         final_temperature = final_temperature if final_temperature is not None else 1.0
@@ -1703,6 +1707,7 @@ class SUAVE:
                         "joint_objective": None,
                     },
                     val_metrics=val_metrics,
+                    beta=self.beta,
                 )
 
         if not was_training:
@@ -1893,6 +1898,8 @@ class SUAVE:
                         "kl": average_cat_kl + average_gauss_kl,
                     },
                     val_metrics=val_metrics,
+                    beta=self.beta,
+                    classification_loss_weight=classification_weight,
                 )
 
             if best_metrics is None or self._is_better_metrics(metrics, best_metrics):
