@@ -326,7 +326,7 @@ class TrainingPlotMonitor:
             return float("nan")
         return -numeric
 
-
+      
 def plot_reliability_curve(
     probabilities: Iterable[float],
     targets: Iterable[int],
