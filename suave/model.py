@@ -10,7 +10,7 @@ import warnings
 from pathlib import Path
 import pickle
 from collections import OrderedDict
-from typing import Any, Dict, Iterable, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -33,7 +33,7 @@ from .modules import losses, distributions as dist_utils
 from .modules.prior import PriorMean
 from . import sampling as sampling_utils
 from .types import Schema, ColumnSpec
-from .evaluate import compute_brier, compute_ece
+from .evaluate import compute_auroc, compute_brier, compute_ece
 from .defaults import (
     parse_heuristic_hyperparameters,
     recommend_hyperparameters,
@@ -41,6 +41,10 @@ from .defaults import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:
+    from .plots import TrainingPlotMonitor
 
 
 _DEFAULT_LATENT_DIM = 32
@@ -778,6 +782,7 @@ class SUAVE:
         finetune_epochs: Optional[int] = None,
         joint_decoder_lr_scale: Optional[float] = None,
         early_stop_patience: Optional[int] = None,
+        plot_monitor: bool = False,
     ) -> "SUAVE":
         """Optimise the encoder, decoder and optional classifier head.
 
@@ -818,6 +823,11 @@ class SUAVE:
         early_stop_patience : int, optional
             Override for the validation early-stopping patience used during the
             joint fine-tuning phase.
+        plot_monitor : bool, default False
+            When ``True``, display a live plot of training and validation
+            metrics that refreshes after each epoch. The layout adapts to the
+            current behaviour (supervised vs. unsupervised) and supports both
+            notebook and standard Python environments.
 
         Returns
         -------
@@ -890,6 +900,13 @@ class SUAVE:
             if early_stop_patience is None
             else int(early_stop_patience)
         )
+
+        monitor: TrainingPlotMonitor | None = None
+        if plot_monitor:
+            from .plots import TrainingPlotMonitor as _TrainingPlotMonitor
+
+            monitor = _TrainingPlotMonitor(self.behaviour)
+        epoch_cursor = 0
         for name, value in {
             "warmup_epochs": schedule_warmup,
             "head_epochs": schedule_head,
@@ -1042,7 +1059,10 @@ class SUAVE:
             val_mask_tensors,
             batch_size=batch_size,
             kl_warmup_epochs=kl_warmup_epochs,
+            plot_monitor=monitor,
+            epoch_offset=epoch_cursor,
         )
+        epoch_cursor += max(schedule_warmup, 0)
 
         if self.behaviour == "unsupervised" and self._tau_start is not None:
             self._inference_tau = warmup_history.get("final_temperature", 1.0)
@@ -1054,6 +1074,18 @@ class SUAVE:
                 self._inference_tau if self.behaviour == "unsupervised" else None
             ),
         )
+
+        val_latent_stats: dict[str, Tensor] | None = None
+        if (
+            monitor is not None
+            and self.behaviour == "supervised"
+            and y_val_tensor is not None
+        ):
+            val_latent_stats = self._collect_posterior_statistics(
+                val_encoder_inputs,
+                batch_size=batch_size,
+                temperature=None,
+            )
 
         if self.behaviour == "supervised":
             assert self._classes is not None
@@ -1069,7 +1101,14 @@ class SUAVE:
                 y_train_tensor,
                 epochs=schedule_head,
                 batch_size=batch_size,
+                val_latent_mu=(
+                    val_latent_stats["mean"] if val_latent_stats is not None else None
+                ),
+                y_val_tensor=y_val_tensor,
+                plot_monitor=monitor,
+                epoch_offset=epoch_cursor,
             )
+            epoch_cursor += max(schedule_head, 0)
 
             self._run_joint_finetune(
                 schedule_finetune,
@@ -1084,7 +1123,10 @@ class SUAVE:
                 early_stop_patience=schedule_patience,
                 y_train_tensor=y_train_tensor,
                 y_val_tensor=y_val_tensor,
+                plot_monitor=monitor,
+                epoch_offset=epoch_cursor,
             )
+            epoch_cursor += max(schedule_finetune, 0)
 
             cache_stats = self._collect_posterior_statistics(
                 encoder_inputs,
@@ -1133,6 +1175,8 @@ class SUAVE:
         *,
         batch_size: int,
         kl_warmup_epochs: int,
+        plot_monitor: TrainingPlotMonitor | None = None,
+        epoch_offset: int = 0,
     ) -> dict[str, Any]:
         """Execute the ELBO warm-start stage and record validation metrics."""
 
@@ -1153,6 +1197,24 @@ class SUAVE:
             )
             if metrics:
                 history.append(metrics)
+            if plot_monitor is not None:
+                val_metrics = {
+                    "total_loss": metrics.get("nll") if metrics else None,
+                    "reconstruction": (
+                        metrics.get("reconstruction") if metrics else None
+                    ),
+                    "kl": (
+                        metrics.get("categorical_kl", 0.0)
+                        + metrics.get("gaussian_kl", 0.0)
+                        if metrics
+                        else None
+                    ),
+                }
+                plot_monitor.update(
+                    epoch=epoch_offset,
+                    train_metrics={},
+                    val_metrics=val_metrics,
+                )
             final_temperature = temperature if temperature is not None else 1.0
             return {"final_temperature": float(final_temperature), "history": history}
 
@@ -1186,6 +1248,10 @@ class SUAVE:
                 else torch.tensor([], device=device, dtype=torch.long)
             )
             epoch_loss = 0.0
+            epoch_samples = 0
+            epoch_recon_total = 0.0
+            epoch_cat_kl_total = 0.0
+            epoch_gauss_kl_total = 0.0
             for start in range(0, n_samples, max(effective_batch, 1)):
                 batch_indices = permutation[start : start + effective_batch]
                 batch_input = encoder_inputs[batch_indices]
@@ -1217,9 +1283,18 @@ class SUAVE:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                epoch_loss += float(loss.item())
+                batch_count = batch_indices.numel()
+                epoch_loss += float(loss.item()) * batch_count
+                epoch_samples += batch_count
+                epoch_recon_total += float(outputs["reconstruction"].sum().item())
+                epoch_cat_kl_total += float(outputs["categorical_kl"].sum().item())
+                epoch_gauss_kl_total += float(outputs["gaussian_kl"].sum().item())
 
-            progress.set_postfix({"loss": epoch_loss / n_batches})
+            average_loss = epoch_loss / max(epoch_samples, 1)
+            average_recon = epoch_recon_total / max(epoch_samples, 1)
+            average_cat_kl = epoch_cat_kl_total / max(epoch_samples, 1)
+            average_gauss_kl = epoch_gauss_kl_total / max(epoch_samples, 1)
+            progress.set_postfix({"loss": average_loss})
             metrics = self._compute_elbo_on_dataset(
                 val_inputs,
                 val_data_tensors,
@@ -1229,6 +1304,24 @@ class SUAVE:
             )
             if metrics:
                 history.append(metrics)
+            if plot_monitor is not None:
+                val_metrics = {}
+                if metrics:
+                    val_metrics = {
+                        "total_loss": metrics.get("nll"),
+                        "reconstruction": metrics.get("reconstruction"),
+                        "kl": metrics.get("categorical_kl", 0.0)
+                        + metrics.get("gaussian_kl", 0.0),
+                    }
+                plot_monitor.update(
+                    epoch=epoch_offset + epoch,
+                    train_metrics={
+                        "total_loss": average_loss,
+                        "reconstruction": average_recon,
+                        "kl": average_cat_kl + average_gauss_kl,
+                    },
+                    val_metrics=val_metrics,
+                )
 
         final_temperature = final_temperature if final_temperature is not None else 1.0
         return {"final_temperature": float(final_temperature), "history": history}
@@ -1421,6 +1514,10 @@ class SUAVE:
         *,
         epochs: int,
         batch_size: int,
+        val_latent_mu: Tensor | None = None,
+        y_val_tensor: Tensor | None = None,
+        plot_monitor: TrainingPlotMonitor | None = None,
+        epoch_offset: int = 0,
     ) -> None:
         """Train the classification head on cached latent representations."""
 
@@ -1429,12 +1526,15 @@ class SUAVE:
 
         device = y_train_tensor.device
         latent_mu = latent_mu.to(device)
+        if val_latent_mu is not None:
+            val_latent_mu = val_latent_mu.to(device)
+        if y_val_tensor is not None:
+            y_val_tensor = y_val_tensor.to(device)
         n_samples = latent_mu.size(0)
         if n_samples == 0:
             return
 
         effective_batch = min(batch_size, n_samples)
-        n_batches = max(1, math.ceil(n_samples / effective_batch))
         optimizer = Adam(self._classifier.parameters(), lr=self.learning_rate)
 
         encoder_requires_grad = [
@@ -1451,9 +1551,10 @@ class SUAVE:
         was_training = self._classifier.training
         self._classifier.train()
         progress = tqdm(range(epochs), desc="Head", leave=False)
-        for _ in progress:
+        for epoch in progress:
             permutation = torch.randperm(n_samples, device=device)
             epoch_loss = 0.0
+            epoch_samples = 0
             for start in range(0, n_samples, effective_batch):
                 batch_indices = permutation[start : start + effective_batch]
                 logits = self._classifier(latent_mu[batch_indices])
@@ -1462,8 +1563,45 @@ class SUAVE:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                epoch_loss += float(loss.item())
-            progress.set_postfix({"loss": epoch_loss / n_batches})
+                batch_count = batch_indices.numel()
+                epoch_loss += float(loss.item()) * batch_count
+                epoch_samples += batch_count
+
+            average_loss = epoch_loss / max(epoch_samples, 1)
+            progress.set_postfix({"loss": average_loss})
+
+            if plot_monitor is not None:
+                val_metrics: dict[str, float] = {}
+                if (
+                    val_latent_mu is not None
+                    and y_val_tensor is not None
+                    and val_latent_mu.size(0) > 0
+                    and y_val_tensor.numel() > 0
+                ):
+                    with torch.no_grad():
+                        val_logits = self._classifier(val_latent_mu)
+                        val_loss = self._classifier.loss(val_logits, y_val_tensor)
+                        probabilities = torch.softmax(val_logits, dim=-1)
+                    targets = y_val_tensor.detach().cpu().numpy()
+                    prob_array = probabilities.detach().cpu().numpy()
+                    try:
+                        auroc = float(compute_auroc(prob_array, targets))
+                    except ValueError:
+                        auroc = float("nan")
+                    val_metrics = {
+                        "classification_loss": float(val_loss.item()),
+                        "total_loss": float(val_loss.item()),
+                        "auroc": auroc,
+                    }
+
+                plot_monitor.update(
+                    epoch=epoch_offset + epoch,
+                    train_metrics={
+                        "classification_loss": average_loss,
+                        "total_loss": average_loss,
+                    },
+                    val_metrics=val_metrics,
+                )
 
         if not was_training:
             self._classifier.eval()
@@ -1487,6 +1625,8 @@ class SUAVE:
         early_stop_patience: int,
         y_train_tensor: Tensor | None,
         y_val_tensor: Tensor | None,
+        plot_monitor: TrainingPlotMonitor | None = None,
+        epoch_offset: int = 0,
     ) -> None:
         """Fine-tune all modules jointly with early stopping."""
 
@@ -1520,7 +1660,6 @@ class SUAVE:
 
         n_samples = encoder_inputs.size(0)
         effective_batch = min(batch_size, n_samples) if n_samples else batch_size
-        n_batches = max(1, math.ceil(max(n_samples, 1) / max(effective_batch, 1)))
 
         best_state: dict[str, Any] | None = None
         best_metrics: dict[str, float] | None = None
@@ -1533,6 +1672,12 @@ class SUAVE:
                 else torch.tensor([], device=device, dtype=torch.long)
             )
             epoch_loss = 0.0
+            epoch_samples = 0
+            epoch_class_loss = 0.0
+            epoch_class_samples = 0
+            epoch_recon_total = 0.0
+            epoch_cat_kl_total = 0.0
+            epoch_gauss_kl_total = 0.0
             for start in range(0, n_samples, max(effective_batch, 1)):
                 batch_indices = permutation[start : start + effective_batch]
                 batch_input = encoder_inputs[batch_indices]
@@ -1565,11 +1710,21 @@ class SUAVE:
                 if self._classifier is not None and y_train_tensor is not None:
                     logits = self._classifier(outputs["latent"])
                     targets = y_train_tensor[batch_indices]
-                    loss = loss + self._classifier.loss(logits, targets)
+                    class_loss = self._classifier.loss(logits, targets)
+                    loss = loss + class_loss
+                    batch_count = batch_indices.numel()
+                    epoch_class_loss += float(class_loss.item()) * batch_count
+                    epoch_class_samples += batch_count
+                else:
+                    batch_count = batch_indices.numel()
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                epoch_loss += float(loss.item())
+                epoch_loss += float(loss.item()) * batch_count
+                epoch_samples += batch_count
+                epoch_recon_total += float(outputs["reconstruction"].sum().item())
+                epoch_cat_kl_total += float(outputs["categorical_kl"].sum().item())
+                epoch_gauss_kl_total += float(outputs["gaussian_kl"].sum().item())
 
             metrics = self._compute_validation_scores(
                 val_inputs,
@@ -1581,9 +1736,34 @@ class SUAVE:
                 ),
                 y_val_tensor=y_val_tensor,
             )
-            progress.set_postfix(
-                {"loss": epoch_loss / n_batches, "nll": metrics.get("nll")}
-            )
+            average_loss = epoch_loss / max(epoch_samples, 1)
+            average_recon = epoch_recon_total / max(epoch_samples, 1)
+            average_cat_kl = epoch_cat_kl_total / max(epoch_samples, 1)
+            average_gauss_kl = epoch_gauss_kl_total / max(epoch_samples, 1)
+            average_class_loss: float | None = None
+            if epoch_class_samples > 0:
+                average_class_loss = epoch_class_loss / epoch_class_samples
+            progress.set_postfix({"loss": average_loss, "nll": metrics.get("nll")})
+
+            if plot_monitor is not None:
+                val_metrics = {
+                    "total_loss": metrics.get("nll"),
+                    "classification_loss": metrics.get("classification_loss"),
+                    "reconstruction": metrics.get("reconstruction"),
+                    "kl": metrics.get("categorical_kl", 0.0)
+                    + metrics.get("gaussian_kl", 0.0),
+                    "auroc": metrics.get("auroc"),
+                }
+                plot_monitor.update(
+                    epoch=epoch_offset + epoch,
+                    train_metrics={
+                        "total_loss": average_loss,
+                        "classification_loss": average_class_loss,
+                        "reconstruction": average_recon,
+                        "kl": average_cat_kl + average_gauss_kl,
+                    },
+                    val_metrics=val_metrics,
+                )
 
             if best_metrics is None or self._is_better_metrics(metrics, best_metrics):
                 best_metrics = metrics
@@ -1686,6 +1866,8 @@ class SUAVE:
         metrics = dict(metrics)
         metrics.setdefault("brier", float("nan"))
         metrics.setdefault("ece", float("nan"))
+        metrics.setdefault("classification_loss", float("nan"))
+        metrics.setdefault("auroc", float("nan"))
 
         if self._classifier is None or y_val_tensor is None:
             return metrics
@@ -1700,6 +1882,8 @@ class SUAVE:
         latent_mu = posterior["mean"].to(encoder_inputs.device)
         with torch.no_grad():
             logits = self._classifier(latent_mu)
+            class_loss = self._classifier.loss(logits, y_val_tensor)
+        metrics["classification_loss"] = float(class_loss.item())
         probabilities = torch.softmax(logits, dim=-1).detach().cpu().numpy()
         targets = y_val_tensor.detach().cpu().numpy()
         try:
@@ -1710,6 +1894,10 @@ class SUAVE:
             metrics["ece"] = float(compute_ece(probabilities, targets))
         except ValueError:
             metrics["ece"] = float("nan")
+        try:
+            metrics["auroc"] = float(compute_auroc(probabilities, targets))
+        except ValueError:
+            metrics["auroc"] = float("nan")
         if was_training:
             self._classifier.train()
         return metrics
