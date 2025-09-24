@@ -36,7 +36,6 @@ from mimic_mortality_utils import (  # noqa: E402
     TARGET_COLUMNS,
     VALIDATION_SIZE,
     Schema,
-    apply_isotonic_calibration,
     build_prediction_dataframe,
     compute_binary_metrics,
     dataframe_to_markdown,
@@ -555,9 +554,10 @@ model.fit(
     joint_decoder_lr_scale=float(optuna_best_params.get("joint_decoder_lr_scale", 0.1)),
     early_stop_patience=int(optuna_best_params.get("early_stop_patience", 10)),
 )
-validation_raw_probabilities = model.predict_proba(X_validation)
 isotonic_calibrator = fit_isotonic_calibrator(
-    validation_raw_probabilities, y_validation
+    model,
+    X_validation,
+    y_validation,
 )
 
 
@@ -582,11 +582,10 @@ label_map: Dict[str, np.ndarray] = {}
 metrics_rows: List[Dict[str, object]] = []
 
 for dataset_name, (features, labels) in evaluation_datasets.items():
-    if dataset_name == "Validation":
-        raw_probs = validation_raw_probabilities
+    if isotonic_calibrator is not None:
+        probs = isotonic_calibrator.predict_proba(features)
     else:
-        raw_probs = model.predict_proba(features)
-    probs = apply_isotonic_calibration(raw_probs, isotonic_calibrator)
+        probs = model.predict_proba(features)
     probability_map[dataset_name] = probs
     label_map[dataset_name] = np.asarray(labels)
     metrics = compute_binary_metrics(probs, labels)

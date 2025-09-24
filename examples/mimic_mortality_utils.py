@@ -21,7 +21,7 @@ from IPython.display import display
 from matplotlib import pyplot as plt
 from tabulate import tabulate
 
-from sklearn.calibration import calibration_curve
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.decomposition import PCA
 from sklearn.metrics import (
     accuracy_score,
@@ -31,7 +31,6 @@ from sklearn.metrics import (
     roc_curve,
 )
 from sklearn.pipeline import Pipeline
-from sklearn.isotonic import IsotonicRegression
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -53,7 +52,6 @@ __all__ = [
     "VALIDATION_SIZE",
     "Schema",
     "SchemaInferencer",
-    "apply_isotonic_calibration",
     "build_prediction_dataframe",
     "compute_auc",
     "compute_binary_metrics",
@@ -489,41 +487,19 @@ def compute_binary_metrics(
 
 
 def fit_isotonic_calibrator(
-    probabilities: np.ndarray, targets: pd.Series | np.ndarray
-) -> IsotonicRegression:
-    """Fit an :class:`IsotonicRegression` calibrator on validation outputs."""
+    model: SUAVE,
+    features: pd.DataFrame,
+    targets: pd.Series | np.ndarray,
+) -> CalibratedClassifierCV:
+    """Wrap ``model`` with an isotonic :class:`CalibratedClassifierCV`."""
 
-    calibrator = IsotonicRegression(out_of_bounds="clip")
-    positive_probs = extract_positive_probabilities(probabilities)
-    calibrator.fit(positive_probs, np.asarray(targets))
+    calibrator = CalibratedClassifierCV(
+        base_estimator=model,
+        method="isotonic",
+        cv="prefit",
+    )
+    calibrator.fit(features, np.asarray(targets))
     return calibrator
-
-
-def apply_isotonic_calibration(
-    probabilities: np.ndarray, calibrator: Optional[IsotonicRegression]
-) -> np.ndarray:
-    """Apply an isotonic calibrator to positive-class probabilities."""
-
-    if calibrator is None:
-        return np.asarray(probabilities)
-
-    prob_matrix = np.asarray(probabilities)
-    positive_probs = extract_positive_probabilities(prob_matrix)
-    calibrated_pos = calibrator.transform(positive_probs)
-    calibrated_pos = np.clip(calibrated_pos, 0.0, 1.0)
-
-    if prob_matrix.ndim == 1:
-        return calibrated_pos
-
-    calibrated = prob_matrix.copy()
-    calibrated[:, -1] = calibrated_pos
-    if calibrated.shape[1] == 2:
-        calibrated[:, 0] = 1.0 - calibrated_pos
-    else:
-        normaliser = calibrated.sum(axis=1, keepdims=True)
-        normaliser = np.where(normaliser > 0.0, normaliser, 1.0)
-        calibrated = calibrated / normaliser
-    return calibrated
 
 
 def plot_calibration_curves(
