@@ -147,8 +147,12 @@ class TrainingPlotMonitor:
             name = metric["name"]
             history = self._history[name]
             history["epoch"].append(float(epoch))
-            history["train"].append(_coerce_float(train_metrics.get(name)))
-            history["val"].append(_coerce_float(val_metrics.get(name)))
+            train_value = self._transform_metric_value(
+                name, train_metrics.get(name)
+            )
+            val_value = self._transform_metric_value(name, val_metrics.get(name))
+            history["train"].append(_coerce_float(train_value))
+            history["val"].append(_coerce_float(val_value))
 
             lines = self._lines[name]
             axis = self._axes[name]
@@ -306,7 +310,23 @@ class TrainingPlotMonitor:
         text = f"{rounded:.1f}".rstrip("0").rstrip(".")
         return text
 
+    @staticmethod
+    def _transform_metric_value(
+        metric_name: str, value: float | int | None
+    ) -> float | int | None:
+        if value is None:
+            return None
+        if metric_name != "reconstruction":
+            return value
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):  # pragma: no cover - defensive conversion
+            return value
+        if math.isnan(numeric):
+            return float("nan")
+        return -numeric
 
+      
 def plot_reliability_curve(
     probabilities: Iterable[float],
     targets: Iterable[int],
