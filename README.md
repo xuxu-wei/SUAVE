@@ -35,20 +35,15 @@ The package targets Python 3.9+ with PyTorch as its primary dependency.
 
 ```python
 import pandas as pd
-from suave import SUAVE, Schema
+from suave import SUAVE, SchemaInferencer
 
-# 1. Declare the schema
-schema = Schema(
-    {
-        "age": {"type": "real"},
-        "sofa": {"type": "count"},
-        "gender": {"type": "cat", "n_classes": 2},
-    }
-)
-
-# 2. Load data and fit the model
+# 1. Load data and review the suggested schema interactively
 train_X = pd.read_csv("data/train_features.csv")
 train_y = pd.read_csv("data/train_labels.csv")["label"]
+schema_result = SchemaInferencer().infer(train_X, mode="interactive")  # launches the UI
+schema = schema_result.schema
+
+# 2. Fit the model with the reviewed schema
 model = SUAVE(schema=schema)
 model.fit(train_X, train_y)
 
@@ -56,6 +51,11 @@ model.fit(train_X, train_y)
 probabilities = model.predict_proba(train_X.tail(5))
 labels = model.predict(train_X.tail(5))
 ```
+
+If you skip step 1, ``SUAVE.fit`` automatically infers a schema using
+``mode="info"`` so you can still prototype quickly. The interactive review is
+recommended for production datasets because it highlights columns that deserve a
+manual check.
 
 For an end-to-end demonstration, see [`examples/sepsis_minimal.py`](examples/sepsis_minimal.py).
 
@@ -84,6 +84,21 @@ Schemas can be updated with new columns and validated against incoming data:
 schema.update({"qsofa": {"type": "ordinal", "n_classes": 4}})
 schema.require_columns(["age", "gender", "qsofa"])
 ```
+
+Schema inference can also be automated and optionally reviewed via the browser
+assistant:
+
+```python
+from suave import SchemaInferencer
+
+result = SchemaInferencer().infer(train_X, mode="interactive")  # launches the UI
+schema = result.schema
+```
+
+The ``interactive`` mode opens a lightweight GUI to confirm types and edit
+flags. Use ``mode="info"`` to obtain diagnostics without the GUI or omit the
+``schema`` entirely when constructing ``SUAVE`` to let ``fit`` infer it
+automatically.
 
 ### Model fitting
 

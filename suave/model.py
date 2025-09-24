@@ -39,6 +39,7 @@ from .defaults import (
     recommend_hyperparameters,
     serialise_heuristic_hyperparameters,
 )
+from .schema_inference import SchemaInferencer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,9 +91,9 @@ class SUAVE:
     Parameters
     ----------
     schema : Schema, optional
-        Dataset description including column types and cardinalities.  When not
-        supplied during initialisation, a schema must be provided to
-        :meth:`fit`.
+        Dataset description including column types and cardinalities. When not
+        supplied during initialisation, :meth:`fit` automatically infers a
+        schema from the input features using ``mode="info"``.
     behaviour : {"supervised", "unsupervised"}, default "supervised"
         Selects the feature set exposed by the estimator.  ``"supervised"``
         enables the classification head whereas ``"unsupervised"`` activates the
@@ -837,8 +838,8 @@ class SUAVE:
         Raises
         ------
         ValueError
-            If the schema is missing, targets are omitted in supervised mode or
-            schedule overrides are invalid.
+            If targets are omitted in supervised mode or schedule overrides are
+            invalid.
 
         See Also
         --------
@@ -855,7 +856,19 @@ class SUAVE:
         if schema is not None:
             self.schema = schema
         if self.schema is None:
-            raise ValueError("A schema must be provided to fit the model")
+            LOGGER.info(
+                "No schema provided; running automatic schema inference (mode='info')."
+            )
+            inference = SchemaInferencer().infer(X, mode="info")
+            self.schema = inference.schema
+            if inference.messages:
+                for message in inference.messages:
+                    LOGGER.info("Schema inference: %s", message)
+            if inference.review_columns:
+                LOGGER.info(
+                    "Schema inference flagged columns for review: %s",
+                    ", ".join(sorted(inference.review_columns)),
+                )
         self.schema.require_columns(X.columns)
         if self.behaviour == "supervised" and y is None:
             raise ValueError("Targets must be provided when behaviour='supervised'")

@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from suave import Schema, SchemaInferenceMode, SchemaInferencer  # noqa: E402
+from suave import Schema, SchemaInferencer  # noqa: E402
 
 RANDOM_STATE: int = 20201021
 TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
@@ -27,7 +27,6 @@ __all__ = [
     "CALIBRATION_SIZE",
     "VALIDATION_SIZE",
     "Schema",
-    "SchemaInferenceMode",
     "SchemaInferencer",
     "load_dataset",
     "define_schema",
@@ -49,7 +48,9 @@ def load_dataset(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, sep="\t")
 
 
-def define_schema(df: pd.DataFrame, feature_columns: Iterable[str], mode=SchemaInferenceMode.INFO) -> Schema:
+def define_schema(
+    df: pd.DataFrame, feature_columns: Iterable[str], mode: str = "info"
+) -> Schema:
     """Create a :class:`Schema` describing ``df``'s feature columns."""
 
     inferencer = SchemaInferencer()

@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 
 from suave import SUAVE, Schema
+from suave.schema_inference import SchemaInferencer
 from suave.evaluate import (
     compute_auprc,
     compute_auroc,
@@ -40,6 +41,26 @@ def make_dataset() -> tuple[pd.DataFrame, pd.Series, Schema]:
         }
     )
     return X, y, schema
+
+
+def test_fit_infers_schema_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    X, y, _ = make_dataset()
+    captured: dict[str, str] = {}
+
+    original_infer = SchemaInferencer.infer
+
+    def tracking_infer(self, df, feature_columns=None, *, mode="silent"):
+        captured["mode"] = mode
+        return original_infer(self, df, feature_columns, mode=mode)
+
+    monkeypatch.setattr(SchemaInferencer, "infer", tracking_infer, raising=False)
+
+    model = SUAVE()
+    model.fit(X, y, epochs=1)
+
+    assert captured.get("mode") == "info"
+    assert model.schema is not None
+    assert set(model.schema.feature_names) == set(X.columns)
 
 
 def _serialise_for_legacy(value):

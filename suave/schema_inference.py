@@ -61,32 +61,8 @@ def _worst_confidence(*levels: InferenceConfidence) -> InferenceConfidence:
     return min(levels, key=_CONFIDENCE_PRIORITY.__getitem__)
 
 
-class SchemaInferenceMode(str, Enum):
-    """
-    Enumeration of available schema inference modes.
-
-    Members
-    -------
-    SILENT : str
-        Run inference without emitting human-readable messages or
-        launching any review UI.
-    INFO : str
-        Run inference and collect human-readable messages for columns
-        that lie near heuristic thresholds. Does not launch an
-        interactive UI.
-    INTERACTIVE : str
-        Like ``INFO`` but attempts to launch an interactive
-        review/confirmation UI when the current environment supports it
-        (GUI backend and display available).
-
-    Notes
-    -----
-    The interactive mode falls back to non-interactive behavior when
-    a supported matplotlib backend or display server is not available.
-    """
-    SILENT = "silent"
-    INFO = "info"
-    INTERACTIVE = "interactive"
+SCHEMA_INFERENCE_MODES: Tuple[str, ...] = ("silent", "info", "interactive")
+"""Valid options understood by :meth:`SchemaInferencer.infer`."""
 
 
 @dataclass
@@ -99,7 +75,7 @@ class SchemaInferenceResult:
     schema : Schema
         The inferred :class:`Schema` object describing feature types and
         auxiliary attributes (e.g., ``n_classes`` for categorical/ordinal).
-    mode : SchemaInferenceMode
+    mode : {"silent", "info", "interactive"}
         The mode in which inference was executed.
     review_columns : list of str
         Column names that were flagged for review based on proximity to
@@ -120,7 +96,7 @@ class SchemaInferenceResult:
     """
 
     schema: Schema
-    mode: SchemaInferenceMode
+    mode: str
     review_columns: List[str]
     column_notes: Mapping[str, str]
     messages: List[str]
@@ -172,7 +148,7 @@ class SchemaInferencer:
         df: pd.DataFrame,
         feature_columns: Optional[Iterable[str]] = None,
         *,
-        mode: SchemaInferenceMode = SchemaInferenceMode.SILENT,
+        mode: str = "silent",
     ) -> SchemaInferenceResult:
         """
         Infer a :class:`Schema` from ``df`` under the requested ``mode``.
@@ -184,7 +160,7 @@ class SchemaInferencer:
         feature_columns : iterable of str, optional
             Subset of columns to consider. If ``None``, all columns in ``df``
             are processed.
-        mode : SchemaInferenceMode, default: ``SchemaInferenceMode.SILENT``
+        mode : {"silent", "info", "interactive"}, default ``"silent"``
             Controls verbosity and whether an interactive review UI is
             attempted.
 
@@ -199,10 +175,10 @@ class SchemaInferencer:
 
         Notes
         -----
-        - In ``INFO`` and ``INTERACTIVE`` modes, columns near decision
+        - In ``info`` and ``interactive`` modes, columns near decision
           thresholds are listed in ``result.review_columns`` and explanatory
           notes are attached in ``result.column_notes``.
-        - In ``INTERACTIVE`` mode, a GUI may be launched (environment
+        - In ``interactive`` mode, a GUI may be launched (environment
           permitting) to let users confirm/override inferred types.
         """
 
@@ -221,11 +197,18 @@ class SchemaInferencer:
 
         messages: List[str] = []
         review_columns = list(review_notes.keys())
-        if mode in {SchemaInferenceMode.INFO, SchemaInferenceMode.INTERACTIVE} and review_notes:
+        mode_normalised = str(mode).lower()
+        if mode_normalised not in SCHEMA_INFERENCE_MODES:
+            raise ValueError(
+                "mode must be one of {'silent', 'info', 'interactive'}; "
+                f"got {mode!r}"
+            )
+
+        if mode_normalised in {"info", "interactive"} and review_notes:
             for name, note in review_notes.items():
                 messages.append(f"Column '{name}' flagged for review: {note}")
 
-        if mode is SchemaInferenceMode.INTERACTIVE:
+        if mode_normalised == "interactive":
             browser_schema, browser_message = self._try_browser_schema_builder(df, columns)
             if browser_schema is not None:
                 schema_dict = browser_schema.to_dict()
@@ -254,7 +237,7 @@ class SchemaInferencer:
         result_schema = Schema(schema_dict)
         return SchemaInferenceResult(
             schema=result_schema,
-            mode=mode,
+            mode=mode_normalised,
             review_columns=review_columns,
             column_notes=review_notes,
             messages=messages,
@@ -513,7 +496,7 @@ class SchemaInferencer:
             schema = launch_schema_builder(
                 subset,
                 feature_columns=columns,
-                mode=SchemaInferenceMode.INFO,
+                mode="info",
                 inferencer=inferencer,
             )
         except SchemaBuilderError as error:
@@ -609,7 +592,7 @@ class SchemaInferencer:
 
 __all__ = [
     "SchemaInferencer",
-    "SchemaInferenceMode",
     "SchemaInferenceResult",
     "InferenceConfidence",
+    "SCHEMA_INFERENCE_MODES",
 ]

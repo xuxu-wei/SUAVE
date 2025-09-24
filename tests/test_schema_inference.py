@@ -6,10 +6,10 @@ import importlib
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from suave.schema_inference import (
     InferenceConfidence,
-    SchemaInferenceMode,
     SchemaInferencer,
 )
 from suave.types import Schema
@@ -24,13 +24,13 @@ def test_infer_silent_mode_returns_schema_only() -> None:
         }
     )
     inferencer = SchemaInferencer(categorical_overrides={"sex"})
-    result = inferencer.infer(df, mode=SchemaInferenceMode.SILENT)
+    result = inferencer.infer(df, mode="silent")
     schema_dict = result.schema.to_dict()
 
     assert schema_dict["age"]["type"] == "real"
     assert schema_dict["sex"]["type"] == "cat"
     assert schema_dict["count_feature"]["type"] == "count"
-    assert result.mode is SchemaInferenceMode.SILENT
+    assert result.mode == "silent"
     assert result.messages == []
 
 
@@ -43,7 +43,7 @@ def test_info_mode_highlights_columns_near_threshold() -> None:
         }
     )
     inferencer = SchemaInferencer()
-    result = inferencer.infer(df, mode=SchemaInferenceMode.INFO)
+    result = inferencer.infer(df, mode="info")
 
     assert "possibly_categorical" in result.review_columns
     assert any("possibly_categorical" in message for message in result.messages)
@@ -71,7 +71,7 @@ def test_interactive_mode_gracefully_falls_back(monkeypatch) -> None:
         raising=False,
     )
 
-    result = inferencer.infer(df, mode=SchemaInferenceMode.INTERACTIVE)
+    result = inferencer.infer(df, mode="interactive")
 
     assert "flagged" in result.review_columns
     assert any(fallback_message in message for message in result.messages)
@@ -91,7 +91,7 @@ def test_interactive_mode_prefers_browser_builder(monkeypatch) -> None:
         raising=False,
     )
 
-    result = inferencer.infer(df, mode=SchemaInferenceMode.INTERACTIVE)
+    result = inferencer.infer(df, mode="interactive")
 
     assert result.schema.to_dict()["flagged"]["type"] == "pos"
     assert result.review_columns == []
@@ -132,7 +132,7 @@ def test_infer_reports_column_confidence_levels() -> None:
     )
 
     inferencer = SchemaInferencer()
-    result = inferencer.infer(df, mode=SchemaInferenceMode.INFO)
+    result = inferencer.infer(df, mode="info")
 
     confidences = result.column_confidence
     assert confidences["binary"] is InferenceConfidence.HIGH
@@ -145,7 +145,7 @@ def test_integer_inference_handles_wide_range() -> None:
     df = pd.DataFrame({"wide_range_ints": wide_range})
 
     inferencer = SchemaInferencer()
-    result = inferencer.infer(df, mode=SchemaInferenceMode.SILENT)
+    result = inferencer.infer(df, mode="silent")
     schema_dict = result.schema.to_dict()
 
     assert schema_dict["wide_range_ints"]["type"] == "count"
@@ -156,7 +156,7 @@ def test_long_integer_ladder_prefers_count_over_categorical() -> None:
     df = pd.DataFrame({"cycled_counts": repeated_cycle})
 
     inferencer = SchemaInferencer()
-    result = inferencer.infer(df, mode=SchemaInferenceMode.SILENT)
+    result = inferencer.infer(df, mode="silent")
 
     assert result.schema.to_dict()["cycled_counts"] == {"type": "count"}
 
@@ -183,3 +183,11 @@ def test_low_dispersion_float_prefers_categorical() -> None:
     assert spec == {"type": "cat", "n_classes": 2}
     assert note == "Dispersion too small; defaulting to categorical."
     assert confidence is InferenceConfidence.LOW
+
+
+def test_invalid_mode_raises_value_error() -> None:
+    df = pd.DataFrame({"feature": [1, 2, 3]})
+    inferencer = SchemaInferencer()
+
+    with pytest.raises(ValueError, match="mode must be one of"):
+        inferencer.infer(df, mode="invalid")
