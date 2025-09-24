@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -69,12 +70,17 @@ class TrainingPlotMonitor:
         axes = axes.flatten()
 
         self._metrics = self._metric_configuration()
+        self._config_by_name = {metric["name"]: metric for metric in self._metrics}
+        self._coefficients: dict[str, float | None] = {
+            "beta": None,
+            "classification_loss_weight": None,
+        }
         self._axes: dict[str, Axes] = {}
         self._lines: dict[str, dict[str, Line2D | None]] = {}
         self._history: dict[str, dict[str, list[float]]] = {}
 
         for axis, metric in zip(axes, self._metrics):
-            axis.set_title(metric["title"])
+            axis.set_title(self._format_metric_title(metric["name"]))
             axis.set_xlabel("Epoch")
             axis.set_ylabel(metric["ylabel"])
 
@@ -120,18 +126,33 @@ class TrainingPlotMonitor:
         epoch: int,
         train_metrics: Mapping[str, float | int | None] | None = None,
         val_metrics: Mapping[str, float | int | None] | None = None,
+        beta: float | None = None,
+        classification_loss_weight: float | None = None,
     ) -> None:
         """Append metrics for ``epoch`` and refresh the visualisation."""
 
         train_metrics = train_metrics or {}
         val_metrics = val_metrics or {}
 
+        if beta is not None and math.isfinite(float(beta)):
+            self._coefficients["beta"] = float(beta)
+        if classification_loss_weight is not None and math.isfinite(
+            float(classification_loss_weight)
+        ):
+            self._coefficients["classification_loss_weight"] = float(
+                classification_loss_weight
+            )
+
         for metric in self._metrics:
             name = metric["name"]
             history = self._history[name]
             history["epoch"].append(float(epoch))
-            history["train"].append(_coerce_float(train_metrics.get(name)))
-            history["val"].append(_coerce_float(val_metrics.get(name)))
+            train_value = self._transform_metric_value(
+                name, train_metrics.get(name)
+            )
+            val_value = self._transform_metric_value(name, val_metrics.get(name))
+            history["train"].append(_coerce_float(train_value))
+            history["val"].append(_coerce_float(val_value))
 
             lines = self._lines[name]
             axis = self._axes[name]
@@ -143,6 +164,8 @@ class TrainingPlotMonitor:
 
             axis.relim()
             axis.autoscale_view()
+
+            axis.set_title(self._format_metric_title(name))
 
         self._figure.tight_layout()
         self._refresh()
@@ -177,34 +200,6 @@ class TrainingPlotMonitor:
         if self._behaviour == "supervised":
             return [
                 {
-                    "name": "total_loss",
-                    "title": "Total Loss",
-                    "ylabel": "Loss",
-                    "plot_train": True,
-                    "plot_val": True,
-                },
-                {
-                    "name": "joint_objective",
-                    "title": "Joint Objective",
-                    "ylabel": "Loss",
-                    "plot_train": True,
-                    "plot_val": True,
-                },
-                {
-                    "name": "classification_loss",
-                    "title": "Classification Loss",
-                    "ylabel": "Loss",
-                    "plot_train": True,
-                    "plot_val": True,
-                },
-                {
-                    "name": "auroc",
-                    "title": "Validation AUROC",
-                    "ylabel": "AUROC",
-                    "plot_train": False,
-                    "plot_val": True,
-                },
-                {
                     "name": "reconstruction",
                     "title": "Reconstruction",
                     "ylabel": "Value",
@@ -218,16 +213,37 @@ class TrainingPlotMonitor:
                     "plot_train": True,
                     "plot_val": True,
                 },
+                {
+                    "name": "total_loss",
+                    "title": "ELBO",
+                    "ylabel": "Loss",
+                    "plot_train": True,
+                    "plot_val": True,
+                },
+                {
+                    "name": "auroc",
+                    "title": "AUROC",
+                    "ylabel": "AUROC",
+                    "plot_train": True,
+                    "plot_val": True,
+                },
+                {
+                    "name": "classification_loss",
+                    "title": "Classification Loss",
+                    "ylabel": "Loss",
+                    "plot_train": True,
+                    "plot_val": True,
+                },
+                {
+                    "name": "joint_objective",
+                    "title": "Joint Objective",
+                    "ylabel": "Loss",
+                    "plot_train": True,
+                    "plot_val": True,
+                },
             ]
 
         return [
-            {
-                "name": "total_loss",
-                "title": "Total Loss",
-                "ylabel": "Loss",
-                "plot_train": True,
-                "plot_val": True,
-            },
             {
                 "name": "reconstruction",
                 "title": "Reconstruction",
@@ -242,7 +258,73 @@ class TrainingPlotMonitor:
                 "plot_train": True,
                 "plot_val": True,
             },
+            {
+                "name": "total_loss",
+                "title": "ELBO",
+                "ylabel": "Loss",
+                "plot_train": True,
+                "plot_val": True,
+            },
         ]
+
+    def _format_metric_title(self, metric_name: str) -> str:
+        config = self._config_by_name.get(metric_name, {})
+        base_title = str(config.get("title", metric_name))
+        if metric_name == "total_loss":
+            return self._format_elbo_title(base_title)
+        if metric_name == "joint_objective":
+            return self._format_joint_title(base_title)
+        return base_title
+
+    def _format_elbo_title(self, base_title: str) -> str:
+        beta = self._coefficients.get("beta")
+        if beta is None or not math.isfinite(beta):
+            formula = "reconstruction + KL"
+        else:
+            formatted = self._format_coefficient(beta)
+            if formatted is None:
+                formula = "reconstruction + KL"
+            else:
+                formula = f"reconstruction + {formatted}×KL"
+        return f"{base_title}\n({formula})"
+
+    def _format_joint_title(self, base_title: str) -> str:
+        weight = self._coefficients.get("classification_loss_weight")
+        if weight is None or not math.isfinite(weight):
+            formula = "ELBO + Classification Loss"
+        else:
+            formatted = self._format_coefficient(weight)
+            if formatted is None:
+                formula = "ELBO + Classification Loss"
+            else:
+                formula = f"ELBO + {formatted}×Classification Loss"
+        return f"{base_title}\n({formula})"
+
+    @staticmethod
+    def _format_coefficient(value: float) -> str | None:
+        rounded = round(float(value), 1)
+        if math.isclose(rounded, 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            return None
+        if math.isclose(rounded, 0.0, rel_tol=1e-9, abs_tol=1e-9):
+            return "0"
+        text = f"{rounded:.1f}".rstrip("0").rstrip(".")
+        return text
+
+    @staticmethod
+    def _transform_metric_value(
+        metric_name: str, value: float | int | None
+    ) -> float | int | None:
+        if value is None:
+            return None
+        if metric_name != "reconstruction":
+            return value
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):  # pragma: no cover - defensive conversion
+            return value
+        if math.isnan(numeric):
+            return float("nan")
+        return -numeric
 
 
 def plot_reliability_curve(
