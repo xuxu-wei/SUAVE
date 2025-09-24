@@ -27,6 +27,7 @@ from sklearn.metrics import (
     brier_score_loss,
     confusion_matrix,
     roc_auc_score,
+    roc_curve,
 )
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
@@ -221,16 +222,21 @@ def make_logistic_pipeline() -> Pipeline:
     )
 
 
+def extract_positive_probabilities(probabilities: np.ndarray) -> np.ndarray:
+    """Return the positive-class probabilities as a 1-D array."""
+
+    prob_matrix = np.asarray(probabilities)
+    if prob_matrix.ndim == 1:
+        return prob_matrix
+    return prob_matrix[:, -1]
+
+
 def compute_binary_metrics(
     probabilities: np.ndarray, targets: pd.Series | np.ndarray
 ) -> Dict[str, float]:
     """Compute AUROC, accuracy, specificity, sensitivity, and Brier score."""
 
-    prob_matrix = np.asarray(probabilities)
-    if prob_matrix.ndim == 1:
-        positive_probs = prob_matrix
-    else:
-        positive_probs = prob_matrix[:, -1]
+    positive_probs = extract_positive_probabilities(probabilities)
     labels = np.asarray(targets)
     predictions = (positive_probs >= 0.5).astype(int)
 
@@ -534,18 +540,33 @@ baseline_models = {
 }
 
 baseline_evaluation_sets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
-    "MIMIC test": (X_test, y_test)
+    "Train": (X_train_model, y_train_model),
+    "MIMIC test": (X_test, y_test),
 }
 if external_features is not None and external_labels is not None:
     baseline_evaluation_sets["eICU external"] = (external_features, external_labels)
 
 baseline_rows: List[Dict[str, object]] = []
 metric_columns = ["AUC", "ACC", "SPE", "SEN", "Brier"]
+baseline_probability_map: Dict[str, Dict[str, np.ndarray]] = {
+    name: {} for name in baseline_evaluation_sets.keys()
+}
+model_abbreviation_lookup = {
+    "Logistic regression": "LR",
+    "KNN": "KNN",
+    "Decision tree": "DT",
+    "Random forest": "RF",
+    "SVM (RBF)": "SVM",
+}
+model_abbreviation_lookup["SUAVE"] = "SUAVE"
 
 for model_name, estimator in baseline_models.items():
     fitted_estimator = estimator.fit(X_train_model, y_train_model)
     for dataset_name, (features, labels) in baseline_evaluation_sets.items():
         probabilities = fitted_estimator.predict_proba(features)
+        baseline_probability_map[dataset_name][model_name] = extract_positive_probabilities(
+            probabilities
+        )
         metrics = compute_binary_metrics(probabilities, labels)
         row = {
             "Model": model_name,
@@ -737,6 +758,102 @@ render_dataframe(
     title="Membership inference baseline",
     floatfmt=".3f",
 )
+
+
+#%% [markdown]
+# ## Benchmark ROC and calibration curves
+#
+# Visualise the discriminative and calibration performance of the classical
+# baselines alongside SUAVE across the train, test, and external cohorts. Each
+# figure contains ROC and calibration curves with Times New Roman styling and
+# abbreviated legend entries for clarity.
+
+# %%
+
+plt.rcParams["font.family"] = "Times New Roman"
+
+
+def plot_benchmark_curves(
+    dataset_name: str,
+    y_true: np.ndarray,
+    model_probability_lookup: Mapping[str, np.ndarray],
+) -> Optional[Path]:
+    """Plot ROC and calibration curves for the supplied dataset."""
+
+    unique_labels = np.unique(y_true)
+    if unique_labels.size < 2:
+        print(f"Skipping {dataset_name} curves because only one class is present.")
+        return None
+
+    roc_ax: plt.Axes
+    cal_ax: plt.Axes
+    fig, (roc_ax, cal_ax) = plt.subplots(1, 2, figsize=(12, 5))
+
+    roc_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Chance")
+    roc_ax.set_title(f"ROC – {dataset_name}")
+    roc_ax.set_xlabel("False positive rate")
+    roc_ax.set_ylabel("True positive rate")
+
+    cal_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect")
+    cal_ax.set_title(f"Calibration – {dataset_name}")
+    cal_ax.set_xlabel("Mean predicted probability")
+    cal_ax.set_ylabel("Fraction of positives")
+
+    for model_name, probs in model_probability_lookup.items():
+        abbrev = model_abbreviation_lookup.get(model_name, model_name)
+        fpr, tpr, _ = roc_curve(y_true, probs)
+        roc_ax.plot(fpr, tpr, label=abbrev)
+
+        try:
+            frac_pos, mean_pred = calibration_curve(
+                y_true, probs, n_bins=10, strategy="quantile"
+            )
+        except ValueError:
+            print(
+                f"Calibration curve for {model_name} on {dataset_name} skipped due to insufficient variation."
+            )
+        else:
+            cal_ax.plot(mean_pred, frac_pos, marker="o", label=abbrev)
+
+    roc_ax.legend(loc="lower right")
+    cal_ax.legend(loc="upper left")
+    fig.suptitle(f"Benchmark ROC & calibration – {dataset_name}")
+    fig.tight_layout()
+
+    dataset_slug = dataset_name.lower().replace(" ", "_")
+    figure_path = OUTPUT_DIR / f"benchmark_curves_{dataset_slug}_{TARGET_LABEL}.png"
+    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+
+    if is_interactive_session():
+        display(fig)
+
+    plt.close(fig)
+    print(f"Saved benchmark curves for {dataset_name} to {figure_path}")
+    return figure_path
+
+
+benchmark_datasets = ["Train", "MIMIC test", "eICU external"]
+benchmark_curve_paths: List[Path] = []
+
+for dataset_name in benchmark_datasets:
+    if dataset_name not in label_map:
+        print(f"Skipping {dataset_name} because ground-truth labels are unavailable.")
+        continue
+
+    model_probabilities: Dict[str, np.ndarray] = {}
+    suave_probs = extract_positive_probabilities(probability_map[dataset_name])
+    model_probabilities["SUAVE"] = suave_probs
+
+    for baseline_name, baseline_probs in baseline_probability_map.get(dataset_name, {}).items():
+        model_probabilities[baseline_name] = baseline_probs
+
+    if not model_probabilities:
+        print(f"No model probabilities available for {dataset_name}.")
+        continue
+
+    figure_path = plot_benchmark_curves(dataset_name, label_map[dataset_name], model_probabilities)
+    if figure_path is not None:
+        benchmark_curve_paths.append(figure_path)
 
 
 #%% [markdown]
