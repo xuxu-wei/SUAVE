@@ -30,6 +30,7 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
+from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -45,17 +46,14 @@ if str(EXAMPLES_DIR) not in sys.path:
 from mimic_mortality_utils import (
     RANDOM_STATE,
     TARGET_COLUMNS,
-    CALIBRATION_SIZE,
     VALIDATION_SIZE,
     Schema,
     define_schema,
-
     kolmogorov_smirnov_statistic,
     load_dataset,
     mutual_information_feature,
     prepare_features,
     rbf_mmd,
-    split_train_validation_calibration,
     to_numeric_frame,
 )
 from cls_eval import evaluate_predictions, write_results_to_excel_unique
@@ -269,19 +267,23 @@ render_dataframe(schema_df, title="Schema overview", floatfmt=None)
 # %%
 
 HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, int]] = {
+    "lean": (64, 32),
     "compact": (96, 48),
     "small": (128, 64),
     "medium": (256, 128),
     "wide": (384, 192),
     "extra_wide": (512, 256),
+    "ultra_wide": (640, 320),
 }
 
 HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, int]] = {
+    "minimal": (16,),
     "compact": (32,),
     "small": (48,),
     "medium": (48, 32),
     "wide": (96, 48, 16),
     "extra_wide": (64, 128, 64, 16),
+    "deep": (128, 64, 32),
 }
 def make_logistic_pipeline() -> Pipeline:
     """Factory for the baseline classifier used in TSTR/TRTR."""
@@ -352,27 +354,37 @@ def run_optuna_search(
         timeout = None
 
     def objective(trial: "optuna.trial.Trial") -> float:
-        latent_dim = trial.suggest_categorical("latent_dim", [6, 8, 16, 32])
+        latent_dim = trial.suggest_categorical("latent_dim", [8, 16, 24, 32, 48, 64])
+        n_components = trial.suggest_categorical("n_components", [1, 2, 4, 6])
         hidden_key = trial.suggest_categorical("hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys()))
         head_hidden_key = trial.suggest_categorical("head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys()))
-        dropout = trial.suggest_float("dropout", 0.0, 0.5)
-        learning_rate = trial.suggest_float("learning_rate", 5e-5, 2e-2, log=True)
-        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512, 1024])
-        beta = trial.suggest_float("beta", 0.5, 4.0)
-        warmup_epochs = trial.suggest_int("warmup_epochs", 2, 60)
-        head_epochs = trial.suggest_int("head_epochs", 1, 50)
-        finetune_epochs = trial.suggest_int("finetune_epochs", 3, 20)
-        joint_decoder_lr_scale = trial.suggest_float("joint_decoder_lr_scale", 1e-3, 0.3)
+        beta = trial.suggest_float("beta", 0.1, 6.0)
+        classification_loss_weight = trial.suggest_float(
+            "classification_loss_weight", 0.1, 5.0, log=True
+        )
+        dropout = trial.suggest_float("dropout", 0.0, 0.7)
+        learning_rate = trial.suggest_float("learning_rate", 1e-5, 5e-2, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512, 1024])
+        warmup_epochs = trial.suggest_int("warmup_epochs", 1, 100)
+        kl_warmup_epochs = trial.suggest_int("kl_warmup_epochs", 0, 80)
+        head_epochs = trial.suggest_int("head_epochs", 1, 80)
+        finetune_epochs = trial.suggest_int("finetune_epochs", 1, 60)
+        early_stop_patience = trial.suggest_int("early_stop_patience", 3, 30)
+        joint_decoder_lr_scale = trial.suggest_float(
+            "joint_decoder_lr_scale", 1e-4, 1.0, log=True
+        )
 
         model = SUAVE(
             schema=schema,
             latent_dim=latent_dim,
+            n_components=int(n_components),
             hidden_dims=HIDDEN_DIMENSION_OPTIONS[hidden_key],
             head_hidden_dims=HEAD_HIDDEN_DIMENSION_OPTIONS[head_hidden_key],
             dropout=dropout,
             learning_rate=learning_rate,
             batch_size=batch_size,
             beta=beta,
+            classification_loss_weight=classification_loss_weight,
             random_state=random_state,
             behaviour="supervised",
         )
@@ -382,9 +394,11 @@ def run_optuna_search(
             X_train,
             y_train,
             warmup_epochs=warmup_epochs,
+            kl_warmup_epochs=kl_warmup_epochs,
             head_epochs=head_epochs,
             finetune_epochs=finetune_epochs,
             joint_decoder_lr_scale=joint_decoder_lr_scale,
+            early_stop_patience=early_stop_patience,
         )
         fit_seconds = time.perf_counter() - start_time
         validation_probs = model.predict_proba(X_validation)
@@ -523,29 +537,27 @@ def plot_latent_space(
 #%% [markdown]
 # ## Prepare modelling datasets
 #
-# Create train/validation/calibration splits for the selected label. The split
-# mirrors the original notebook so that Optuna tuning and calibration operate on
-# disjoint subsets.
+# Split the training cohort into train and validation folds for the selected
+# label. The validation fold later supports both Optuna model selection and
+# temperature calibration.
 
 # %%
 
 X_full = prepare_features(train_df, FEATURE_COLUMNS)
 y_full = train_df[TARGET_LABEL]
 
-(
-    X_train_model,
-    X_validation,
-    X_calibration,
-    y_train_model,
-    y_validation,
-    y_calibration,
-) = split_train_validation_calibration(
+X_train_model, X_validation, y_train_model, y_validation = train_test_split(
     X_full,
     y_full,
-    calibration_size=CALIBRATION_SIZE,
-    validation_size=VALIDATION_SIZE,
+    test_size=VALIDATION_SIZE,
+    stratify=y_full,
     random_state=RANDOM_STATE,
 )
+
+X_train_model = X_train_model.reset_index(drop=True)
+X_validation = X_validation.reset_index(drop=True)
+y_train_model = y_train_model.reset_index(drop=True)
+y_validation = y_validation.reset_index(drop=True)
 
 # Prepare holdout datasets once to reuse across later cells.
 X_test = prepare_features(test_df, FEATURE_COLUMNS)
@@ -769,12 +781,16 @@ head_hidden_dims = HEAD_HIDDEN_DIMENSION_OPTIONS.get(
 model = SUAVE(
     schema=schema,
     latent_dim=int(optuna_best_params.get("latent_dim", 16)),
+    n_components=int(optuna_best_params.get("n_components", 1)),
     hidden_dims=hidden_dims,
     head_hidden_dims=head_hidden_dims,
     dropout=float(optuna_best_params.get("dropout", 0.1)),
     learning_rate=float(optuna_best_params.get("learning_rate", 1e-3)),
     batch_size=int(optuna_best_params.get("batch_size", 256)),
     beta=float(optuna_best_params.get("beta", 1.5)),
+    classification_loss_weight=float(
+        optuna_best_params.get("classification_loss_weight", 1.0)
+    ),
     random_state=RANDOM_STATE,
     behaviour="supervised",
 )
@@ -783,11 +799,13 @@ model.fit(
     X_train_model,
     y_train_model,
     warmup_epochs=int(optuna_best_params.get("warmup_epochs", 3)),
+    kl_warmup_epochs=int(optuna_best_params.get("kl_warmup_epochs", 0)),
     head_epochs=int(optuna_best_params.get("head_epochs", 2)),
     finetune_epochs=int(optuna_best_params.get("finetune_epochs", 2)),
     joint_decoder_lr_scale=float(optuna_best_params.get("joint_decoder_lr_scale", 0.1)),
+    early_stop_patience=int(optuna_best_params.get("early_stop_patience", 10)),
 )
-model.calibrate(X_calibration, y_calibration)
+model.calibrate(X_validation, y_validation)
 
 
 #%% [markdown]
