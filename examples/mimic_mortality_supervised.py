@@ -19,7 +19,8 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from sklearn.calibration import calibration_curve
 from sklearn.decomposition import PCA
-from sklearn.impute import SimpleImputer
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+from sklearn.impute import IterativeImputer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -129,6 +130,78 @@ def schema_to_dataframe(schema: Schema) -> pd.DataFrame:
     return pd.DataFrame(schema_records)
 
 
+def slugify_identifier(value: str) -> str:
+    """Return a filesystem-friendly identifier based on ``value``."""
+
+    cleaned = [char.lower() if char.isalnum() else "_" for char in value.strip()]
+    slug = "".join(cleaned)
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug.strip("_")
+
+
+def load_or_create_iteratively_imputed_features(
+    feature_sets: Mapping[str, pd.DataFrame],
+    *,
+    output_dir: Path,
+    target_label: str,
+    reference_key: str,
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Path], bool]:
+    """Load cached iterative imputations or fit a new :class:`IterativeImputer`."""
+
+    if reference_key not in feature_sets:
+        raise KeyError(
+            f"Reference key '{reference_key}' missing from feature sets: {list(feature_sets)}"
+        )
+
+    dataset_paths: Dict[str, Path] = {
+        name: output_dir
+        / f"iterative_imputed_{slugify_identifier(name)}_{slugify_identifier(target_label)}.csv"
+        for name in feature_sets
+    }
+
+    loaded_features: Dict[str, pd.DataFrame] = {}
+    load_successful = True
+    for name, path in dataset_paths.items():
+        features = feature_sets[name]
+        if not path.exists():
+            load_successful = False
+            break
+        cached = pd.read_csv(path, index_col=0)
+        column_match = list(cached.columns) == list(features.columns)
+        length_match = len(cached) == len(features)
+        if not (column_match and length_match):
+            load_successful = False
+            break
+        try:
+            cached = cached.loc[features.index]
+        except KeyError:
+            load_successful = False
+            break
+        loaded_features[name] = cached
+
+    if load_successful:
+        return loaded_features, dataset_paths, True
+
+    imputer = IterativeImputer()
+    imputer.fit(feature_sets[reference_key])
+
+    imputed_features: Dict[str, pd.DataFrame] = {}
+    for name, features in feature_sets.items():
+        transformed = imputer.transform(features)
+        imputed_df = pd.DataFrame(
+            transformed,
+            columns=features.columns,
+            index=features.index,
+        )
+        path = dataset_paths[name]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        imputed_df.to_csv(path)
+        imputed_features[name] = imputed_df
+
+    return imputed_features, dataset_paths, False
+
+
 #%% [markdown]
 # ## Analysis configuration
 #
@@ -215,7 +288,7 @@ def make_logistic_pipeline() -> Pipeline:
 
     return Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median")),
+            ("imputer", IterativeImputer()),
             ("scaler", StandardScaler()),
             ("classifier", LogisticRegression(max_iter=200)),
         ]
@@ -497,10 +570,34 @@ else:
 
 # %%
 
+baseline_feature_frames: Dict[str, pd.DataFrame] = {
+    "Train": X_train_model,
+    "MIMIC test": X_test,
+}
+if external_features is not None:
+    baseline_feature_frames["eICU external"] = external_features
+
+(
+    baseline_imputed_features,
+    baseline_imputed_paths,
+    baseline_loaded_from_cache,
+) = load_or_create_iteratively_imputed_features(
+    baseline_feature_frames,
+    output_dir=OUTPUT_DIR,
+    target_label=TARGET_LABEL,
+    reference_key="Train",
+)
+
+if baseline_loaded_from_cache:
+    print("Loaded iterative-imputed baseline features from disk.")
+else:
+    print("Saved iterative-imputed baseline features:")
+    for name, path in baseline_imputed_paths.items():
+        print(f"  - {name}: {path}")
+
 baseline_models = {
     "Logistic regression": Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
             (
                 "classifier",
@@ -510,20 +607,17 @@ baseline_models = {
     ),
     "KNN": Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
             ("classifier", KNeighborsClassifier(n_neighbors=25)),
         ]
     ),
     "Decision tree": Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median")),
             ("classifier", DecisionTreeClassifier(random_state=RANDOM_STATE)),
         ]
     ),
     "Random forest": Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median")),
             (
                 "classifier",
                 RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE),
@@ -532,19 +626,23 @@ baseline_models = {
     ),
     "SVM (RBF)": Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
             ("classifier", SVC(kernel="rbf", probability=True)),
         ]
     ),
 }
 
-baseline_evaluation_sets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
-    "Train": (X_train_model, y_train_model),
-    "MIMIC test": (X_test, y_test),
+baseline_label_sets: Dict[str, pd.Series] = {
+    "Train": y_train_model,
+    "MIMIC test": y_test,
 }
-if external_features is not None and external_labels is not None:
-    baseline_evaluation_sets["eICU external"] = (external_features, external_labels)
+if external_labels is not None:
+    baseline_label_sets["eICU external"] = external_labels
+
+baseline_evaluation_sets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+    name: (baseline_imputed_features[name], labels)
+    for name, labels in baseline_label_sets.items()
+}
 
 baseline_rows: List[Dict[str, object]] = []
 metric_columns = ["AUC", "ACC", "SPE", "SEN", "Brier"]
@@ -560,8 +658,11 @@ model_abbreviation_lookup = {
 }
 model_abbreviation_lookup["SUAVE"] = "SUAVE"
 
+train_features_imputed = baseline_imputed_features["Train"]
+train_labels = baseline_label_sets["Train"]
+
 for model_name, estimator in baseline_models.items():
-    fitted_estimator = estimator.fit(X_train_model, y_train_model)
+    fitted_estimator = estimator.fit(train_features_imputed, train_labels)
     for dataset_name, (features, labels) in baseline_evaluation_sets.items():
         probabilities = fitted_estimator.predict_proba(features)
         baseline_probability_map[dataset_name][model_name] = extract_positive_probabilities(
