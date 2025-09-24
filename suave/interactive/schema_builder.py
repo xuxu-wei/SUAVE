@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from ..schema_inference import (
-    SchemaInferenceMode,
+    SCHEMA_INFERENCE_MODES,
     SchemaInferenceResult,
     SchemaInferencer,
 )
@@ -1189,7 +1189,7 @@ def launch_schema_builder(
     host: str = _DEFAULT_HOST,
     port: int = _DEFAULT_PORT,
     open_browser: bool = True,
-    mode: SchemaInferenceMode = SchemaInferenceMode.INFO,
+    mode: str = "info",
     inferencer: Optional[SchemaInferencer] = None,
 ) -> Schema:
     """Launch a local web UI to review and edit a schema.
@@ -1207,8 +1207,8 @@ def launch_schema_builder(
         If True (default) the default system browser is opened
         automatically.
     mode:
-        Inference mode forwarded to SchemaInferencer. INFO works well for
-        interactive use because it includes diagnostic messages.
+        Inference mode forwarded to :class:`SchemaInferencer`. ``"info"`` works
+        well for interactive use because it includes diagnostic messages.
     inferencer:
         Optional pre-configured inferencer. When None a fresh instance with
         default settings is created.
@@ -1242,7 +1242,13 @@ def launch_schema_builder(
         )
 
     inferencer = inferencer or SchemaInferencer()
-    result = inferencer.infer(df, feature_columns, mode=mode)
+    mode_normalised = str(mode).lower()
+    if mode_normalised not in SCHEMA_INFERENCE_MODES:
+        raise ValueError(
+            "mode must be one of {'silent', 'info', 'interactive'}; "
+            f"got {mode!r}"
+        )
+    result = inferencer.infer(df, feature_columns, mode=mode_normalised)
     builder = _SchemaBuilder(
         df=df,
         inference=result,
