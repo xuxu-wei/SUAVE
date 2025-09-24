@@ -218,9 +218,9 @@ class TrainingPlotMonitor:
                 },
                 {
                     "name": "auroc",
-                    "title": "Validation AUROC",
+                    "title": "AUROC",
                     "ylabel": "AUROC",
-                    "plot_train": False,
+                    "plot_train": True,
                     "plot_val": True,
                 },
                 {

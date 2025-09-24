@@ -1659,6 +1659,8 @@ class SUAVE:
             permutation = torch.randperm(n_samples, device=device)
             epoch_loss = 0.0
             epoch_samples = 0
+            train_probabilities: list[np.ndarray] = []
+            train_targets: list[np.ndarray] = []
             for start in range(0, n_samples, effective_batch):
                 batch_indices = permutation[start : start + effective_batch]
                 logits = self._classifier(latent_mu[batch_indices])
@@ -1670,9 +1672,22 @@ class SUAVE:
                 batch_count = batch_indices.numel()
                 epoch_loss += float(loss.item()) * batch_count
                 epoch_samples += batch_count
+                probabilities = torch.softmax(logits.detach(), dim=-1)
+                train_probabilities.append(probabilities.detach().cpu().numpy())
+                train_targets.append(targets.detach().cpu().numpy())
 
             average_loss = epoch_loss / max(epoch_samples, 1)
             progress.set_postfix({"loss": average_loss})
+
+            if train_probabilities and train_targets:
+                prob_array = np.concatenate(train_probabilities, axis=0)
+                target_array = np.concatenate(train_targets, axis=0)
+                try:
+                    train_auroc = float(compute_auroc(prob_array, target_array))
+                except ValueError:
+                    train_auroc = float("nan")
+            else:
+                train_auroc = float("nan")
 
             if plot_monitor is not None:
                 val_metrics: dict[str, float] = {}
@@ -1705,6 +1720,7 @@ class SUAVE:
                         "classification_loss": average_loss,
                         "total_loss": None,
                         "joint_objective": None,
+                        "auroc": train_auroc,
                     },
                     val_metrics=val_metrics,
                     beta=self.beta,
@@ -1804,6 +1820,8 @@ class SUAVE:
             epoch_recon_total = 0.0
             epoch_cat_kl_total = 0.0
             epoch_gauss_kl_total = 0.0
+            train_probabilities: list[np.ndarray] = []
+            train_targets: list[np.ndarray] = []
             for start in range(0, n_samples, max(effective_batch, 1)):
                 batch_indices = permutation[start : start + effective_batch]
                 batch_input = encoder_inputs[batch_indices]
@@ -1842,6 +1860,9 @@ class SUAVE:
                     joint_loss = joint_loss + class_loss * classification_weight
                     epoch_class_loss += float(class_loss.item()) * batch_count
                     epoch_class_samples += batch_count
+                    probabilities = torch.softmax(logits.detach(), dim=-1)
+                    train_probabilities.append(probabilities.detach().cpu().numpy())
+                    train_targets.append(targets.detach().cpu().numpy())
                 optimizer.zero_grad()
                 joint_loss.backward()
                 optimizer.step()
@@ -1871,6 +1892,15 @@ class SUAVE:
             average_class_loss: float | None = None
             if epoch_class_samples > 0:
                 average_class_loss = epoch_class_loss / epoch_class_samples
+            if train_probabilities and train_targets:
+                prob_array = np.concatenate(train_probabilities, axis=0)
+                target_array = np.concatenate(train_targets, axis=0)
+                try:
+                    train_auroc = float(compute_auroc(prob_array, target_array))
+                except ValueError:
+                    train_auroc = float("nan")
+            else:
+                train_auroc = float("nan")
             progress.set_postfix(
                 {
                     "joint": average_joint,
@@ -1896,6 +1926,7 @@ class SUAVE:
                         "classification_loss": average_class_loss,
                         "reconstruction": average_recon,
                         "kl": average_cat_kl + average_gauss_kl,
+                        "auroc": train_auroc,
                     },
                     val_metrics=val_metrics,
                     beta=self.beta,
