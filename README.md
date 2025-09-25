@@ -188,7 +188,7 @@ mi_unit = mutual_information_feature(real_unit.values, synthetic_unit.values)
 attack = simple_membership_inference(train_probs, train_labels, test_probs, test_labels)
 ```
 
-The `evaluate_tstr`/`evaluate_trtr` pair supports model-agnostic baselines for benchmarking synthetic cohorts. `classifier_two_sample_test` accepts a mapping of estimator factories—by default we pair an XGBoost endpoint with a logistic regression sensitivity check—while the RBF-MMD and mutual information helpers quantify per-feature fidelity. Low C2ST AUCs (≈`0.5`), low MMD (≈`0.0`), and near-zero mutual information indicate strong alignment; larger values call for manual inspection. The membership attack reports AUROC and accuracy for separating training members from held-out data, highlighting potential privacy leakage.
+The `evaluate_tstr`/`evaluate_trtr` pair supports model-agnostic baselines for benchmarking synthetic cohorts. `classifier_two_sample_test` accepts a mapping of estimator factories—by default we pair an XGBoost endpoint with a logistic regression sensitivity check—while the RBF-MMD, energy distance (dimension-normalised Euclidean + Hamming with optional permutation `p`-values), and mutual information helpers quantify per-feature fidelity. Low C2ST AUCs (≈`0.5`), low MMD/energy distance (≈`0.0`), and near-zero mutual information indicate strong alignment; larger values call for manual inspection. The membership attack reports AUROC and accuracy for separating training members from held-out data, highlighting potential privacy leakage.
 
 ### Latent representations
 

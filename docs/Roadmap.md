@@ -175,5 +175,5 @@ reloaded = SUAVE.load("path/to/ckpt")
 
 - **分类损失权重自动调节**：`fit()` 会在联合微调阶段根据 warm-up ELBO 与验证集交叉熵自动推导分类损失权重，并在用户未显式传入时完成裁剪与回填，兼顾稳定性与易用性。【F:suave/model.py†L574-L604】【F:suave/model.py†L1188-L1228】
 - **超参启发式自动推荐**：默认设置会根据输入维度、样本规模与类别统计调用 `recommend_hyperparameters`，动态更新潜变量维度、隐藏层、dropout、学习率及训练日程等关键超参，并记录到 `auto_hyperparameters_` 便于排查。【F:suave/model.py†L619-L760】
-- **合成数据评估闭环**：`evaluate_tstr`/`evaluate_trtr` 与 `simple_membership_inference` 提供 TSTR/TRTR 指标、Brier/ECE 计算与隐私攻击基线，覆盖真实与合成数据的性能诊断需求。【F:suave/evaluate.py†L288-L370】【F:suave/evaluate.py†L373-L460】
+- **合成数据评估闭环**：`evaluate_tstr`/`evaluate_trtr`、`rbf_mmd`/`energy_distance` 以及 `simple_membership_inference` 覆盖 TSTR/TRTR 指标、按维度归一的 MMD/能量距离（含置换检验）、Brier/ECE 计算与隐私攻击基线，满足真实与合成数据的性能诊断需求。【F:suave/evaluate.py†L288-L370】【F:suave/evaluate.py†L1032-L1566】
 - **研究级 MIMIC/eICU 流水线**：`examples/research-mimic_mortality_supervised.py` 集成 Optuna 最优试验回放、特征工程缓存、基线模型、SUAVE 校准、TSTR/TRTR 与报告导出，支持住院死亡率等关键任务的全流程复现。【F:examples/research-mimic_mortality_supervised.py†L1-L200】
