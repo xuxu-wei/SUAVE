@@ -1,46 +1,36 @@
-## 进度快照
-
-- ✅ MVP 核心链路（HI-VAE 迁移 + SUAVE API + 三阶段训练 + 校准 + 条件采样）已跑通并落地到主干。
-- ✅ Task-0 ～ Task-4 的实现、测试与评测工具已全部交付并在当前仓库中维护。
-- ⏳ Task-5（文档、示例与 schema dump/load）仍在待办列表，需要按原规划补齐。
-- 🆕 TODO 已登记：为 SUAVE 增强半监督流程（Warmup 无监督 + 分类阶段有监督）。
-
-------
-
-# 一、总体路线（两周内可跑通）
-
-**MVP → 低成本增强 → 评测闭环** 的三段式推进，每段都能独立交付。
+# 一、总体路线
 
 1. **MVP（先跑通端到端）** ✅
    - [x] 包结构与安装脚手架
-   - [x] **HI-VAE（PyTorch实现）**：将hivae2的tf实现完整改写为pytorch实现并对齐到我们设计的项目结构。似然头包括 `real`(Gaussian) 、 `cat/bernoulli`(Categorical/Bernoulli)`、`pos`(LogNormal)、`count`(Poisson) 、`ordinal`（cumulative link）
+   - [x] HI-VAE（PyTorch实现）：以hivae2的tf实现为骨架，改写为pytorch实现并对齐到我们设计的项目结构。似然头包括 `real`(Gaussian) 、 `cat/bernoulli`(Categorical/Bernoulli)`、`pos`(LogNormal)、`count`(Poisson) 、`ordinal`（cumulative link）
    - [x] `SUAVE` 高层 API（一个类就够）：`fit() / predict() / predict_proba() / calibrate() / sample() / save() / load()`
    - [x] `fit()` 内部完成 **train 内部切分验证集**（如 `val_split=0.1`）
    - [x] 分类头：冻结解码器 → 训练 head → **轻联合微调**（warm-start → head → light joint FT）
    - [x] 温度缩放校准 + 基础可视化（ROC/PR、可靠性图、潜变量相关热图）
 
-2. **低成本增强（按需启用）**
+2. **低成本增强** ✅
    - [x] 追加似然头
-   - [ ] 自动化：自动化识别数据类型和生成schema
+   - [x] 自动化：自动化识别数据类型和生成schema
 
    - [x] 条件生成（CVAE 开关 `conditional=True`）：`fit(..., y=...)` 时启用可控采样
 
    - [x] 可解释性：beta-VAE
 
-   - [ ] 类不平衡：`class_weight/focal` + 条件过采样（已支持 `class_weight`，`focal` 与条件过采样待补充）
+   - [x] 类不平衡处理：`class_weight/focal` + 条件过采样（已支持 `class_weight`，**`focal` 与条件过采样待补充**）
 
 3. **可能需要大幅修改的增强**
-   - [ ] 添加 SUAVE 半监督支持（Warmup 阶段无监督、分类训练阶段有监督）
-- [ ] 无监督模式下的`predict()/predict_proba()`方法实现，参考HIVAE论文
-   
+   - [ ] 添加 SUAVE 半监督支持（Warmup 阶段无监督允许无标签样本、分类训练和联合微调阶段仅接受有标签样本）
+   - [x] 无监督模式下的`predict()/predict_proba()`方法实现，参考HIVAE论文（通过 `attr=` 指定要推断的属性）
+  - [ ] 显式建模缺失模式，并允许生成带缺失的数据
+  
 4. **评测闭环** ✅
    - [x] **TSTR/TRTR** 脚手架（独立评测器）
    - [x] 简单 **MIA**（membership inference）基线（影子模型/置信阈值法）
-   - [ ] 结果打包与示例 notebook（你的研究作 example）
+   - [x] 结果打包与示例 notebook（研究作 example）
 
 ------
 
-# 二、包结构与API（codex先按此骨架生成）
+# 二、包结构与API
 
 ```
 suave/
@@ -104,11 +94,9 @@ evaluate.tstr(X_syn, X_test, y_test, clf="xgboost")
 evaluate.mia_baseline(m, X_train)
 ```
 
-> 备注：如需配置文件，**只在数据目录**允许 `schema.json`（`SUAVE.dump_schema(data_dir)` / `SUAVE.load_schema(data_dir)`），避免用户修改包内文件。
-
 ------
 
-# 三、与 codex 的协作方式
+# 三、任务计划
 
 ## 1) 准备工作（一次性）
 
@@ -124,7 +112,7 @@ evaluate.mia_baseline(m, X_train)
   git init && echo ".venv\n__pycache__\n*.ipynb_checkpoints\n" > .gitignore
   ```
 
-- 新建空文件树（让 codex 往里填实现）：
+- 新建空文件树：
 
   ```bash
   mkdir -p suave/modules examples && touch suave/__init__.py suave/types.py suave/data.py suave/model.py \
@@ -132,11 +120,7 @@ evaluate.mia_baseline(m, X_train)
     suave/{sampling.py,evaluate.py,plots.py} examples/sepsis_minimal.py
   ```
 
-## 2) **AGENTS.md**（放根目录，codex 先读它再写代码）
-
-见根目录。
-
-## 3) **首批 codex 任务与指令模板**
+## 2) **首批 codex 任务与指令模板**
 
 > ### ✅ Task-0｜包骨架 & 最小 API（空实现 + 文档 + 单测）
 >
@@ -298,7 +282,7 @@ evaluate.mia_baseline(m, X_train)
 > > - 提供 `SUAVE.dump_schema(data_dir)` 与 `SUAVE.load_schema(data_dir)`（如需 `schema.json`，只写到**数据目录**）；
 > > - 确保 README 片段：如何准备 schema、如何开启条件生成、如何做 TSTR。
 
-## 4) 代码评审清单（你用来验收 codex 产物）
+## 3) 代码评审清单
 
 - `fit()` 可仅凭 train（内部切 val）跑完三阶段；日志包含 NLL/KL/AUROC/AUPRC/Brier/ECE
 - `predict()` 输出 shape 正确、无 NaN
@@ -309,30 +293,10 @@ evaluate.mia_baseline(m, X_train)
 - 单测通过：`pytest -q`
 - 风格：`black . && ruff .` 零错误
 
-------
-
-# 四、初始命令（从空仓开始）
-
-```bash
-# 1) 建仓&环境
-mkdir suave && cd suave
-python -m venv .venv && source .venv/bin/activate
-pip install --upgrade pip
-pip install torch torchvision torchaudio  # 按需选CPU/CUDA源
-pip install numpy pandas scikit-learn matplotlib scipy tqdm torchmetrics xgboost
-pip install black ruff pytest
-
-# 2) 生成空文件树（见上）
-# 3) 打开 codex，贴入 Task-0 Prompt（上文），让其一次写完骨架与最小示例
-# 4) 本地跑
-python examples/sepsis_minimal.py
-pytest -q
-black . && ruff .
-```
 
 ------
 
-## 附：给 codex 的“分布映射”速查（短表）
+## 附：“分布映射”速查
 
 | HI-VAE TF 名     | PyTorch 目标                                            |
 | ---------------- | ------------------------------------------------------- |
