@@ -3659,6 +3659,15 @@ class SUAVE:
             DataFrame with shape ``(n_samples, n_features)`` whose columns match
             the training schema.
 
+        Notes
+        -----
+        When :attr:`behaviour` is ``"supervised"`` the unconditional mode
+        (``conditional=False``) emits a warning because the generated samples do
+        not include labels. To synthesise feature/label pairs for downstream
+        training provide labels via ``conditional=True``. For example::
+
+            model.sample(10, conditional=True, y=np.random.choice(model.classes_, size=10))
+
         Raises
         ------
         RuntimeError
@@ -3679,6 +3688,16 @@ class SUAVE:
             raise RuntimeError("Schema is required to generate samples")
         if n_samples <= 0:
             return pd.DataFrame(columns=list(self.schema.feature_names))
+
+        if self.behaviour == "supervised" and not conditional:
+            warnings.warn(
+                "model.sample(conditional=False) returns feature-only rows when "
+                "behaviour='supervised'. For downstream supervised training, use "
+                "conditional=True with labels, e.g. "
+                "model.sample(n, conditional=True, y=np.random.choice(model.classes_, size=n)).",
+                UserWarning,
+                stacklevel=2,
+            )
 
         device = self._select_device()
         latents, assignments = self._draw_latent_samples(
