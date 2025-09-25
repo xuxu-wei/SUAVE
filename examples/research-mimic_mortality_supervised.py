@@ -64,13 +64,13 @@ from mimic_mortality_utils import (  # noqa: E402
 from cls_eval import evaluate_predictions, write_results_to_excel_unique  # noqa: E402
 
 from suave.evaluate import (  # noqa: E402
-    kolmogorov_smirnov_statistic,
+    classifier_two_sample_test,
     mutual_information_feature,
     rbf_mmd,
+    simple_membership_inference,
 )
 
 from suave import SUAVE  # noqa: E402
-from suave.evaluate import simple_membership_inference  # noqa: E402
 
 
 # %% [markdown]
@@ -587,24 +587,6 @@ plot_calibration_curves(
     probability_map, label_map, target_name=TARGET_LABEL, output_path=calibration_path
 )
 
-train_probabilities = probability_map["Train"]
-test_probabilities = probability_map["MIMIC test"]
-membership_metrics = simple_membership_inference(
-    train_probabilities,
-    np.asarray(y_train_model),
-    test_probabilities,
-    np.asarray(y_test),
-)
-membership_df = pd.DataFrame([{"target": TARGET_LABEL, **membership_metrics}])
-membership_path = OUTPUT_DIR / "membership_inference.csv"
-membership_df.to_csv(membership_path, index=False)
-render_dataframe(
-    membership_df,
-    title="Membership inference baseline",
-    floatfmt=".3f",
-)
-
-
 # %% [markdown]
 # ## Benchmark ROC and calibration curves
 #
@@ -874,6 +856,59 @@ else:
 
     real_features_numeric = training_sets_numeric["TRTR (real)"][0]
     synthesis_features_numeric = training_sets_numeric["TSTR synthesis"][0]
+
+    def make_c2st_xgboost() -> Any:
+        from xgboost import XGBClassifier
+
+        return XGBClassifier(
+            objective="binary:logistic",
+            eval_metric="auc",
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=4,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=1.0,
+            random_state=RANDOM_STATE,
+            n_jobs=-1,
+            tree_method="hist",
+            use_label_encoder=False,
+        )
+
+    def make_c2st_logistic() -> Pipeline:
+        return Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "classifier",
+                    LogisticRegression(
+                        class_weight="balanced",
+                        max_iter=1000,
+                        solver="lbfgs",
+                    ),
+                ),
+            ]
+        )
+
+    c2st_metrics = classifier_two_sample_test(
+        real_features_numeric.to_numpy(),
+        synthesis_features_numeric.to_numpy(),
+        model_factories={
+            "xgboost": make_c2st_xgboost,
+            "logistic": make_c2st_logistic,
+        },
+        random_state=RANDOM_STATE,
+        n_bootstrap=1000,
+    )
+    c2st_df = pd.DataFrame([{"target": TARGET_LABEL, **c2st_metrics}])
+    c2st_path = OUTPUT_DIR / "c2st_distribution_test.csv"
+    c2st_df.to_csv(c2st_path, index=False)
+    render_dataframe(
+        c2st_df,
+        title="Classifier two-sample test (C2ST)",
+        floatfmt=".3f",
+    )
+
     distribution_rows: List[Dict[str, object]] = []
     for column in FEATURE_COLUMNS:
         real_values = real_features_numeric[column].to_numpy()
@@ -881,7 +916,6 @@ else:
         distribution_rows.append(
             {
                 "feature": column,
-                "ks": kolmogorov_smirnov_statistic(real_values, synthetic_values),
                 "mmd": rbf_mmd(
                     real_values, synthetic_values, random_state=RANDOM_STATE
                 ),
@@ -894,13 +928,30 @@ else:
     distribution_path = OUTPUT_DIR / "distribution_shift_metrics.csv"
     distribution_df.to_csv(distribution_path, index=False)
     distribution_top = (
-        distribution_df.sort_values("ks", ascending=False)
+        distribution_df.sort_values("mutual_information", ascending=False)
         .head(10)
         .reset_index(drop=True)
     )
     render_dataframe(
         distribution_top,
-        title="Top distribution shift features (KS)",
+        title="Top distribution shift features (mutual information)",
+        floatfmt=".3f",
+    )
+
+    train_probabilities = probability_map["Train"]
+    test_probabilities = probability_map["MIMIC test"]
+    membership_metrics = simple_membership_inference(
+        train_probabilities,
+        np.asarray(y_train_model),
+        test_probabilities,
+        np.asarray(y_test),
+    )
+    membership_df = pd.DataFrame([{"target": TARGET_LABEL, **membership_metrics}])
+    membership_path = OUTPUT_DIR / "membership_inference.csv"
+    membership_df.to_csv(membership_path, index=False)
+    render_dataframe(
+        membership_df,
+        title="Membership inference baseline",
         floatfmt=".3f",
     )
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Tuple
+import re
+from typing import Any, Callable, Dict, Mapping, Tuple
 
 import numpy as np
 from sklearn.metrics import (
@@ -11,6 +12,7 @@ from sklearn.metrics import (
     mutual_info_score,
     roc_auc_score,
 )
+from sklearn.model_selection import StratifiedKFold
 
 
 def _prepare_inputs(
@@ -482,6 +484,202 @@ def simple_membership_inference(
         "attack_best_accuracy": float(accuracies[best_index]),
         "attack_majority_class_accuracy": majority_accuracy,
     }
+
+
+def _prepare_c2st_inputs(
+    real_features: np.ndarray, synthetic_features: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    """Validate inputs for the classifier two-sample test."""
+
+    real = np.asarray(real_features, dtype=float)
+    synthetic = np.asarray(synthetic_features, dtype=float)
+    if real.ndim != 2 or synthetic.ndim != 2:
+        raise ValueError("Inputs must be two-dimensional feature matrices")
+    if real.shape[1] != synthetic.shape[1]:
+        raise ValueError("Real and synthetic features must share the same columns")
+
+    real_mask = np.all(np.isfinite(real), axis=1)
+    synth_mask = np.all(np.isfinite(synthetic), axis=1)
+    real = real[real_mask]
+    synthetic = synthetic[synth_mask]
+    if real.size == 0 or synthetic.size == 0:
+        raise ValueError("Both datasets must contain at least one finite row")
+
+    features = np.vstack([real, synthetic])
+    labels = np.concatenate(
+        [np.zeros(real.shape[0], dtype=int), np.ones(synthetic.shape[0], dtype=int)]
+    )
+    return features, labels, real.shape[0], synthetic.shape[0]
+
+
+def _cross_validated_probabilities(
+    model_factory: Callable[[], Any],
+    features: np.ndarray,
+    labels: np.ndarray,
+    *,
+    n_splits: int,
+    random_state: int,
+) -> np.ndarray:
+    """Return out-of-fold probability estimates for the classifier two-sample test."""
+
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    probabilities = np.zeros(labels.shape[0], dtype=float)
+    for train_indices, test_indices in cv.split(features, labels):
+        model = model_factory()
+        model.fit(features[train_indices], labels[train_indices])
+        fold_probabilities = model.predict_proba(features[test_indices])
+        probabilities[test_indices] = np.asarray(fold_probabilities)[:, 1]
+    return probabilities
+
+
+def _bootstrap_auc_interval(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    *,
+    n_bootstrap: int,
+    rng: np.random.Generator,
+    alpha: float = 0.95,
+) -> Tuple[float, float, int]:
+    """Bootstrap the ROC-AUC confidence interval."""
+
+    samples: list[float] = []
+    for _ in range(n_bootstrap):
+        indices = rng.integers(0, labels.size, size=labels.size)
+        sampled_labels = labels[indices]
+        if np.unique(sampled_labels).size < 2:
+            continue
+        sampled_scores = scores[indices]
+        samples.append(float(roc_auc_score(sampled_labels, sampled_scores)))
+    if not samples:
+        return float("nan"), float("nan"), 0
+
+    lower_percentile = (1.0 - alpha) / 2.0 * 100.0
+    upper_percentile = (1.0 + alpha) / 2.0 * 100.0
+    lower, upper = np.percentile(samples, [lower_percentile, upper_percentile])
+    return float(lower), float(upper), len(samples)
+
+
+def _normalise_model_name(model_name: str) -> str:
+    """Return a normalised identifier for ``model_name`` metric keys."""
+
+    slug = re.sub(r"[^0-9a-zA-Z]+", "_", model_name.strip().lower())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug or "model"
+
+
+def classifier_two_sample_test(
+    real_features: np.ndarray,
+    synthetic_features: np.ndarray,
+    *,
+    model_factories: Mapping[str, Callable[[], Any]],
+    random_state: int,
+    n_splits: int = 5,
+    n_bootstrap: int = 1000,
+) -> Dict[str, float]:
+    """Run a classifier two-sample test (C2ST) between real and synthetic data.
+
+    The procedure trains discriminative models that attempt to separate rows
+    drawn from the real dataset and a synthetic cohort. Well-aligned
+    distributions should yield ROC-AUC scores near ``0.5``. Callers can provide
+    one or more model factories whose :meth:`predict_proba` outputs are
+    evaluated with stratified ``n_splits``-fold cross-validation. Bootstrap
+    resampling of the out-of-fold predictions provides confidence intervals for
+    each classifier's ROC-AUC estimate.
+
+    Args:
+        real_features: Two-dimensional array containing real samples.
+        synthetic_features: Two-dimensional array with synthetic samples that
+            share the same column order as ``real_features``.
+        model_factories: Mapping from a model identifier to a factory function
+            that returns an unfitted estimator implementing
+            :meth:`fit`/:meth:`predict_proba` for binary classification. Keys
+            are converted into snake-case metric prefixes (e.g., ``"XGBoost"``
+            becomes ``"xgboost"``).
+        random_state: Seed controlling the cross-validation shuffling and the
+            bootstrap sampling procedure.
+        n_splits: Number of stratified folds used to obtain out-of-fold
+            predictions for each classifier. The value is capped at the smallest
+            class count to maintain valid splits.
+        n_bootstrap: Number of bootstrap replicates used to derive confidence
+            intervals. Degenerate resamples that contain a single class are
+            skipped.
+
+    Returns:
+        A dictionary containing the ROC-AUC and 95% bootstrap confidence
+        intervals for each supplied classifier, along with bookkeeping
+        metadata detailing the sample counts and effective bootstrap
+        iterations.
+
+    Raises:
+        ValueError: If the inputs are not two-dimensional, if they do not share
+            the same number of columns, or if insufficient samples remain after
+            filtering non-finite rows to form at least two cross-validation
+            splits per class.
+
+    Example:
+        >>> from sklearn.linear_model import LogisticRegression
+        >>> from xgboost import XGBClassifier
+        >>> rng = np.random.default_rng(0)
+        >>> real = rng.normal(size=(100, 3))
+        >>> synth = rng.normal(loc=0.1, size=(100, 3))
+        >>> metrics = classifier_two_sample_test(
+        ...     real,
+        ...     synth,
+        ...     model_factories={
+        ...         "xgboost": lambda: XGBClassifier(random_state=0),
+        ...         "logistic": lambda: LogisticRegression(max_iter=200),
+        ...     },
+        ...     random_state=0,
+        ...     n_bootstrap=10,
+        ... )
+        >>> sorted(metrics.keys())[:2]
+        ['cv_splits', 'logistic_auc']
+    """
+
+    if not model_factories:
+        raise ValueError("model_factories must contain at least one classifier")
+
+    features, labels, n_real, n_synth = _prepare_c2st_inputs(
+        real_features, synthetic_features
+    )
+
+    class_counts = np.bincount(labels)
+    min_class = int(class_counts.min())
+    if min_class < 2:
+        raise ValueError("At least two samples per class are required for C2ST")
+    splits = max(2, min(n_splits, min_class))
+
+    rng = np.random.default_rng(random_state)
+
+    results: Dict[str, float] = {
+        "n_real_samples": int(n_real),
+        "n_synthetic_samples": int(n_synth),
+        "n_features": int(features.shape[1]),
+        "cv_splits": int(splits),
+    }
+
+    for model_name, factory in model_factories.items():
+        key_prefix = _normalise_model_name(model_name)
+        scores = _cross_validated_probabilities(
+            factory,
+            features,
+            labels,
+            n_splits=splits,
+            random_state=random_state,
+        )
+        auc = float(roc_auc_score(labels, scores))
+        ci_low, ci_high, effective = _bootstrap_auc_interval(
+            labels,
+            scores,
+            n_bootstrap=n_bootstrap,
+            rng=rng,
+        )
+        results[f"{key_prefix}_auc"] = auc
+        results[f"{key_prefix}_auc_ci_low"] = ci_low
+        results[f"{key_prefix}_auc_ci_high"] = ci_high
+        results[f"{key_prefix}_bootstrap_samples"] = float(effective)
+
+    return results
 
 
 def kolmogorov_smirnov_statistic(real: np.ndarray, synthetic: np.ndarray) -> float:

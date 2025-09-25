@@ -131,11 +131,12 @@ ece = compute_ece(proba, val_y.to_numpy(), n_bins=15)
 
 ```python
 from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
 
 from suave.evaluate import (
     evaluate_trtr,
     evaluate_tstr,
-    kolmogorov_smirnov_statistic,
+    classifier_two_sample_test,
     mutual_information_feature,
     rbf_mmd,
     simple_membership_inference,
@@ -145,8 +146,21 @@ from suave.evaluate import (
 tstr_scores = evaluate_tstr((X_syn, y_syn), (X_test, y_test), LogisticRegression)
 trtr_scores = evaluate_trtr((X_train, y_train), (X_test, y_test), LogisticRegression)
 
+# 执行 C2ST 分布检验
+real_matrix = real_features.values
+synthetic_matrix = synthetic_features.values
+c2st = classifier_two_sample_test(
+    real_matrix,
+    synthetic_matrix,
+    model_factories={
+        "xgboost": lambda: XGBClassifier(random_state=0),
+        "logistic": lambda: LogisticRegression(max_iter=200),
+    },
+    random_state=0,
+    n_bootstrap=200,
+)
+
 # 检查特征分布的一致性
-ks_age = kolmogorov_smirnov_statistic(real_age.values, synthetic_age.values)
 mmd_labs = rbf_mmd(real_labs.values, synthetic_labs.values, random_state=0)
 mi_unit = mutual_information_feature(real_unit.values, synthetic_unit.values)
 
@@ -154,7 +168,7 @@ mi_unit = mutual_information_feature(real_unit.values, synthetic_unit.values)
 attack = simple_membership_inference(train_probs, train_labels, test_probs, test_labels)
 ```
 
-`evaluate_tstr` / `evaluate_trtr` 可以搭配任意监督模型验证迁移性能；KS、RBF-MMD 与互信息用于量化单个特征的分布一致性，常见经验是 KS `<0.1`、MMD 接近 `0.0`、互信息接近 `0` 表示较好的拟合。成员推断攻击给出区分训练样本与保留样本的 AUROC 与准确率，用于监控潜在的隐私泄露。
+`evaluate_tstr` / `evaluate_trtr` 可以搭配任意监督模型验证迁移性能；`classifier_two_sample_test` 接收一个模型工厂映射（默认组合 XGBoost 主模型与逻辑回归敏感性分析），而 RBF-MMD 与互信息则聚焦单个特征的差异程度。C2ST AUC 接近 `0.5`、MMD 接近 `0.0`、互信息接近 `0` 通常表示较好的拟合。成员推断攻击给出区分训练样本与保留样本的 AUROC 与准确率，用于监控潜在的隐私泄露。
 
 ### 潜变量编码
 
