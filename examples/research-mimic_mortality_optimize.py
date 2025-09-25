@@ -150,25 +150,25 @@ def run_optuna_search(
         timeout = None
 
     def objective(trial: "optuna.trial.Trial") -> Tuple[float, float]:
-        trial.suggest_categorical("latent_dim", [8, 16, 24, 32, 48, 64])
-        trial.suggest_int("n_components", 1, 10)
+        trial.suggest_categorical("latent_dim", [6, 8, 16, 24, 32, 48, 64])
+        trial.suggest_categorical("n_components", [1, 2, 3, 4, 5, 6, 7, 8])
         trial.suggest_categorical("hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys()))
         trial.suggest_categorical(
             "head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys())
         )
-        trial.suggest_float("beta", 0.1, 6.0)
+        trial.suggest_float("beta", 0.5, 4.0)
         trial.suggest_categorical("use_classification_loss_weight", [True, False])
         if trial.params.get("use_classification_loss_weight"):
-            trial.suggest_float("classification_loss_weight", 1.0, 200.0, log=True)
-        trial.suggest_float("dropout", 0.0, 0.7)
+            trial.suggest_float("classification_loss_weight", 1.0, 1000.0, log=True)
+        trial.suggest_float("dropout", 0.0, 0.5)
         trial.suggest_float("learning_rate", 1e-5, 5e-2, log=True)
-        trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512, 1024])
-        trial.suggest_int("warmup_epochs", 1, 100)
-        trial.suggest_int("kl_warmup_epochs", 0, 80)
-        trial.suggest_int("head_epochs", 1, 80)
-        trial.suggest_int("finetune_epochs", 1, 60)
-        trial.suggest_int("early_stop_patience", 3, 30)
-        trial.suggest_float("joint_decoder_lr_scale", 1e-4, 1.0, log=True)
+        trial.suggest_categorical("batch_size", [64, 128, 256, 512, 1024])
+        trial.suggest_int("warmup_epochs", 2, 60)
+        trial.suggest_int("kl_warmup_epochs", 0, 20)
+        trial.suggest_int("head_epochs", 10, 80)
+        trial.suggest_int("finetune_epochs", 1, 30)
+        trial.suggest_int("early_stop_patience", 3, 8)
+        trial.suggest_float("joint_decoder_lr_scale", 1e-3, 0.3, log=True)
 
         model = build_suave_model(trial.params, schema, random_state=random_state)
 

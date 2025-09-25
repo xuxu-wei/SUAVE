@@ -1,4 +1,5 @@
 # examples
+/examples/research_outputs_*/
 /examples/analysis_outputs_*/
 /examples/*local_test.*
 
