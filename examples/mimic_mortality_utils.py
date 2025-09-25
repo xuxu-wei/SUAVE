@@ -440,12 +440,29 @@ def format_float(value: Optional[float]) -> str:
     return f"{float(value):.3f}"
 
 
+def _normalize_zero_indexed_labels(targets: pd.Series | np.ndarray) -> np.ndarray:
+    """Return ``targets`` as an integer array with labels mapped to start at zero."""
+
+    labels = np.asarray(targets)
+    if labels.size == 0:
+        if labels.dtype != int and not np.issubdtype(labels.dtype, np.integer):
+            labels = labels.astype(int, copy=False)
+        return labels
+
+    if labels.dtype != int and not np.issubdtype(labels.dtype, np.integer):
+        labels = labels.astype(int, copy=False)
+
+    unique = np.unique(labels)
+    if np.array_equal(unique, np.arange(unique.size)):
+        return labels
+
+    return np.searchsorted(unique, labels)
+
+
 def compute_auc(probabilities: np.ndarray, targets: pd.Series | np.ndarray) -> float:
     """Return the ROC AUC given predicted probabilities and targets."""
 
-    labels = np.asarray(targets)
-    if labels.dtype != int and not np.issubdtype(labels.dtype, np.integer):
-        labels = labels.astype(int, copy=False)
+    labels = _normalize_zero_indexed_labels(targets)
 
     try:
         return float(compute_auroc(probabilities, labels))
@@ -780,9 +797,7 @@ def compute_binary_metrics(
 ) -> Dict[str, float]:
     """Compute AUROC, accuracy, specificity, sensitivity, and Brier score."""
 
-    labels = np.asarray(targets)
-    if labels.dtype != int and not np.issubdtype(labels.dtype, np.integer):
-        labels = labels.astype(int, copy=False)
+    labels = _normalize_zero_indexed_labels(targets)
 
     try:
         classification = evaluate_classification(probabilities, labels)
