@@ -49,6 +49,7 @@
 3. 在临床基准方面，保留传统 ICU 评分（如数据集中现成的 SOFA 及相关器官支持指标）作为零参数对照：当 `mimic_mortality_utils.py` 中登记了此类 `baseline_probability_map` 项时，同样纳入基线汇总并在 `Notes` 中标记“临床评分”。
 4. 输出的指标 CSV 与 Markdown 表格需包含训练/验证/测试/eICU 全量指标，若外部验证缺失标签需在脚注注明处理策略。
 
+
 ### 7. SUAVE 模型构建、调参与训练
 
 1. 若存在历史最优 trial，优先读取 `optuna_best_params_{label}.json`；否则调用 `build_suave_model` 以默认超参初始化模型，并记录关键参数（latent_dim、beta、dropout 等）。
@@ -67,6 +68,7 @@
 2. 通过 `make_baseline_model_factories` 注册 `Logistic regression`、`Random forest` 与 `XGBoost` 三类下游分类器，对每个训练方案分别拟合并在 `evaluate_transfer_baselines` 中统计 `accuracy` 与 `roc_auc`（含置信区间）。
 3. 使用 `plot_transfer_metric_bars`、`kolmogorov_smirnov_statistic`、`rbf_mmd` 与 `mutual_information_feature` 评估分布一致性；其中 KS>0.1、RBF-MMD>0.05~0.1 或互信息>0.1 bits 时提示显著漂移，需要进一步人工排查。
 4. 所有 TRTR/TSTR 指标、KS/MMD/互信息结果应保存为 CSV 与可视化 PNG，纳入附录及复现包。
+
 
 ### 10. 潜空间可视化、报告生成与归档
 

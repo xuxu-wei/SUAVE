@@ -215,10 +215,9 @@ restored.predict_proba(test_X)
 
 Model artefacts include schema metadata, learned parameters, and calibration state for reproducible deployment.
 
-## Roadmap
+## Documentation and roadmap
 
-- Expand automatic schema tooling while preserving explicit overrides.
-- Add counterfactual sampling helpers that leverage posterior component assignments.
-- Integrate model interpretability reports into the training loop.
+- [SUAVE technical overview](docs/SUAVE_Technical_Details.md)
+- [Project roadmap](docs/Roadmap.md)
 
 Community feedback and pull requests are welcome!
