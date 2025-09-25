@@ -25,8 +25,10 @@ from suave.evaluate import (
     evaluate_classification,
     evaluate_trtr,
     evaluate_tstr,
+    rbf_mmd,
     simple_membership_inference,
 )
+from suave.types import Schema
 
 
 def test_evaluate_classification_binary_perfect_predictions() -> None:
@@ -288,3 +290,50 @@ def test_classifier_two_sample_test_filters_non_finite_rows() -> None:
     assert results["cv_splits"] <= min(
         results["n_real_samples"], results["n_synthetic_samples"]
     )
+
+
+def test_rbf_mmd_single_feature_with_permutation() -> None:
+    rng = np.random.default_rng(0)
+    real = rng.normal(loc=0.0, scale=1.0, size=200)
+    synthetic = rng.normal(loc=0.2, scale=1.1, size=200)
+
+    score, p_value = rbf_mmd(real, synthetic, random_state=0, n_permutations=25)
+
+    assert score >= 0.0
+    assert 0.0 <= p_value <= 1.0
+
+
+def test_rbf_mmd_multi_feature_schema_support() -> None:
+    rng = np.random.default_rng(1)
+    real = np.column_stack(
+        [
+            rng.normal(size=150),
+            rng.integers(0, 3, size=150),
+            rng.poisson(3.0, size=150),
+        ]
+    )
+    synthetic = np.column_stack(
+        [
+            rng.normal(loc=0.3, size=150),
+            rng.integers(0, 3, size=150),
+            rng.poisson(4.0, size=150),
+        ]
+    )
+    schema = Schema(
+        {
+            "feature_0": {"type": "real"},
+            "feature_1": {"type": "cat", "n_classes": 3},
+            "feature_2": {"type": "count"},
+        }
+    )
+
+    score, p_value = rbf_mmd(
+        real,
+        synthetic,
+        random_state=1,
+        schema=schema,
+        n_permutations=0,
+    )
+
+    assert score >= 0.0
+    assert math.isnan(p_value)

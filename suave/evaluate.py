@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Dict, Mapping, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
 from sklearn.metrics import (
     average_precision_score,
     brier_score_loss,
@@ -13,6 +14,9 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import StratifiedKFold
+
+from .schema_inference import SchemaInferencer
+from .types import Schema
 
 
 def _prepare_inputs(
@@ -732,73 +736,352 @@ def kolmogorov_smirnov_statistic(real: np.ndarray, synthetic: np.ndarray) -> flo
 
 
 def rbf_mmd(
-    real: np.ndarray,
-    synthetic: np.ndarray,
+    real: Any,
+    synthetic: Any,
     *,
     random_state: int,
     max_samples: int = 5000,
-) -> float:
-    """Estimate the RBF maximum mean discrepancy between two samples.
+    schema: Optional[Schema | Mapping[str, Mapping[str, object]]] = None,
+    feature_names: Optional[Sequence[str]] = None,
+    kernel: Optional[str | Mapping[str, str]] = None,
+    n_permutations: int = 0,
+) -> Tuple[float, float]:
+    r"""Estimate the maximum mean discrepancy (MMD) between two samples.
 
-    The maximum mean discrepancy (MMD) compares the first-order moments of the
-    real and synthetic samples in a reproducing kernel Hilbert space. We use a
-    radial basis function (RBF) kernel with the median heuristic for the
-    bandwidth and subsample extremely large arrays for efficiency. Scores close
-    to ``0.0`` indicate that the generator matches the reference feature well;
-    higher scores denote a stronger distribution gap. Practitioners often
-    compare MMD magnitudes across features: values above ``0.05``–``0.1``
-    typically warrant inspection in structured clinical datasets.
+    The helper now supports both per-feature comparisons (one-dimensional input)
+    and global multi-feature tests. Continuous features default to an RBF
+    kernel with the median heuristic (computed from non-diagonal pairwise
+    distances), while categorical features use a Kronecker :math:`\delta`
+    kernel unless overridden. When ``n_permutations`` is positive, a
+    permutation test is executed to estimate a one-sided ``p``-value that the
+    observed MMD arose under the null hypothesis that both samples share the
+    same distribution.
 
     Args:
-        real: One-dimensional array of reference observations.
-        synthetic: One-dimensional array of synthetic observations.
-        random_state: Seed used when subsampling large arrays prior to the
-            kernel computation.
-        max_samples: Maximum number of samples drawn from each array. Larger
-            inputs are subsampled without replacement.
+        real: Reference observations. Accepts NumPy arrays, pandas Series or
+            DataFrames. One-dimensional inputs are treated as a single feature
+            column.
+        synthetic: Synthetic observations with the same feature layout as
+            ``real``.
+        random_state: Seed used for subsampling and the optional permutation
+            test.
+        max_samples: Maximum number of samples drawn from each dataset prior to
+            computing pairwise kernels. Larger inputs are subsampled without
+            replacement.
+        schema: Optional :class:`~suave.types.Schema` or schema-like mapping
+            describing column types. If omitted, a silent
+            :class:`~suave.schema_inference.SchemaInferencer` run infers
+            per-column types to choose default kernels.
+        feature_names: Optional explicit feature ordering when passing raw
+            arrays without column labels.
+        kernel: Optional kernel override. Provide a string (``"rbf"`` or
+            ``"delta"``) to apply the same kernel to all features, or a
+            mapping from column name to kernel identifier. Unspecified columns
+            fall back to the schema-derived defaults.
+        n_permutations: Number of label permutations used to estimate the
+            ``p``-value. Set to ``0`` (the default) to skip the permutation
+            test and return ``numpy.nan`` for the ``p``-value.
 
     Returns:
-        The estimated MMD value. ``numpy.nan`` is returned when either input is
-        empty after removing non-finite values.
+        A tuple ``(mmd, p_value)``. ``mmd`` is the averaged maximum mean
+        discrepancy across feature groups and ``p_value`` is the optional
+        permutation test result. ``numpy.nan`` is returned for both entries
+        when inputs are empty after removing non-finite rows.
 
     Example:
         >>> rng = np.random.default_rng(0)
         >>> real = rng.normal(loc=0.0, scale=1.0, size=200)
         >>> synth = rng.normal(loc=0.1, scale=1.1, size=200)
-        >>> score = rbf_mmd(real, synth, random_state=0)
+        >>> score, p_value = rbf_mmd(real, synth, random_state=0, n_permutations=10)
         >>> round(score, 3) >= 0.0
         True
     """
 
-    real = np.asarray(real, dtype=float)
-    synthetic = np.asarray(synthetic, dtype=float)
-    real = real[np.isfinite(real)]
-    synthetic = synthetic[np.isfinite(synthetic)]
-    if real.size == 0 or synthetic.size == 0:
-        return float("nan")
+    real_frame, feature_names = _coerce_to_dataframe(real, feature_names)
+    synthetic_frame, feature_names = _coerce_to_dataframe(synthetic, feature_names)
+
+    if list(real_frame.columns) != list(synthetic_frame.columns):
+        raise ValueError(
+            "real and synthetic inputs must share the same feature columns"
+        )
+
+    schema_obj = _resolve_schema(schema, feature_names, real_frame, synthetic_frame)
+    kernel_assignments = _resolve_kernel_assignments(feature_names, schema_obj, kernel)
 
     rng = np.random.default_rng(random_state)
-    if real.size > max_samples:
-        real = rng.choice(real, size=max_samples, replace=False)
-    if synthetic.size > max_samples:
-        synthetic = rng.choice(synthetic, size=max_samples, replace=False)
+    group_results: list[float] = []
+    permutation_payloads: list[_PermutationPayload] = []
 
-    real = real[:, None]
-    synthetic = synthetic[:, None]
-    data = np.concatenate([real, synthetic], axis=0)
-    squared_distances = (data - data.T) ** 2
-    median_sq = float(np.median(squared_distances))
-    bandwidth = np.sqrt(0.5 * median_sq) if median_sq > 1e-12 else 1.0
+    for kernel_name, columns in kernel_assignments.items():
+        if not columns:
+            continue
+        column_list = list(columns)
+        real_subset = real_frame[column_list]
+        synthetic_subset = synthetic_frame[column_list]
 
-    def kernel(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        distances = (a - b.T) ** 2
-        return np.exp(-distances / (2.0 * bandwidth**2))
+        if kernel_name == "rbf":
+            real_array = _clean_continuous(real_subset.to_numpy(dtype=float))
+            synthetic_array = _clean_continuous(synthetic_subset.to_numpy(dtype=float))
+        elif kernel_name == "delta":
+            real_array = _clean_categorical(real_subset)
+            synthetic_array = _clean_categorical(synthetic_subset)
+        else:
+            raise ValueError(f"Unsupported kernel '{kernel_name}'")
 
-    k_xx = kernel(real, real)
-    k_yy = kernel(synthetic, synthetic)
-    k_xy = kernel(real, synthetic)
+        if real_array.size == 0 or synthetic_array.size == 0:
+            continue
+
+        real_array = _subsample_array(real_array, max_samples, rng)
+        synthetic_array = _subsample_array(synthetic_array, max_samples, rng)
+
+        if real_array.size == 0 or synthetic_array.size == 0:
+            continue
+
+        bandwidth = None
+        if kernel_name == "rbf":
+            bandwidth = _median_bandwidth(np.vstack([real_array, synthetic_array]))
+
+        score = _compute_mmd(real_array, synthetic_array, kernel_name, bandwidth)
+        group_results.append(score)
+
+        if n_permutations > 0:
+            permutation_payloads.append(
+                _PermutationPayload(
+                    kernel=kernel_name,
+                    real=real_array,
+                    synthetic=synthetic_array,
+                    bandwidth=bandwidth,
+                )
+            )
+
+    if not group_results:
+        return float("nan"), float("nan")
+
+    observed = float(np.mean(group_results))
+    if n_permutations <= 0 or not permutation_payloads:
+        return observed, float("nan")
+
+    extreme_count = 0
+    for _ in range(int(n_permutations)):
+        perm_scores: list[float] = []
+        for payload in permutation_payloads:
+            combined = np.vstack([payload.real, payload.synthetic])
+            if combined.size == 0:
+                continue
+            indices = rng.permutation(combined.shape[0])
+            split = payload.real.shape[0]
+            perm_real = combined[indices[:split]]
+            perm_synth = combined[indices[split:]]
+            perm_score = _compute_mmd(
+                perm_real, perm_synth, payload.kernel, payload.bandwidth
+            )
+            perm_scores.append(perm_score)
+        if not perm_scores:
+            continue
+        perm_value = float(np.mean(perm_scores))
+        if perm_value >= observed:
+            extreme_count += 1
+
+    p_value = (extreme_count + 1.0) / (n_permutations + 1.0)
+    return observed, float(min(max(p_value, 0.0), 1.0))
+
+
+class _PermutationPayload:
+    """Container for cached data used during the permutation test."""
+
+    def __init__(
+        self,
+        *,
+        kernel: str,
+        real: np.ndarray,
+        synthetic: np.ndarray,
+        bandwidth: Optional[float],
+    ) -> None:
+        self.kernel = kernel
+        self.real = real
+        self.synthetic = synthetic
+        self.bandwidth = bandwidth
+
+
+def _coerce_to_dataframe(
+    data: Any, feature_names: Optional[Sequence[str]]
+) -> Tuple[pd.DataFrame, list[str]]:
+    """Return a dataframe representation of ``data`` with column labels."""
+
+    if isinstance(data, pd.DataFrame):
+        frame = data.copy()
+        columns = list(frame.columns)
+    elif isinstance(data, pd.Series):
+        frame = data.to_frame()
+        columns = list(frame.columns)
+    else:
+        array = np.asarray(data)
+        if array.ndim == 1:
+            array = array.reshape(-1, 1)
+        elif array.ndim != 2:
+            raise ValueError("Inputs must be one- or two-dimensional")
+        if feature_names is None:
+            columns = [f"feature_{idx}" for idx in range(array.shape[1])]
+        else:
+            columns = list(feature_names)
+            if len(columns) != array.shape[1]:
+                raise ValueError("feature_names length does not match array width")
+        frame = pd.DataFrame(array, columns=columns)
+
+    if feature_names is not None:
+        missing = set(feature_names) - set(frame.columns)
+        if missing:
+            raise ValueError(f"Missing columns {sorted(missing)} in provided data")
+        columns = list(feature_names)
+        frame = frame.loc[:, columns]
+    return frame.reset_index(drop=True), columns
+
+
+def _resolve_schema(
+    schema: Optional[Schema | Mapping[str, Mapping[str, object]]],
+    feature_names: Sequence[str],
+    real_frame: pd.DataFrame,
+    synthetic_frame: pd.DataFrame,
+) -> Optional[Schema]:
+    """Resolve a Schema instance from user input or silent inference."""
+
+    if schema is None:
+        inferencer = SchemaInferencer()
+        combined = pd.concat([real_frame, synthetic_frame], axis=0, ignore_index=True)
+        inference = inferencer.infer(
+            combined, feature_columns=feature_names, mode="silent"
+        )
+        schema_obj = inference.schema
+    elif isinstance(schema, Schema):
+        schema_obj = schema
+    else:
+        schema_obj = Schema(schema)
+
+    schema_obj.require_columns(feature_names)
+    return schema_obj
+
+
+def _resolve_kernel_assignments(
+    feature_names: Sequence[str],
+    schema: Optional[Schema],
+    kernel_override: Optional[str | Mapping[str, str]],
+) -> Dict[str, Tuple[str, ...]]:
+    """Return a mapping of kernel name to the columns it should process."""
+
+    per_column: Dict[str, str] = {}
+    if isinstance(kernel_override, str):
+        per_column = {name: kernel_override for name in feature_names}
+    elif isinstance(kernel_override, Mapping):
+        per_column = {str(name): str(kind) for name, kind in kernel_override.items()}
+
+    assignments: Dict[str, str] = {}
+    for name in feature_names:
+        kernel_name = per_column.get(name)
+        if kernel_name is None and schema is not None:
+            column_type = schema[name].type
+            if column_type in {"real", "pos", "count"}:
+                kernel_name = "rbf"
+            elif column_type in {"cat", "ordinal"}:
+                kernel_name = "delta"
+        if kernel_name is None:
+            kernel_name = "rbf"
+        kernel_name = kernel_name.lower()
+        if kernel_name not in {"rbf", "delta"}:
+            raise ValueError(f"Unsupported kernel '{kernel_name}' for column '{name}'")
+        assignments[name] = kernel_name
+
+    grouped: Dict[str, list[str]] = {"rbf": [], "delta": []}
+    for name, kernel_name in assignments.items():
+        grouped.setdefault(kernel_name, []).append(name)
+    return {kernel: tuple(columns) for kernel, columns in grouped.items() if columns}
+
+
+def _clean_continuous(array: np.ndarray) -> np.ndarray:
+    """Remove non-finite rows from a continuous-valued array."""
+
+    if array.ndim == 1:
+        array = array.reshape(-1, 1)
+    mask = np.all(np.isfinite(array), axis=1)
+    return array[mask]
+
+
+def _clean_categorical(frame: pd.DataFrame) -> np.ndarray:
+    """Return categorical values without missing entries."""
+
+    cleaned = frame.replace([np.inf, -np.inf], np.nan).dropna()
+    array = cleaned.to_numpy()
+    if array.ndim == 1:
+        array = array.reshape(-1, 1)
+    return array
+
+
+def _subsample_array(
+    array: np.ndarray, max_samples: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Subsample ``array`` without replacement when it exceeds ``max_samples``."""
+
+    if array.shape[0] > max_samples:
+        indices = rng.choice(array.shape[0], size=max_samples, replace=False)
+        return array[indices]
+    return array
+
+
+def _median_bandwidth(data: np.ndarray) -> Optional[float]:
+    """Return the median-based bandwidth for an RBF kernel."""
+
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+    if data.shape[0] < 2:
+        return None
+    diff = data[:, None, :] - data[None, :, :]
+    squared = np.sum(diff**2, axis=-1)
+    upper = squared[np.triu_indices_from(squared, k=1)]
+    positive = upper[upper > 0.0]
+    if positive.size == 0:
+        return None
+    return float(np.sqrt(np.median(positive)))
+
+
+def _compute_mmd(
+    real: np.ndarray,
+    synthetic: np.ndarray,
+    kernel: str,
+    bandwidth: Optional[float],
+) -> float:
+    """Compute the (biased) MMD estimate for ``real`` and ``synthetic``."""
+
+    if kernel == "rbf":
+        if bandwidth is None or not np.isfinite(bandwidth) or bandwidth <= 0.0:
+            return 0.0
+        k_xx = _rbf_kernel(real, real, bandwidth)
+        k_yy = _rbf_kernel(synthetic, synthetic, bandwidth)
+        k_xy = _rbf_kernel(real, synthetic, bandwidth)
+    elif kernel == "delta":
+        k_xx = _delta_kernel(real, real)
+        k_yy = _delta_kernel(synthetic, synthetic)
+        k_xy = _delta_kernel(real, synthetic)
+    else:  # pragma: no cover - guarded upstream
+        raise ValueError(f"Unsupported kernel '{kernel}'")
+
     mmd = k_xx.mean() + k_yy.mean() - 2.0 * k_xy.mean()
     return float(max(mmd, 0.0))
+
+
+def _rbf_kernel(a: np.ndarray, b: np.ndarray, bandwidth: float) -> np.ndarray:
+    """Return the RBF kernel matrix for ``a`` and ``b``."""
+
+    diff = a[:, None, :] - b[None, :, :]
+    squared = np.sum(diff**2, axis=-1)
+    return np.exp(-squared / (2.0 * bandwidth**2))
+
+
+def _delta_kernel(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Return the Kronecker delta kernel matrix for categorical features."""
+
+    comparisons = a[:, None, :] == b[None, :, :]
+    if comparisons.ndim == 2:
+        return comparisons.astype(float)
+    return comparisons.all(axis=-1).astype(float)
 
 
 def mutual_information_feature(
