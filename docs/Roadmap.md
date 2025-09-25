@@ -10,7 +10,8 @@
 
 2. **低成本增强** ✅
    - [x] 追加似然头
-   - [x] 自动化：自动化识别数据类型和生成schema
+   - [x] 自动化：自动化识别数据类型和生成schema（`suave.schema_inference` + `suave.interactive.schema_builder`）
+   - [x] 启发式超参推荐与序列化（`suave.defaults`），覆盖 latent_dim/hidden_dim/batch_size/epoch 调度
 
    - [x] 条件生成（CVAE 开关 `conditional=True`）：`fit(..., y=...)` 时启用可控采样
 
@@ -27,6 +28,7 @@
    - [x] **TSTR/TRTR** 脚手架（独立评测器）
    - [x] 简单 **MIA**（membership inference）基线（影子模型/置信阈值法）
    - [x] 结果打包与示例 notebook（研究作 example）
+   - [x] 研究级 MIMIC/eICU 分析脚本整合：Optuna 最优试验、基线模型、SUAVE 校准、TSTR/TRTR、分布漂移与报告导出（`examples/research-mimic_mortality_supervised.py`）
 
 ------
 
@@ -35,8 +37,10 @@
 ```
 suave/
   __init__.py
+  defaults.py             # 超参启发式推荐与序列化
   types.py                 # Schema&枚举（用户手动提供，先不做自动推断）
   data.py                  # 缺失mask、标准化/反标准化、train内部分割
+  schema_inference.py      # 列类型启发式推断、info/interactive 模式
   modules/
     encoder.py             # MLP Encoder
     decoder.py             # 多头解码（real/cat 起步；pos/count/ordinal 后续加）
@@ -44,10 +48,14 @@ suave/
     heads.py               # 分类头（MLP/Logistic）
     losses.py              # ELBO(重构NLL+KL)、CE、Focal、对齐正则（预留）
     calibrate.py           # 温度缩放
+    prior.py               # 混合先验（含可学习均值）
   model.py                 # SUAVE 主类（下面给接口）
   sampling.py              # 条件采样/批量生成
   evaluate.py              # ROC/PR/Brier/ECE/可靠性图；TSTR/TRTR；MIA基线
   plots.py                 # 可视化
+  interactive/
+    __init__.py
+    schema_builder.py      # 交互式 schema 构建/校对工具
 examples/
   sepsis_minimal.py        # 端到端最小示例（你的研究）
 ```
