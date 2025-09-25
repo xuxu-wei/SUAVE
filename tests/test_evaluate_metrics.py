@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandas as pd
 import pytest
 
 pytest.importorskip(
@@ -22,11 +23,13 @@ from suave.evaluate import (
     compute_auroc,
     compute_brier,
     compute_ece,
+    energy_distance,
     evaluate_classification,
     evaluate_trtr,
     evaluate_tstr,
     rbf_mmd,
     simple_membership_inference,
+    _energy_distance_statistic,
 )
 from suave.types import Schema
 
@@ -337,3 +340,126 @@ def test_rbf_mmd_multi_feature_schema_support() -> None:
 
     assert score >= 0.0
     assert math.isnan(p_value)
+
+
+def test_energy_distance_single_feature_with_permutation() -> None:
+    rng = np.random.default_rng(0)
+    real = rng.normal(loc=0.0, scale=1.0, size=512)
+    synthetic = rng.normal(loc=0.6, scale=1.0, size=512)
+
+    score, p_value = energy_distance(
+        real, synthetic, random_state=0, n_permutations=20
+    )
+
+    assert score >= 0.0
+    assert 0.0 <= p_value <= 1.0
+    assert score > 0.0
+    assert p_value < 0.2
+
+
+def test_energy_distance_mixed_type_support() -> None:
+    rng = np.random.default_rng(4)
+    real = np.column_stack(
+        [
+            rng.normal(size=400),
+            rng.integers(0, 3, size=400),
+        ]
+    )
+    similar = np.column_stack(
+        [
+            rng.normal(size=400),
+            rng.integers(0, 3, size=400),
+        ]
+    )
+    divergent = np.column_stack(
+        [
+            rng.normal(loc=0.5, size=400),
+            rng.choice([0, 1, 2], size=400, p=[0.7, 0.2, 0.1]),
+        ]
+    )
+
+    schema = Schema(
+        {
+            "feature_0": {"type": "real"},
+            "feature_1": {"type": "cat", "n_classes": 3},
+        }
+    )
+
+    similar_score, similar_p = energy_distance(
+        real,
+        similar,
+        random_state=2,
+        schema=schema,
+        n_permutations=0,
+    )
+    divergent_score, _ = energy_distance(
+        real,
+        divergent,
+        random_state=2,
+        schema=schema,
+        n_permutations=0,
+    )
+
+    assert similar_score >= 0.0
+    assert math.isnan(similar_p)
+    assert divergent_score >= similar_score
+    assert similar_score < 0.4
+    assert divergent_score > 0.3
+
+
+def test_energy_distance_normalises_categorical_mismatch() -> None:
+    real = pd.DataFrame(
+        {
+            "cat_a": ["a", "a"],
+            "cat_b": ["x", "x"],
+        }
+    )
+    synthetic = pd.DataFrame(
+        {
+            "cat_a": ["a", "a"],
+            "cat_b": ["y", "y"],
+        }
+    )
+    schema = Schema(
+        {
+            "cat_a": {"type": "cat", "n_classes": 3},
+            "cat_b": {"type": "cat", "n_classes": 3},
+        }
+    )
+
+    score, p_value = energy_distance(
+        real,
+        synthetic,
+        random_state=0,
+        schema=schema,
+        n_permutations=0,
+    )
+
+    assert math.isnan(p_value)
+    assert score == pytest.approx(1.0)
+
+
+def test_energy_distance_aligns_shared_categorical_levels() -> None:
+    frame = pd.DataFrame({"label": ["red", "blue", "green"]})
+    schema = Schema({"label": {"type": "cat", "n_classes": 3}})
+
+    score, _ = energy_distance(
+        frame,
+        frame.sample(frac=1.0, random_state=0).reset_index(drop=True),
+        random_state=1,
+        schema=schema,
+        n_permutations=0,
+    )
+
+    assert score == pytest.approx(0.0)
+
+
+def test_energy_distance_scales_continuous_dimensions() -> None:
+    real_cont = np.array([[0.0, 0.0], [0.0, 0.0]])
+    synth_cont = np.array([[1.0, 1.0], [1.0, 1.0]])
+    empty_cat = np.empty((2, 0), dtype=int)
+
+    score = _energy_distance_statistic(real_cont, synth_cont, empty_cat, empty_cat)
+
+    assert score == pytest.approx(4.0)
+

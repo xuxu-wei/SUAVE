@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -1029,6 +1030,194 @@ def rbf_mmd(
     return observed, float(min(max(p_value, 0.0), 1.0))
 
 
+def energy_distance(
+    real: Any,
+    synthetic: Any,
+    *,
+    random_state: int,
+    max_samples: int = 4000,
+    schema: Optional[Schema | Mapping[str, Mapping[str, object]]] = None,
+    feature_names: Optional[Sequence[str]] = None,
+    n_permutations: int = 0,
+) -> Tuple[float, float]:
+    """Compute the energy distance between real and synthetic samples.
+
+    The energy distance measures how dissimilar two probability distributions
+    are under a given metric. For continuous columns we compute Euclidean
+    distances after z-scoring the concatenated real and synthetic arrays. For
+    categorical features we fall back to the Hamming distance, counting the
+    number of entries that disagree between two samples. The helper supports
+    both univariate inputs (single feature comparisons) and multivariate
+    tables. When ``n_permutations`` is positive a permutation test estimates the
+    ``p``-value associated with the observed statistic under the null
+    hypothesis that both datasets are identically distributed.
+
+    Parameters
+    ----------
+    real : Any
+        Reference observations supplied as a NumPy array, pandas Series, or
+        DataFrame. One-dimensional inputs are treated as a single feature.
+    synthetic : Any
+        Synthetic observations following the same layout as ``real``.
+    random_state : int
+        Seed controlling the optional subsampling step and permutation test.
+    max_samples : int, default 4000
+        Maximum number of rows drawn from each dataset before computing
+        pairwise distances. Larger datasets are subsampled without replacement
+        to keep the quadratic distance matrices tractable.
+    schema : Schema or mapping, optional
+        Optional :class:`~suave.types.Schema` (or schema-like mapping) that
+        declares per-column types. When omitted a silent
+        :class:`~suave.schema_inference.SchemaInferencer` pass infers the
+        column taxonomy.
+    feature_names : Sequence[str], optional
+        Explicit ordering of feature names when raw arrays without column
+        labels are provided.
+    n_permutations : int, default 0
+        Number of permutations used to approximate the ``p``-value. Set to ``0``
+        to skip the permutation test and return ``numpy.nan`` for the ``p``
+        statistic.
+
+    Returns
+    -------
+    tuple of float
+        Tuple ``(distance, p_value)``. ``distance`` is the averaged energy
+        distance across the selected feature groups and ``p_value`` is the
+        permutation-based significance estimate. ``numpy.nan`` values are
+        returned when either dataset is empty after filtering invalid rows.
+
+    Notes
+    -----
+    Practitioners typically interpret scores below ``0.2`` as strong
+    alignment, values between ``0.2`` and ``0.5`` as moderate drift, and
+    statistics above ``0.5`` as evidence that the generator struggles to match
+    the reference distribution. The distance normalises the Euclidean and
+    Hamming components by ``sqrt(n_continuous)`` and ``n_categorical`` to avoid
+    either modality dominating when feature counts differ. Distances are
+    accumulated in memory-friendly blocks so the helper scales to a few
+    thousand samples per dataset. These heuristics should be adapted to the
+    domain at hand.
+
+    Examples
+    --------
+    >>> rng = np.random.default_rng(0)
+    >>> real = rng.normal(size=256)
+    >>> synthetic = rng.normal(loc=0.5, size=256)
+    >>> distance, p_value = energy_distance(
+    ...     real,
+    ...     synthetic,
+    ...     random_state=0,
+    ...     n_permutations=25,
+    ... )
+    >>> distance >= 0.0 and (np.isnan(p_value) or 0.0 <= p_value <= 1.0)
+    True
+    """
+
+    if n_permutations < 0:
+        raise ValueError("n_permutations must be non-negative")
+
+    real_frame, feature_names = _coerce_to_dataframe(real, feature_names)
+    synthetic_frame, feature_names = _coerce_to_dataframe(synthetic, feature_names)
+
+    schema_obj = _resolve_schema(schema, feature_names, real_frame, synthetic_frame)
+    assignments = _resolve_kernel_assignments(feature_names, schema_obj, None)
+
+    continuous_columns = assignments.get("rbf", tuple())
+    categorical_columns = assignments.get("delta", tuple())
+
+    if not continuous_columns and not categorical_columns:
+        raise ValueError("energy_distance requires at least one feature column")
+
+    # Drop rows with missing or non-finite entries so distance computations
+    # operate on fully observed samples.
+    real_valid = _energy_valid_mask(real_frame, continuous_columns, categorical_columns)
+    synth_valid = _energy_valid_mask(
+        synthetic_frame, continuous_columns, categorical_columns
+    )
+    real_clean = real_frame.loc[real_valid, feature_names]
+    synth_clean = synthetic_frame.loc[synth_valid, feature_names]
+
+    if real_clean.empty or synth_clean.empty:
+        return float("nan"), float("nan")
+
+    rng = np.random.default_rng(random_state)
+
+    category_levels: Dict[str, pd.Index] = {}
+    if categorical_columns:
+        category_levels = {
+            name: pd.Categorical(
+                pd.concat(
+                    [real_clean[name], synth_clean[name]],
+                    axis=0,
+                    ignore_index=True,
+                )
+            ).categories
+            for name in categorical_columns
+        }
+
+    real_arrays = _extract_energy_arrays(
+        real_clean,
+        continuous_columns,
+        categorical_columns,
+        max_samples,
+        rng,
+        category_levels,
+    )
+    synth_arrays = _extract_energy_arrays(
+        synth_clean,
+        continuous_columns,
+        categorical_columns,
+        max_samples,
+        rng,
+        category_levels,
+    )
+
+    if real_arrays.n_samples == 0 or synth_arrays.n_samples == 0:
+        return float("nan"), float("nan")
+
+    combined_continuous = np.vstack([
+        real_arrays.continuous,
+        synth_arrays.continuous,
+    ])
+    combined_categorical = np.vstack([
+        real_arrays.categorical,
+        synth_arrays.categorical,
+    ])
+
+    n_real = real_arrays.n_samples
+    n_synth = synth_arrays.n_samples
+    observed = _energy_distance_from_indices(
+        combined_continuous,
+        combined_categorical,
+        np.arange(n_real),
+        np.arange(n_real, n_real + n_synth),
+    )
+
+    if not np.isfinite(observed):
+        return float("nan"), float("nan")
+
+    observed = float(max(observed, 0.0))
+    if n_permutations == 0:
+        return observed, float("nan")
+
+    total = n_real + n_synth
+    extreme = 0
+    for _ in range(int(n_permutations)):
+        permuted = rng.permutation(total)
+        perm_real = permuted[:n_real]
+        perm_synth = permuted[n_real:]
+        permuted_value = _energy_distance_from_indices(
+            combined_continuous, combined_categorical, perm_real, perm_synth
+        )
+        if not np.isfinite(permuted_value):
+            continue
+        if permuted_value >= observed:
+            extreme += 1
+
+    p_value = (extreme + 1.0) / (n_permutations + 1.0)
+    return observed, float(min(max(p_value, 0.0), 1.0))
+
+
 class _PermutationPayload:
     """Container for cached data used during the permutation test."""
 
@@ -1044,6 +1233,23 @@ class _PermutationPayload:
         self.real = real
         self.synthetic = synthetic
         self.bandwidth = bandwidth
+
+
+class _EnergyArrays:
+    """Container bundling aligned continuous and categorical matrices."""
+
+    def __init__(
+        self,
+        *,
+        continuous: np.ndarray,
+        categorical: np.ndarray,
+    ) -> None:
+        self.continuous = continuous
+        self.categorical = categorical
+
+    @property
+    def n_samples(self) -> int:
+        return int(self.continuous.shape[0])
 
 
 def _coerce_to_dataframe(
@@ -1139,6 +1345,26 @@ def _resolve_kernel_assignments(
     return {kernel: tuple(columns) for kernel, columns in grouped.items() if columns}
 
 
+def _energy_valid_mask(
+    frame: pd.DataFrame,
+    continuous: Sequence[str],
+    categorical: Sequence[str],
+) -> np.ndarray:
+    """Return a mask selecting rows with finite continuous and categorical data."""
+
+    if frame.empty:
+        return np.zeros(frame.shape[0], dtype=bool)
+
+    mask = np.ones(frame.shape[0], dtype=bool)
+    if continuous:
+        cont_values = frame.loc[:, continuous].to_numpy(dtype=float, copy=True)
+        mask &= np.all(np.isfinite(cont_values), axis=1)
+    if categorical:
+        cat_frame = frame.loc[:, categorical].replace([np.inf, -np.inf], np.nan)
+        mask &= cat_frame.notna().all(axis=1).to_numpy()
+    return mask.astype(bool)
+
+
 def _clean_continuous(array: np.ndarray) -> np.ndarray:
     """Remove non-finite rows from a continuous-valued array."""
 
@@ -1167,6 +1393,272 @@ def _subsample_array(
         indices = rng.choice(array.shape[0], size=max_samples, replace=False)
         return array[indices]
     return array
+
+
+def _subsample_indices(
+    n_rows: int, max_samples: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Return row indices after optional subsampling."""
+
+    if n_rows <= max_samples:
+        return np.arange(n_rows, dtype=int)
+    return rng.choice(n_rows, size=max_samples, replace=False).astype(int)
+
+
+def _extract_energy_arrays(
+    frame: pd.DataFrame,
+    continuous: Sequence[str],
+    categorical: Sequence[str],
+    max_samples: int,
+    rng: np.random.Generator,
+    category_levels: Mapping[str, pd.Index],
+) -> _EnergyArrays:
+    """Return aligned continuous and categorical matrices for energy distance."""
+
+    n_rows = frame.shape[0]
+    if n_rows == 0:
+        return _EnergyArrays(
+            continuous=np.empty((0, len(continuous)), dtype=float),
+            categorical=np.empty((0, len(categorical)), dtype=int),
+        )
+
+    indices = _subsample_indices(n_rows, max_samples, rng)
+
+    if continuous:
+        cont = frame.loc[:, continuous].to_numpy(dtype=float, copy=True)[indices]
+        if cont.ndim == 1:
+            cont = cont.reshape(-1, 1)
+    else:
+        cont = np.empty((indices.size, 0), dtype=float)
+
+    if categorical:
+        cat = np.empty((indices.size, len(categorical)), dtype=int)
+        for col_idx, name in enumerate(categorical):
+            categories = category_levels.get(name)
+            encoded = pd.Categorical(
+                frame[name], categories=categories, ordered=False
+            ).codes
+            cat[:, col_idx] = encoded[indices]
+    else:
+        cat = np.empty((indices.size, 0), dtype=int)
+
+    return _EnergyArrays(continuous=cont, categorical=cat)
+
+
+def _energy_distance_from_indices(
+    combined_continuous: np.ndarray,
+    combined_categorical: np.ndarray,
+    real_indices: np.ndarray,
+    synthetic_indices: np.ndarray,
+) -> float:
+    """Compute the energy distance given index partitions."""
+
+    real_cont = combined_continuous[real_indices]
+    synth_cont = combined_continuous[synthetic_indices]
+    real_cat = combined_categorical[real_indices]
+    synth_cat = combined_categorical[synthetic_indices]
+    return _energy_distance_statistic(real_cont, synth_cont, real_cat, synth_cat)
+
+
+def _energy_distance_statistic(
+    real_continuous: np.ndarray,
+    synthetic_continuous: np.ndarray,
+    real_categorical: np.ndarray,
+    synthetic_categorical: np.ndarray,
+) -> float:
+    """Return the energy distance for the provided continuous/categorical arrays."""
+
+    n_real = real_continuous.shape[0]
+    n_synth = synthetic_continuous.shape[0]
+    if n_real == 0 or n_synth == 0:
+        return float("nan")
+
+    if real_continuous.ndim == 1:
+        real_continuous = real_continuous.reshape(-1, 1)
+    if synthetic_continuous.ndim == 1:
+        synthetic_continuous = synthetic_continuous.reshape(-1, 1)
+    if real_categorical.ndim == 1:
+        real_categorical = real_categorical.reshape(-1, 1)
+    if synthetic_categorical.ndim == 1:
+        synthetic_categorical = synthetic_categorical.reshape(-1, 1)
+
+    real_standardised, synth_standardised = _standardise_continuous(
+        real_continuous, synthetic_continuous
+    )
+
+    cross = _mean_cross_distance(
+        real_standardised, real_categorical, synth_standardised, synthetic_categorical
+    )
+    if not np.isfinite(cross):
+        return float("nan")
+
+    real_within = _mean_within_distance(real_standardised, real_categorical)
+    synth_within = _mean_within_distance(synth_standardised, synthetic_categorical)
+
+    distance = 2.0 * cross - real_within - synth_within
+    return float(max(distance, 0.0))
+
+
+def _standardise_continuous(
+    real: np.ndarray, synthetic: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Z-score continuous arrays using the pooled mean and variance."""
+
+    if real.size == 0 and synthetic.size == 0:
+        return real.reshape(real.shape[0], 0), synthetic.reshape(synthetic.shape[0], 0)
+
+    if real.ndim == 1:
+        real = real.reshape(-1, 1)
+    if synthetic.ndim == 1:
+        synthetic = synthetic.reshape(-1, 1)
+
+    if real.shape[1] == 0 and synthetic.shape[1] == 0:
+        return np.empty((real.shape[0], 0), dtype=float), np.empty(
+            (synthetic.shape[0], 0), dtype=float
+        )
+
+    combined = np.vstack([real, synthetic])
+    if combined.size == 0:
+        return np.empty((real.shape[0], 0), dtype=float), np.empty(
+            (synthetic.shape[0], 0), dtype=float
+        )
+
+    mean = np.mean(combined, axis=0)
+    std = np.std(combined, axis=0, ddof=0)
+    mask = std > 0.0
+    if not np.any(mask):
+        return np.empty((real.shape[0], 0), dtype=float), np.empty(
+            (synthetic.shape[0], 0), dtype=float
+        )
+
+    normalised_real = (real[:, mask] - mean[mask]) / std[mask]
+    normalised_synth = (synthetic[:, mask] - mean[mask]) / std[mask]
+    return normalised_real.astype(float), normalised_synth.astype(float)
+
+
+def _mean_cross_distance(
+    real_continuous: np.ndarray,
+    real_categorical: np.ndarray,
+    synthetic_continuous: np.ndarray,
+    synthetic_categorical: np.ndarray,
+) -> float:
+    """Return the mean pairwise distance across the two datasets."""
+
+    n_real = real_continuous.shape[0]
+    n_synth = synthetic_continuous.shape[0]
+    if n_real == 0 or n_synth == 0:
+        return float("nan")
+
+    return float(
+        _mean_pairwise_distance(
+            real_continuous,
+            synthetic_continuous,
+            real_categorical,
+            synthetic_categorical,
+            triangular=False,
+        )
+    )
+
+
+def _mean_within_distance(
+    continuous: np.ndarray, categorical: np.ndarray
+) -> float:
+    """Return the expected pairwise distance within a dataset."""
+
+    n_samples = continuous.shape[0]
+    if n_samples < 2:
+        return 0.0
+
+    return float(
+        _mean_pairwise_distance(
+            continuous,
+            continuous,
+            categorical,
+            categorical,
+            triangular=True,
+        )
+    )
+
+
+def _mean_pairwise_distance(
+    a_continuous: np.ndarray,
+    b_continuous: np.ndarray,
+    a_categorical: np.ndarray,
+    b_categorical: np.ndarray,
+    *,
+    triangular: bool,
+) -> float:
+    """Return the mean combined distance without materialising full matrices."""
+
+    n_a = a_continuous.shape[0]
+    n_b = b_continuous.shape[0]
+    if triangular:
+        if n_a != n_b:
+            raise ValueError("triangular distances require square inputs")
+        if n_a < 2:
+            return 0.0
+    elif n_a == 0 or n_b == 0:
+        return float("nan")
+
+    block_size = 512
+    d_cont = a_continuous.shape[1]
+    d_cat = a_categorical.shape[1]
+    cont_scale = math.sqrt(d_cont) if d_cont > 0 else 1.0
+    cat_scale = float(d_cat) if d_cat > 0 else 1.0
+
+    total = 0.0
+    count = 0
+
+    for i_start in range(0, n_a, block_size):
+        i_end = min(i_start + block_size, n_a)
+        a_cont_block = a_continuous[i_start:i_end]
+        a_cat_block = a_categorical[i_start:i_end]
+
+        if triangular:
+            j_range = range(i_start, n_b, block_size)
+        else:
+            j_range = range(0, n_b, block_size)
+
+        for j_start in j_range:
+            j_end = min(j_start + block_size, n_b)
+            b_cont_block = b_continuous[j_start:j_end]
+            b_cat_block = b_categorical[j_start:j_end]
+
+            block_rows = i_end - i_start
+            block_cols = j_end - j_start
+            block_dist = np.zeros((block_rows, block_cols), dtype=float)
+
+            if d_cont > 0:
+                diff = a_cont_block[:, None, :] - b_cont_block[None, :, :]
+                cont = np.linalg.norm(diff, axis=-1)
+                if cont_scale != 1.0:
+                    cont = cont / cont_scale
+                block_dist += cont
+
+            if d_cat > 0:
+                comparisons = a_cat_block[:, None, :] != b_cat_block[None, :, :]
+                cat = comparisons.sum(axis=-1).astype(float)
+                if cat_scale != 1.0:
+                    cat = cat / cat_scale
+                block_dist += cat
+
+            if triangular and i_start == j_start:
+                if block_rows <= 1:
+                    continue
+                tri = np.triu_indices(block_rows, k=1)
+                block_values = block_dist[tri]
+            else:
+                block_values = block_dist.ravel()
+
+            if block_values.size == 0:
+                continue
+
+            total += block_values.sum()
+            count += block_values.size
+
+    if count == 0:
+        return 0.0 if triangular else float("nan")
+    return total / count
 
 
 def _median_bandwidth(data: np.ndarray) -> Optional[float]:

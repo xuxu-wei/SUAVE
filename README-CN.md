@@ -170,7 +170,7 @@ mi_unit = mutual_information_feature(real_unit.values, synthetic_unit.values)
 attack = simple_membership_inference(train_probs, train_labels, test_probs, test_labels)
 ```
 
-`evaluate_tstr` / `evaluate_trtr` 可以搭配任意监督模型验证迁移性能；`classifier_two_sample_test` 接收一个模型工厂映射（默认组合 XGBoost 主模型与逻辑回归敏感性分析），而 RBF-MMD 与互信息则聚焦单个特征的差异程度。C2ST AUC 接近 `0.5`、MMD 接近 `0.0`、互信息接近 `0` 通常表示较好的拟合。成员推断攻击给出区分训练样本与保留样本的 AUROC 与准确率，用于监控潜在的隐私泄露。
+`evaluate_tstr` / `evaluate_trtr` 可以搭配任意监督模型验证迁移性能；`classifier_two_sample_test` 接收一个模型工厂映射（默认组合 XGBoost 主模型与逻辑回归敏感性分析），而 RBF-MMD、按维度归一的欧氏 + 汉明能量距离（支持置换检验 `p` 值）以及互信息则聚焦单个特征的差异程度。C2ST AUC 接近 `0.5`、MMD/能量距离接近 `0.0`、互信息接近 `0` 通常表示较好的拟合。成员推断攻击给出区分训练样本与保留样本的 AUROC 与准确率，用于监控潜在的隐私泄露。
 
 ### 潜变量编码
 
