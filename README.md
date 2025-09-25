@@ -148,6 +148,35 @@ ece = compute_ece(proba, val_y.to_numpy(), n_bins=15)
 
 Each helper validates probability shapes, performs necessary conversions for binary tasks, and returns `numpy.nan` when inputs are degenerate.
 
+### Synthetic data quality
+
+```python
+from sklearn.linear_model import LogisticRegression
+
+from suave.evaluate import (
+    evaluate_trtr,
+    evaluate_tstr,
+    kolmogorov_smirnov_statistic,
+    mutual_information_feature,
+    rbf_mmd,
+    simple_membership_inference,
+)
+
+# Compare real-vs-real and synthetic-vs-real transfer
+tstr_scores = evaluate_tstr((X_syn, y_syn), (X_test, y_test), LogisticRegression)
+trtr_scores = evaluate_trtr((X_train, y_train), (X_test, y_test), LogisticRegression)
+
+# Inspect per-feature distribution alignment
+ks_age = kolmogorov_smirnov_statistic(real_age.values, synthetic_age.values)
+mmd_labs = rbf_mmd(real_labs.values, synthetic_labs.values, random_state=0)
+mi_unit = mutual_information_feature(real_unit.values, synthetic_unit.values)
+
+# Audit membership privacy leakage
+attack = simple_membership_inference(train_probs, train_labels, test_probs, test_labels)
+```
+
+The `evaluate_tstr`/`evaluate_trtr` pair supports model-agnostic baselines for benchmarking synthetic cohorts, while the Kolmogorov–Smirnov statistic, RBF-MMD, and mutual information helpers quantify per-feature fidelity. Low KS (`<0.1`), low MMD (≈`0.0`), and near-zero mutual information indicate strong alignment; larger values call for manual inspection. The membership attack reports AUROC and accuracy for separating training members from held-out data, highlighting potential privacy leakage.
+
 ### Latent representations
 
 ```python

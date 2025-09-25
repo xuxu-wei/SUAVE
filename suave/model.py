@@ -434,6 +434,7 @@ class SUAVE:
         self._is_fitted = False
         self._is_calibrated = False
         self._classes: np.ndarray | None = None
+        self.classes_: np.ndarray | None = None
         self._norm_stats_per_col: dict[str, dict[str, float | list[str]]] = {}
         self._temperature_scaler = TemperatureScaler()
         self._temperature_scaler_state: dict[str, float | bool] | None = None
@@ -1016,6 +1017,7 @@ class SUAVE:
         if self.behaviour == "supervised":
             y_train_array = np.asarray(y_train)
             self._classes = np.unique(y_train_array)
+            self.classes_ = self._classes
             if self._classes.size == 0:
                 raise ValueError("Training targets must contain at least one class")
             self._class_to_index = {
@@ -1036,6 +1038,7 @@ class SUAVE:
         else:
             self._classes = None
             self._class_to_index = None
+            self.classes_ = None
 
         (
             batch_size,
@@ -3694,6 +3697,15 @@ class SUAVE:
             DataFrame with shape ``(n_samples, n_features)`` whose columns match
             the training schema.
 
+        Notes
+        -----
+        When :attr:`behaviour` is ``"supervised"`` the unconditional mode
+        (``conditional=False``) emits a warning because the generated samples do
+        not include labels. To synthesise feature/label pairs for downstream
+        training provide labels via ``conditional=True``. For example::
+
+            model.sample(10, conditional=True, y=np.random.choice(model.classes_, size=10))
+
         Raises
         ------
         RuntimeError
@@ -3714,6 +3726,16 @@ class SUAVE:
             raise RuntimeError("Schema is required to generate samples")
         if n_samples <= 0:
             return pd.DataFrame(columns=list(self.schema.feature_names))
+
+        if self.behaviour == "supervised" and not conditional:
+            warnings.warn(
+                "model.sample(conditional=False) returns feature-only rows when "
+                "behaviour='supervised'. For downstream supervised training, use "
+                "conditional=True with labels, e.g. "
+                "model.sample(n, conditional=True, y=np.random.choice(model.classes_, size=n)).",
+                UserWarning,
+                stacklevel=2,
+            )
 
         device = self._select_device()
         latents, assignments = self._draw_latent_samples(
@@ -4023,6 +4045,9 @@ class SUAVE:
         classes = artefacts.get("classes")
         if classes is not None:
             model._classes = np.asarray(classes)
+            model.classes_ = model._classes
+        else:
+            model.classes_ = None
         cached_logits = artefacts.get("cached_logits")
         model._cached_logits = (
             None if cached_logits is None else np.asarray(cached_logits)
