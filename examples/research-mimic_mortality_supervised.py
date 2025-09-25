@@ -248,6 +248,8 @@ def extract_calibrator_estimator(calibrator: Any) -> Optional[SUAVE]:
 class _TSTRSuaveEstimator:
     """Wrapper exposing ``SUAVE`` with a scikit-learn-style interface."""
 
+    requires_schema_aligned_features = True
+
     def __init__(self, base_model: SUAVE, fit_kwargs: Mapping[str, Any]):
         self._model = base_model
         self._fit_kwargs = dict(fit_kwargs)
@@ -790,19 +792,27 @@ if TARGET_LABEL != "in_hospital_mortality":
     )
 else:
     print("Generating synthetic data for TSTR/TRTR comparisons…")
-    training_sets = build_tstr_training_sets(
+    training_sets_numeric, training_sets_raw = build_tstr_training_sets(
         model,
         FEATURE_COLUMNS,
         X_full,
         y_full,
         random_state=RANDOM_STATE,
+        return_raw=True,
     )
     evaluation_sets_numeric: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
         "MIMIC test": (to_numeric_frame(X_test), y_test.reset_index(drop=True)),
     }
+    evaluation_sets_raw: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+        "MIMIC test": (X_test.reset_index(drop=True), y_test.reset_index(drop=True)),
+    }
     if external_features is not None and external_labels is not None:
         evaluation_sets_numeric["eICU external"] = (
             to_numeric_frame(external_features),
+            external_labels.reset_index(drop=True),
+        )
+        evaluation_sets_raw["eICU external"] = (
+            external_features.reset_index(drop=True),
             external_labels.reset_index(drop=True),
         )
 
@@ -828,11 +838,13 @@ else:
         tstr_plot_df,
         _,
     ) = evaluate_transfer_baselines(
-        training_sets,
+        training_sets_numeric,
         evaluation_sets_numeric,
         model_factories=model_factories,
         bootstrap_n=1000,
         random_state=RANDOM_STATE,
+        raw_training_sets=training_sets_raw,
+        raw_evaluation_sets=evaluation_sets_raw,
     )
     tstr_summary_path = OUTPUT_DIR / f"tstr_trtr_summary_{TARGET_LABEL}.csv"
     tstr_plot_path = OUTPUT_DIR / f"tstr_trtr_plot_data_{TARGET_LABEL}.csv"
@@ -844,7 +856,7 @@ else:
         floatfmt=".3f",
     )
 
-    training_order = list(training_sets.keys())
+    training_order = list(training_sets_numeric.keys())
     model_order = list(model_factories.keys())
     for evaluation_name in evaluation_sets_numeric.keys():
         for metric_name in ("accuracy", "roc_auc"):
@@ -860,8 +872,8 @@ else:
             if figure_path is not None:
                 tstr_figure_paths.append(figure_path)
 
-    real_features_numeric = training_sets["TRTR (real)"][0]
-    synthesis_features_numeric = training_sets["TSTR synthesis"][0]
+    real_features_numeric = training_sets_numeric["TRTR (real)"][0]
+    synthesis_features_numeric = training_sets_numeric["TSTR synthesis"][0]
     distribution_rows: List[Dict[str, object]] = []
     for column in FEATURE_COLUMNS:
         real_values = real_features_numeric[column].to_numpy()
