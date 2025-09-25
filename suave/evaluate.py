@@ -86,20 +86,32 @@ def _prepare_inputs(
 def compute_auroc(probabilities: np.ndarray, targets: np.ndarray) -> float:
     """Compute the area under the ROC curve (AUROC).
 
-    Args:
-        probabilities: Probability estimates. One-dimensional arrays are
-            interpreted as the positive class probability for binary problems.
-        targets: Integer encoded target labels aligned with ``probabilities``.
+    Parameters
+    ----------
+    probabilities : numpy.ndarray
+        Probability estimates. One-dimensional arrays are interpreted as the
+        positive class probability for binary problems.
+    targets : numpy.ndarray
+        Integer encoded target labels aligned with ``probabilities``.
 
-    Returns:
-        The AUROC value. ``numpy.nan`` is returned when the metric is undefined,
-        such as when only a single class is present or scikit-learn raises a
-        ``ValueError`` for degenerate inputs.
+    Returns
+    -------
+    float
+        The AUROC value. ``numpy.nan`` is returned when the metric is
+        undefined, such as when only a single class is present or scikit-learn
+        raises a ``ValueError`` for degenerate inputs.
 
-    Example:
-        >>> probs = np.array([[0.1, 0.9], [0.8, 0.2]])
-        >>> compute_auroc(probs, np.array([1, 0]))
-        1.0
+    Notes
+    -----
+    AUROC scores close to ``0.5`` indicate random guessing, values above
+    ``0.8`` generally reflect strong separability, and scores below ``0.6`` are
+    often considered inadequate for production use.
+
+    Examples
+    --------
+    >>> probs = np.array([[0.1, 0.9], [0.8, 0.2]])
+    >>> compute_auroc(probs, np.array([1, 0]))
+    1.0
     """
 
     prob_array, target_array = _prepare_inputs(probabilities, targets)
@@ -125,18 +137,30 @@ def compute_auroc(probabilities: np.ndarray, targets: np.ndarray) -> float:
 def compute_auprc(probabilities: np.ndarray, targets: np.ndarray) -> float:
     """Compute the area under the precision-recall curve (AUPRC).
 
-    Args:
-        probabilities: Probability estimates for each class.
-        targets: Integer encoded target labels aligned with ``probabilities``.
+    Parameters
+    ----------
+    probabilities : numpy.ndarray
+        Probability estimates for each class.
+    targets : numpy.ndarray
+        Integer encoded target labels aligned with ``probabilities``.
 
-    Returns:
+    Returns
+    -------
+    float
         The macro-averaged AUPRC across classes. ``numpy.nan`` is returned when
         the score is undefined for the provided data.
 
-    Example:
-        >>> probs = np.array([[0.05, 0.95], [0.9, 0.1]])
-        >>> compute_auprc(probs, np.array([1, 0]))
-        1.0
+    Notes
+    -----
+    Baseline AUPRC roughly matches the positive class prevalence; values above
+    ``0.5`` typically signal useful precision-recall trade-offs, while scores
+    near prevalence indicate the classifier is barely better than random.
+
+    Examples
+    --------
+    >>> probs = np.array([[0.05, 0.95], [0.9, 0.1]])
+    >>> compute_auprc(probs, np.array([1, 0]))
+    1.0
     """
 
     prob_array, target_array = _prepare_inputs(probabilities, targets)
@@ -172,18 +196,30 @@ def compute_auprc(probabilities: np.ndarray, targets: np.ndarray) -> float:
 def compute_brier(probabilities: np.ndarray, targets: np.ndarray) -> float:
     """Compute the Brier score for binary and multi-class classifiers.
 
-    Args:
-        probabilities: Probability estimates for each class.
-        targets: Integer encoded target labels aligned with ``probabilities``.
+    Parameters
+    ----------
+    probabilities : numpy.ndarray
+        Probability estimates for each class.
+    targets : numpy.ndarray
+        Integer encoded target labels aligned with ``probabilities``.
 
-    Returns:
+    Returns
+    -------
+    float
         The Brier score. Lower values indicate better calibrated probabilities.
         ``numpy.nan`` is returned for empty inputs.
 
-    Example:
-        >>> probs = np.array([[0.8, 0.2], [0.3, 0.7]])
-        >>> round(compute_brier(probs, np.array([0, 1])), 3)
-        0.065
+    Notes
+    -----
+    Well-calibrated clinical risk models typically achieve Brier scores below
+    ``0.1``. Values greater than ``0.2`` often flag poorly calibrated
+    predictions that may require recalibration.
+
+    Examples
+    --------
+    >>> probs = np.array([[0.8, 0.2], [0.3, 0.7]])
+    >>> round(compute_brier(probs, np.array([0, 1])), 3)
+    0.065
     """
 
     prob_array, target_array = _prepare_inputs(probabilities, targets)
@@ -203,18 +239,30 @@ def compute_ece(
 ) -> float:
     """Compute the expected calibration error (ECE).
 
-    Args:
-        probabilities: Probability estimates for each class.
-        targets: Integer encoded target labels aligned with ``probabilities``.
-        n_bins: Number of equally spaced bins used to evaluate calibration.
+    Parameters
+    ----------
+    probabilities : numpy.ndarray
+        Probability estimates for each class.
+    targets : numpy.ndarray
+        Integer encoded target labels aligned with ``probabilities``.
+    n_bins : int, default 10
+        Number of equally spaced bins used to evaluate calibration.
 
-    Returns:
+    Returns
+    -------
+    float
         The ECE value. ``numpy.nan`` is returned for empty inputs.
 
-    Example:
-        >>> probs = np.array([[0.2, 0.8], [0.7, 0.3]])
-        >>> round(compute_ece(probs, np.array([1, 0]), n_bins=5), 2)
-        0.25
+    Notes
+    -----
+    ECE below ``0.05`` generally reflects well-calibrated predictions, whereas
+    values above ``0.1`` highlight calibration drift worth investigating.
+
+    Examples
+    --------
+    >>> probs = np.array([[0.2, 0.8], [0.7, 0.3]])
+    >>> round(compute_ece(probs, np.array([1, 0]), n_bins=5), 2)
+    0.25
     """
 
     if n_bins <= 0:
@@ -249,23 +297,35 @@ def evaluate_classification(
 ) -> Dict[str, float]:
     """Evaluate common classification metrics for SUAVE models.
 
-    Args:
-        probabilities: Probability estimates shaped ``(n_samples, n_classes)`` or
-            a one-dimensional array containing positive class probabilities for
-            binary classification.
-        targets: Integer encoded ground-truth labels aligned with
-            ``probabilities``. Labels must be zero-indexed to match column
-            positions.
+    Parameters
+    ----------
+    probabilities : numpy.ndarray
+        Probability estimates shaped ``(n_samples, n_classes)`` or a
+        one-dimensional array containing positive class probabilities for
+        binary classification.
+    targets : numpy.ndarray
+        Integer encoded ground-truth labels aligned with ``probabilities``.
+        Labels must be zero-indexed to match column positions.
 
-    Returns:
-        A dictionary containing accuracy, AUROC, AUPRC, Brier score, and ECE
+    Returns
+    -------
+    dict of str to float
+        Dictionary containing accuracy, AUROC, AUPRC, Brier score, and ECE
         values. Metrics that are undefined for the provided data return
         ``numpy.nan``.
 
-    Example:
-        >>> probs = np.array([[0.1, 0.9], [0.8, 0.2]])
-        >>> evaluate_classification(probs, np.array([1, 0]))
-        {'accuracy': 1.0, 'auroc': 1.0, 'auprc': 1.0, 'brier': 0.024999999999999994, 'ece': 0.14999999999999997}
+    Notes
+    -----
+    Accuracy and AUROC values above ``0.8`` usually indicate strong models,
+    while Brier scores below ``0.1`` and ECE below ``0.05`` reflect reliable
+    calibration. Deviations from these heuristics should trigger domain-specific
+    review.
+
+    Examples
+    --------
+    >>> probs = np.array([[0.1, 0.9], [0.8, 0.2]])
+    >>> evaluate_classification(probs, np.array([1, 0]))
+    {'accuracy': 1.0, 'auroc': 1.0, 'auprc': 1.0, 'brier': 0.024999999999999994, 'ece': 0.14999999999999997}
     """
 
     prob_array, target_array = _prepare_inputs(probabilities, targets)
@@ -298,27 +358,40 @@ def evaluate_tstr(
 ) -> Dict[str, float]:
     """Run a Train-on-Synthetic, Test-on-Real (TSTR) evaluation.
 
-    Args:
-        synthetic: Tuple ``(features, targets)`` used for training. The
-            classifier produced by ``model_factory`` must support ``fit`` and
-            ``predict_proba`` on these arrays.
-        real: Tuple ``(features, targets)`` representing the held-out real data
-            used for evaluation.
-        model_factory: Callable returning an unfitted probabilistic classifier
-            (e.g., ``lambda: LogisticRegression(max_iter=200)``).
+    Parameters
+    ----------
+    synthetic : tuple of numpy.ndarray
+        Tuple ``(features, targets)`` used for training. The classifier produced
+        by ``model_factory`` must support :meth:`fit` and :meth:`predict_proba`
+        on these arrays.
+    real : tuple of numpy.ndarray
+        Tuple ``(features, targets)`` representing the held-out real data used
+        for evaluation.
+    model_factory : Callable[[], Any]
+        Callable returning an unfitted probabilistic classifier (e.g.,
+        ``lambda: LogisticRegression(max_iter=200)``).
 
-    Returns:
+    Returns
+    -------
+    dict of str to float
         Classification metrics on the real evaluation split.
 
-    Example:
-        >>> from sklearn.linear_model import LogisticRegression
-        >>> X_syn = np.array([[0.0], [1.0], [2.0], [3.0]])
-        >>> y_syn = np.array([0, 0, 1, 1])
-        >>> X_real = np.array([[0.2], [0.8], [2.2], [2.8]])
-        >>> y_real = np.array([0, 0, 1, 1])
-        >>> evaluate_tstr((X_syn, y_syn), (X_real, y_real),
-        ...                lambda: LogisticRegression(max_iter=200))['accuracy']
-        1.0
+    Notes
+    -----
+    When synthetic data is high fidelity, TSTR accuracy and AUROC typically lag
+    the real-data baseline by less than five percentage points; larger gaps
+    highlight modelling issues or coverage mismatches.
+
+    Examples
+    --------
+    >>> from sklearn.linear_model import LogisticRegression
+    >>> X_syn = np.array([[0.0], [1.0], [2.0], [3.0]])
+    >>> y_syn = np.array([0, 0, 1, 1])
+    >>> X_real = np.array([[0.2], [0.8], [2.2], [2.8]])
+    >>> y_real = np.array([0, 0, 1, 1])
+    >>> evaluate_tstr((X_syn, y_syn), (X_real, y_real),
+    ...                lambda: LogisticRegression(max_iter=200))['accuracy']
+    1.0
     """
 
     X_syn, y_syn = synthetic
@@ -342,24 +415,37 @@ def evaluate_trtr(
 ) -> Dict[str, float]:
     """Run a Train-on-Real, Test-on-Real (TRTR) evaluation.
 
-    Args:
-        real_train: Tuple ``(features, targets)`` used for training.
-        real_test: Tuple ``(features, targets)`` used for evaluation.
-        model_factory: Callable returning an unfitted classifier supporting
-            ``fit`` and ``predict_proba``.
+    Parameters
+    ----------
+    real_train : tuple of numpy.ndarray
+        Tuple ``(features, targets)`` used for training.
+    real_test : tuple of numpy.ndarray
+        Tuple ``(features, targets)`` used for evaluation.
+    model_factory : Callable[[], Any]
+        Callable returning an unfitted classifier supporting :meth:`fit` and
+        :meth:`predict_proba`.
 
-    Returns:
+    Returns
+    -------
+    dict of str to float
         Classification metrics on the held-out real test split.
 
-    Example:
-        >>> from sklearn.linear_model import LogisticRegression
-        >>> X_train = np.array([[0.0], [1.0], [2.0], [3.0]])
-        >>> y_train = np.array([0, 0, 1, 1])
-        >>> X_test = np.array([[0.1], [0.9], [2.1], [2.9]])
-        >>> y_test = np.array([0, 0, 1, 1])
-        >>> evaluate_trtr((X_train, y_train), (X_test, y_test),
-        ...               lambda: LogisticRegression(max_iter=200))['accuracy']
-        1.0
+    Notes
+    -----
+    TRTR acts as an upper bound for synthetic-data experiments. TSTR results
+    trailing TRTR by more than ``5``–``10`` percentage points typically point to
+    fidelity gaps in the generator or mismatched preprocessing.
+
+    Examples
+    --------
+    >>> from sklearn.linear_model import LogisticRegression
+    >>> X_train = np.array([[0.0], [1.0], [2.0], [3.0]])
+    >>> y_train = np.array([0, 0, 1, 1])
+    >>> X_test = np.array([[0.1], [0.9], [2.1], [2.9]])
+    >>> y_test = np.array([0, 0, 1, 1])
+    >>> evaluate_trtr((X_train, y_train), (X_test, y_test),
+    ...               lambda: LogisticRegression(max_iter=200))['accuracy']
+    1.0
     """
 
     X_train, y_train = real_train
@@ -391,27 +477,40 @@ def simple_membership_inference(
     that force "all member" and "all non-member" predictions to ensure the
     majority-class baseline is explicitly evaluated.
 
+    Parameters
+    ----------
+    train_probabilities : numpy.ndarray
+        Probabilities predicted on the training data.
+    train_targets : numpy.ndarray
+        Integer encoded training labels.
+    test_probabilities : numpy.ndarray
+        Probabilities predicted on held-out data.
+    test_targets : numpy.ndarray
+        Integer encoded held-out labels.
 
-    Args:
-        train_probabilities: Probabilities predicted on the training data.
-        train_targets: Integer encoded training labels.
-        test_probabilities: Probabilities predicted on held-out data.
-        test_targets: Integer encoded held-out labels.
-
-    Returns:
-        A dictionary containing ``attack_auc``, ``attack_best_threshold``,
+    Returns
+    -------
+    dict of str to float
+        Dictionary containing ``attack_auc``, ``attack_best_threshold``,
         ``attack_best_accuracy``, and ``attack_majority_class_accuracy``. The
         scores are ``numpy.nan`` when the attack is undefined (e.g., only a
         single membership class is present).
 
-    Example:
-        >>> train_probs = np.array([[0.1, 0.9], [0.2, 0.8]])
-        >>> train_targets = np.array([1, 1])
-        >>> test_probs = np.array([[0.7, 0.3], [0.6, 0.4]])
-        >>> test_targets = np.array([0, 0])
-        >>> simple_membership_inference(train_probs, train_targets,
-        ...                              test_probs, test_targets)['attack_auc']
-        1.0
+    Notes
+    -----
+    Attack AUC values near ``0.5`` signal limited privacy leakage, while scores
+    exceeding ``0.7`` suggest the model's outputs expose membership signals
+    worth mitigating.
+
+    Examples
+    --------
+    >>> train_probs = np.array([[0.1, 0.9], [0.2, 0.8]])
+    >>> train_targets = np.array([1, 1])
+    >>> test_probs = np.array([[0.7, 0.3], [0.6, 0.4]])
+    >>> test_targets = np.array([0, 0])
+    >>> simple_membership_inference(train_probs, train_targets,
+    ...                              test_probs, test_targets)['attack_auc']
+    1.0
     """
 
     train_probs, train_labels = _prepare_inputs(train_probabilities, train_targets)
@@ -590,54 +689,68 @@ def classifier_two_sample_test(
     resampling of the out-of-fold predictions provides confidence intervals for
     each classifier's ROC-AUC estimate.
 
-    Args:
-        real_features: Two-dimensional array containing real samples.
-        synthetic_features: Two-dimensional array with synthetic samples that
-            share the same column order as ``real_features``.
-        model_factories: Mapping from a model identifier to a factory function
-            that returns an unfitted estimator implementing
-            :meth:`fit`/:meth:`predict_proba` for binary classification. Keys
-            are converted into snake-case metric prefixes (e.g., ``"XGBoost"``
-            becomes ``"xgboost"``).
-        random_state: Seed controlling the cross-validation shuffling and the
-            bootstrap sampling procedure.
-        n_splits: Number of stratified folds used to obtain out-of-fold
-            predictions for each classifier. The value is capped at the smallest
-            class count to maintain valid splits.
-        n_bootstrap: Number of bootstrap replicates used to derive confidence
-            intervals. Degenerate resamples that contain a single class are
-            skipped.
+    Parameters
+    ----------
+    real_features : numpy.ndarray
+        Two-dimensional array containing real samples.
+    synthetic_features : numpy.ndarray
+        Two-dimensional array with synthetic samples that share the same column
+        order as ``real_features``.
+    model_factories : Mapping[str, Callable[[], Any]]
+        Mapping from a model identifier to a factory function that returns an
+        unfitted estimator implementing :meth:`fit`/:meth:`predict_proba` for
+        binary classification. Keys are converted into snake-case metric
+        prefixes (e.g., ``"XGBoost"`` becomes ``"xgboost"``).
+    random_state : int
+        Seed controlling the cross-validation shuffling and the bootstrap
+        sampling procedure.
+    n_splits : int, default 5
+        Number of stratified folds used to obtain out-of-fold predictions for
+        each classifier. The value is capped at the smallest class count to
+        maintain valid splits.
+    n_bootstrap : int, default 1000
+        Number of bootstrap replicates used to derive confidence intervals.
+        Degenerate resamples that contain a single class are skipped.
 
-    Returns:
-        A dictionary containing the ROC-AUC and 95% bootstrap confidence
-        intervals for each supplied classifier, along with bookkeeping
-        metadata detailing the sample counts and effective bootstrap
-        iterations.
+    Returns
+    -------
+    dict of str to float
+        Dictionary containing the ROC-AUC and 95% bootstrap confidence
+        intervals for each supplied classifier, along with bookkeeping metadata
+        detailing the sample counts and effective bootstrap iterations.
 
-    Raises:
-        ValueError: If the inputs are not two-dimensional, if they do not share
-            the same number of columns, or if insufficient samples remain after
-            filtering non-finite rows to form at least two cross-validation
-            splits per class.
+    Raises
+    ------
+    ValueError
+        If the inputs are not two-dimensional, if they do not share the same
+        number of columns, or if insufficient samples remain after filtering
+        non-finite rows to form at least two cross-validation splits per class.
 
-    Example:
-        >>> from sklearn.linear_model import LogisticRegression
-        >>> from xgboost import XGBClassifier
-        >>> rng = np.random.default_rng(0)
-        >>> real = rng.normal(size=(100, 3))
-        >>> synth = rng.normal(loc=0.1, size=(100, 3))
-        >>> metrics = classifier_two_sample_test(
-        ...     real,
-        ...     synth,
-        ...     model_factories={
-        ...         "xgboost": lambda: XGBClassifier(random_state=0),
-        ...         "logistic": lambda: LogisticRegression(max_iter=200),
-        ...     },
-        ...     random_state=0,
-        ...     n_bootstrap=10,
-        ... )
-        >>> sorted(metrics.keys())[:2]
-        ['cv_splits', 'logistic_auc']
+    Notes
+    -----
+    ROC-AUC values within ``0.45``–``0.55`` typically indicate well-matched
+    distributions, while scores exceeding ``0.7`` signal large shifts that
+    warrant closer inspection of the synthetic generator.
+
+    Examples
+    --------
+    >>> from sklearn.linear_model import LogisticRegression
+    >>> from xgboost import XGBClassifier
+    >>> rng = np.random.default_rng(0)
+    >>> real = rng.normal(size=(100, 3))
+    >>> synth = rng.normal(loc=0.1, size=(100, 3))
+    >>> metrics = classifier_two_sample_test(
+    ...     real,
+    ...     synth,
+    ...     model_factories={
+    ...         "xgboost": lambda: XGBClassifier(random_state=0),
+    ...         "logistic": lambda: LogisticRegression(max_iter=200),
+    ...     },
+    ...     random_state=0,
+    ...     n_bootstrap=10,
+    ... )
+    >>> sorted(metrics.keys())[:2]
+    ['cv_splits', 'logistic_auc']
     """
 
     if not model_factories:
@@ -693,28 +806,36 @@ def kolmogorov_smirnov_statistic(real: np.ndarray, synthetic: np.ndarray) -> flo
     the empirical cumulative distribution functions of the real and synthetic
     samples. Values close to ``0.0`` indicate that the synthetic distribution is
     indistinguishable from the reference sample, whereas scores approaching
-    ``1.0`` highlight large distributional shifts. A common heuristic is to flag
-    KS statistics above ``0.1`` as a sign that the feature is not faithfully
-    reproduced, although domain-specific tolerances should override this
-    general threshold.
+    ``1.0`` highlight large distributional shifts.
 
-    Args:
-        real: One-dimensional array of observations drawn from the reference
-            dataset.
-        synthetic: One-dimensional array sampled from the generative model.
+    Parameters
+    ----------
+    real : numpy.ndarray
+        One-dimensional array of observations drawn from the reference dataset.
+    synthetic : numpy.ndarray
+        One-dimensional array sampled from the generative model.
 
-    Returns:
+    Returns
+    -------
+    float
         The KS statistic in ``[0, 1]``. ``numpy.nan`` is returned when either
         input is empty after removing non-finite values.
 
-    Example:
-        >>> import numpy as np
-        >>> ks = kolmogorov_smirnov_statistic(
-        ...     np.random.normal(size=256),
-        ...     np.random.normal(size=256),
-        ... )
-        >>> ks < 0.1
-        True
+    Notes
+    -----
+    A common heuristic is to flag KS statistics above ``0.1`` as a sign that
+    the feature is not faithfully reproduced, although domain-specific
+    tolerances should override this general threshold.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> ks = kolmogorov_smirnov_statistic(
+    ...     np.random.normal(size=256),
+    ...     np.random.normal(size=256),
+    ... )
+    >>> ks < 0.1
+    True
     """
 
     real = np.asarray(real, dtype=float)
@@ -748,55 +869,72 @@ def rbf_mmd(
 ) -> Tuple[float, float]:
     r"""Estimate the maximum mean discrepancy (MMD) between two samples.
 
-    The helper now supports both per-feature comparisons (one-dimensional input)
+    The helper supports both per-feature comparisons (one-dimensional input)
     and global multi-feature tests. Continuous features default to an RBF
     kernel with the median heuristic (computed from non-diagonal pairwise
     distances), while categorical features use a Kronecker :math:`\delta`
     kernel unless overridden. When ``n_permutations`` is positive, a
-    permutation test is executed to estimate a one-sided ``p``-value that the
-    observed MMD arose under the null hypothesis that both samples share the
-    same distribution.
+    permutation test estimates a one-sided ``p``-value that the observed MMD
+    arose under the null hypothesis that both samples share the same
+    distribution.
 
-    Args:
-        real: Reference observations. Accepts NumPy arrays, pandas Series or
-            DataFrames. One-dimensional inputs are treated as a single feature
-            column.
-        synthetic: Synthetic observations with the same feature layout as
-            ``real``.
-        random_state: Seed used for subsampling and the optional permutation
-            test.
-        max_samples: Maximum number of samples drawn from each dataset prior to
-            computing pairwise kernels. Larger inputs are subsampled without
-            replacement.
-        schema: Optional :class:`~suave.types.Schema` or schema-like mapping
-            describing column types. If omitted, a silent
-            :class:`~suave.schema_inference.SchemaInferencer` run infers
-            per-column types to choose default kernels.
-        feature_names: Optional explicit feature ordering when passing raw
-            arrays without column labels.
-        kernel: Optional kernel override. Provide a string (``"rbf"`` or
-            ``"delta"``) to apply the same kernel to all features, or a
-            mapping from column name to kernel identifier. Unspecified columns
-            fall back to the schema-derived defaults.
-        n_permutations: Number of label permutations used to estimate the
-            ``p``-value. Set to ``0`` (the default) to skip the permutation
-            test and return ``numpy.nan`` for the ``p``-value.
+    Parameters
+    ----------
+    real : Any
+        Reference observations. Accepts NumPy arrays, pandas Series, or
+        DataFrames. One-dimensional inputs are treated as a single feature
+        column.
+    synthetic : Any
+        Synthetic observations with the same feature layout as ``real``.
+    random_state : int
+        Seed used for subsampling and the optional permutation test.
+    max_samples : int, default 5000
+        Maximum number of samples drawn from each dataset prior to computing
+        pairwise kernels. Larger inputs are subsampled without replacement.
+    schema : Schema or mapping, optional
+        Optional :class:`~suave.types.Schema` or schema-like mapping describing
+        column types. If omitted, a silent
+        :class:`~suave.schema_inference.SchemaInferencer` run infers per-column
+        types to choose default kernels.
+    feature_names : Sequence[str], optional
+        Explicit feature ordering when passing raw arrays without column
+        labels.
+    kernel : str or mapping, optional
+        Kernel override. Provide a string (``"rbf"`` or ``"delta"``) to apply
+        the same kernel to all features, or a mapping from column name to kernel
+        identifier. Unspecified columns fall back to the schema-derived
+        defaults.
+    n_permutations : int, default 0
+        Number of label permutations used to estimate the ``p``-value. Set to
+        ``0`` to skip the permutation test and return ``numpy.nan`` for the
+        ``p``-value.
 
-    Returns:
-        A tuple ``(mmd, p_value)``. ``mmd`` is the averaged maximum mean
+    Returns
+    -------
+    tuple of float
+        Tuple ``(mmd, p_value)``. ``mmd`` is the averaged maximum mean
         discrepancy across feature groups and ``p_value`` is the optional
-        permutation test result. ``numpy.nan`` is returned for both entries
-        when inputs are empty after removing non-finite rows.
+        permutation test result. ``numpy.nan`` is returned for both entries when
+        inputs are empty after removing non-finite rows.
 
-    Example:
-        >>> rng = np.random.default_rng(0)
-        >>> real = rng.normal(loc=0.0, scale=1.0, size=200)
-        >>> synth = rng.normal(loc=0.1, scale=1.1, size=200)
-        >>> score, p_value = rbf_mmd(real, synth, random_state=0, n_permutations=10)
-        >>> round(score, 3) >= 0.0
-        True
+    Notes
+    -----
+    Empirically, MMD scores below ``0.02`` typically indicate close alignment,
+    values between ``0.02`` and ``0.05`` warrant monitoring, and scores above
+    ``0.1`` often reveal significant divergences between real and synthetic
+    distributions.
+
+    Examples
+    --------
+    >>> rng = np.random.default_rng(0)
+    >>> real = rng.normal(loc=0.0, scale=1.0, size=200)
+    >>> synth = rng.normal(loc=0.1, scale=1.1, size=200)
+    >>> score, p_value = rbf_mmd(real, synth, random_state=0, n_permutations=10)
+    >>> round(score, 3) >= 0.0
+    True
     """
 
+    # Align both inputs to data frames so feature order and labels match.
     real_frame, feature_names = _coerce_to_dataframe(real, feature_names)
     synthetic_frame, feature_names = _coerce_to_dataframe(synthetic, feature_names)
 
@@ -805,6 +943,7 @@ def rbf_mmd(
             "real and synthetic inputs must share the same feature columns"
         )
 
+    # Derive a schema and kernel assignment for each feature column.
     schema_obj = _resolve_schema(schema, feature_names, real_frame, synthetic_frame)
     kernel_assignments = _resolve_kernel_assignments(feature_names, schema_obj, kernel)
 
@@ -831,6 +970,7 @@ def rbf_mmd(
         if real_array.size == 0 or synthetic_array.size == 0:
             continue
 
+        # Subsample large arrays to keep kernel computations tractable.
         real_array = _subsample_array(real_array, max_samples, rng)
         synthetic_array = _subsample_array(synthetic_array, max_samples, rng)
 
@@ -839,12 +979,14 @@ def rbf_mmd(
 
         bandwidth = None
         if kernel_name == "rbf":
+            # Use the median heuristic to set the RBF bandwidth.
             bandwidth = _median_bandwidth(np.vstack([real_array, synthetic_array]))
 
         score = _compute_mmd(real_array, synthetic_array, kernel_name, bandwidth)
         group_results.append(score)
 
         if n_permutations > 0:
+            # Cache permutation payloads so we reuse kernels efficiently.
             permutation_payloads.append(
                 _PermutationPayload(
                     kernel=kernel_name,
@@ -878,6 +1020,7 @@ def rbf_mmd(
             perm_scores.append(perm_score)
         if not perm_scores:
             continue
+        # Aggregate feature-level permutation scores into a single sample.
         perm_value = float(np.mean(perm_scores))
         if perm_value >= observed:
             extreme_count += 1
@@ -1092,29 +1235,41 @@ def mutual_information_feature(
     The score quantifies how informative the feature is about whether a sample
     originated from the real dataset or from the generator. ``0.0`` denotes no
     detectable dependence, while higher scores indicate that a downstream
-    classifier could reliably separate the distributions. Analysts commonly use
-    ``n_bins`` in the ``10``–``20`` range and flag features whose mutual
-    information exceeds ``0.1`` bits as candidates for debugging.
+    classifier could reliably separate the distributions.
 
-    Args:
-        real: One-dimensional array of reference observations.
-        synthetic: One-dimensional array of synthetic observations.
-        n_bins: Number of quantile-based bins used to discretise the feature.
+    Parameters
+    ----------
+    real : numpy.ndarray
+        One-dimensional array of reference observations.
+    synthetic : numpy.ndarray
+        One-dimensional array of synthetic observations.
+    n_bins : int, default 10
+        Number of quantile-based bins used to discretise the feature.
 
-    Returns:
+    Returns
+    -------
+    float
         Mutual information measured in bits. ``numpy.nan`` is returned when the
         metric is undefined (e.g., not enough unique values to form bins).
 
-    Example:
-        >>> import numpy as np
-        >>> score = mutual_information_feature(
-        ...     np.array([0.0, 0.2, 0.4, 0.6]),
-        ...     np.array([0.7, 0.8, 0.9, 1.0]),
-        ... )
-        >>> score >= 0.0
-        True
+    Notes
+    -----
+    Analysts commonly use ``n_bins`` in the ``10``–``20`` range. Mutual
+    information below ``0.02`` bits usually indicates negligible leakage, while
+    scores above ``0.1`` bits should trigger closer inspection of the feature.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> score = mutual_information_feature(
+    ...     np.array([0.0, 0.2, 0.4, 0.6]),
+    ...     np.array([0.7, 0.8, 0.9, 1.0]),
+    ... )
+    >>> score >= 0.0
+    True
     """
 
+    # Sanitize inputs by coercing to arrays and dropping non-finite values.
     real = np.asarray(real, dtype=float)
     synthetic = np.asarray(synthetic, dtype=float)
     real = real[np.isfinite(real)]
@@ -1122,12 +1277,14 @@ def mutual_information_feature(
     if real.size == 0 or synthetic.size == 0:
         return float("nan")
 
+    # Construct quantile-based bin edges shared across both datasets.
     combined = np.concatenate([real, synthetic])
     quantiles = np.quantile(combined, np.linspace(0.0, 1.0, n_bins + 1))
     bin_edges = np.unique(quantiles)
     if bin_edges.size <= 1:
         return 0.0
 
+    # Assign each sample to a bin to approximate the continuous distribution.
     interior = bin_edges[1:-1]
     real_binned = np.digitize(real, interior, right=False)
     synthetic_binned = np.digitize(synthetic, interior, right=False)
@@ -1135,6 +1292,7 @@ def mutual_information_feature(
     if np.unique(real_binned).size <= 1 and np.unique(synthetic_binned).size <= 1:
         return 0.0
 
+    # Build the contingency table relating dataset identity and binned values.
     dataset_indicator = np.concatenate(
         [
             np.zeros(real_binned.size, dtype=int),
