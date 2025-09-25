@@ -753,6 +753,9 @@ tstr_figure_paths: List[Path] = []
 distribution_df: Optional[pd.DataFrame] = None
 distribution_path: Optional[Path] = None
 distribution_top: Optional[pd.DataFrame] = None
+tstr_training_datasets: List[str] = []
+tstr_evaluation_datasets: List[str] = []
+tstr_models: List[str] = []
 
 if TARGET_LABEL != "in_hospital_mortality":
     print(
@@ -768,6 +771,7 @@ else:
         y_full,
         random_state=RANDOM_STATE,
     )
+    tstr_training_datasets = list(training_sets.keys())
     evaluation_sets_numeric: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
         "MIMIC test": (to_numeric_frame(X_test), y_test.reset_index(drop=True)),
     }
@@ -776,8 +780,18 @@ else:
             to_numeric_frame(external_features),
             external_labels.reset_index(drop=True),
         )
+    tstr_evaluation_datasets = list(evaluation_sets_numeric.keys())
 
-    model_factories = make_baseline_model_factories(RANDOM_STATE)
+    model_factories = make_baseline_model_factories(
+        RANDOM_STATE,
+        suave_params=optuna_best_params if optuna_best_params else None,
+        schema=schema if optuna_best_params else None,
+    )
+    tstr_models = list(model_factories.keys())
+    if "SUAVE" in model_factories:
+        print(
+            "Including SUAVE baseline in TSTR/TRTR evaluation using Optuna parameters."
+        )
     (
         tstr_summary_df,
         tstr_plot_df,
@@ -963,6 +977,16 @@ summary_lines.append("")
 
 if tstr_summary_df is not None and tstr_summary_path is not None:
     summary_lines.append("## TSTR/TRTR supervised baselines")
+    if tstr_training_datasets:
+        summary_lines.append("### Training dataset schemes")
+        summary_lines.extend(f"- {name}" for name in tstr_training_datasets)
+    if tstr_evaluation_datasets:
+        summary_lines.append("### Evaluation datasets")
+        summary_lines.extend(f"- {name}" for name in tstr_evaluation_datasets)
+    if tstr_models:
+        summary_lines.append("### Models")
+        summary_lines.extend(f"- {name}" for name in tstr_models)
+    summary_lines.append("")
     summary_lines.append(dataframe_to_markdown(tstr_summary_df, floatfmt=".3f"))
     summary_lines.append("")
     summary_lines.append("Artefacts:")

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sys
+import warnings
 from pathlib import Path
 from typing import (
+    Any,
     Callable,
     Dict,
     Iterable,
@@ -103,6 +105,7 @@ __all__ = [
     "make_random_forest_pipeline",
     "make_xgboost_pipeline",
     "make_baseline_model_factories",
+    "SuaveTransferEstimator",
     "mutual_information_feature",
     "plot_benchmark_curves",
     "plot_calibration_curves",
@@ -342,16 +345,86 @@ def make_xgboost_pipeline(random_state: Optional[int] = None) -> Pipeline:
     )
 
 
+class SuaveTransferEstimator:
+    """Lightweight wrapper that trains SUAVE for TSTR/TRTR evaluation."""
+
+    def __init__(
+        self,
+        params: Mapping[str, Any],
+        schema: Optional[Schema],
+        *,
+        random_state: int,
+    ) -> None:
+        self._params = dict(params)
+        self._schema = schema
+        self._random_state = random_state
+        self.model: Optional[SUAVE] = None
+        self.classes_: Optional[np.ndarray] = None
+
+    def _fit_kwargs(self) -> Dict[str, Any]:
+        """Return training keyword arguments derived from Optuna params."""
+
+        return {
+            "warmup_epochs": int(self._params.get("warmup_epochs", 3)),
+            "kl_warmup_epochs": int(self._params.get("kl_warmup_epochs", 0)),
+            "head_epochs": int(self._params.get("head_epochs", 2)),
+            "finetune_epochs": int(self._params.get("finetune_epochs", 2)),
+            "joint_decoder_lr_scale": float(
+                self._params.get("joint_decoder_lr_scale", 0.1)
+            ),
+            "early_stop_patience": int(
+                self._params.get("early_stop_patience", 10)
+            ),
+        }
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "SuaveTransferEstimator":
+        """Instantiate and train SUAVE with cached Optuna parameters."""
+
+        self.model = build_suave_model(
+            self._params,
+            self._schema,
+            random_state=self._random_state,
+        )
+        self.model.fit(X, y, **self._fit_kwargs())
+        self.classes_ = getattr(self.model, "classes_", None)
+        return self
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """Delegate probability prediction to the trained SUAVE model."""
+
+        if self.model is None:
+            raise RuntimeError("SUAVE model must be fitted before prediction")
+        probabilities = self.model.predict_proba(X)
+        return np.asarray(probabilities)
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """Return deterministic class predictions from the SUAVE model."""
+
+        if self.model is None:
+            raise RuntimeError("SUAVE model must be fitted before prediction")
+        return np.asarray(self.model.predict(X))
+
+
 def make_baseline_model_factories(
     random_state: int,
-) -> Dict[str, Callable[[], Pipeline]]:
+    *,
+    suave_params: Optional[Mapping[str, Any]] = None,
+    schema: Optional[Schema] = None,
+) -> Dict[str, Callable[[], object]]:
     """Return model factories for the supervised transfer comparison."""
 
-    return {
+    factories: Dict[str, Callable[[], object]] = {
         "Logistic regression": lambda: make_logistic_pipeline(random_state),
         "Random forest": lambda: make_random_forest_pipeline(random_state),
         "XGBoost": lambda: make_xgboost_pipeline(random_state),
     }
+    if suave_params is not None:
+        factories["SUAVE"] = lambda: SuaveTransferEstimator(
+            suave_params,
+            schema,
+            random_state=random_state,
+        )
+    return factories
 
 
 def define_schema(
@@ -655,7 +728,7 @@ def evaluate_transfer_baselines(
     training_sets: Mapping[str, Tuple[pd.DataFrame, pd.Series]],
     evaluation_sets: Mapping[str, Tuple[pd.DataFrame, pd.Series]],
     *,
-    model_factories: Mapping[str, Callable[[], Pipeline]],
+    model_factories: Mapping[str, Callable[[], object]],
     bootstrap_n: int,
     random_state: int,
 ) -> Tuple[
@@ -1146,11 +1219,18 @@ def resolve_classification_loss_weight(params: Mapping[str, object]) -> Optional
 
 def build_suave_model(
     params: Mapping[str, object],
-    schema: Schema,
+    schema: Optional[Schema],
     *,
     random_state: int,
 ) -> SUAVE:
     """Instantiate :class:`SUAVE` using Optuna-style parameters."""
+
+    if schema is None:
+        warnings.warn(
+            "未提供 schema，正在使用 SUAVE 默认的自动推断模式。",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     hidden_key = str(params.get("hidden_dims", "medium"))
     head_hidden_key = str(params.get("head_hidden_dims", "medium"))
