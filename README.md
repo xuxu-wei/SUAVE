@@ -179,7 +179,9 @@ c2st = classifier_two_sample_test(
 )
 
 # Inspect per-feature distribution alignment
-mmd_labs = rbf_mmd(real_labs.values, synthetic_labs.values, random_state=0)
+mmd_labs, mmd_labs_p = rbf_mmd(
+    real_labs.values, synthetic_labs.values, random_state=0, n_permutations=200
+)
 mi_unit = mutual_information_feature(real_unit.values, synthetic_unit.values)
 
 # Audit membership privacy leakage

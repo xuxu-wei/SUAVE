@@ -913,12 +913,17 @@ else:
     for column in FEATURE_COLUMNS:
         real_values = real_features_numeric[column].to_numpy()
         synthetic_values = synthesis_features_numeric[column].to_numpy()
+        mmd_value, mmd_p = rbf_mmd(
+            real_values,
+            synthetic_values,
+            random_state=RANDOM_STATE,
+            n_permutations=200,
+        )
         distribution_rows.append(
             {
                 "feature": column,
-                "mmd": rbf_mmd(
-                    real_values, synthetic_values, random_state=RANDOM_STATE
-                ),
+                "mmd": mmd_value,
+                "mmd_p_value": mmd_p,
                 "mutual_information": mutual_information_feature(
                     real_values, synthetic_values
                 ),
