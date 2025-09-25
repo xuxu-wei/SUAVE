@@ -770,9 +770,9 @@ render_dataframe(
 # %% [markdown]
 # ## TSTR/TRTR comparison
 #
-# Compare models trained on synthetic versus real data. The analysis is only
-# relevant when the current task models in-hospital mortality, matching the
-# publication results.
+# Compare models trained on synthetic versus real data. This block mirrors the
+# published SUAVE protocol and therefore only runs for the in-hospital
+# mortality target, which is the cohort studied in the manuscript.
 
 # %%
 
