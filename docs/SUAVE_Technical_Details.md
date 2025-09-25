@@ -57,6 +57,7 @@ q_\phi(z \mid x) = \mathcal{N}\big(z;\, \mu_\phi(x), \mathrm{diag}(\sigma_\phi^2
 $$
 若使用混合先验，则：
 
+
 $$
 p(z) = \sum_{k=1}^K \pi_k \mathcal{N}(z; \mu_k, \Sigma_k), \qquad \sum_k \pi_k = 1.
 $$
@@ -64,10 +65,12 @@ $$
 ### 5.2 证据下界（ELBO）
 SUAVE 的无监督训练目标采用掩码感知的 ELBO：
 
+
 $$
 \mathcal{L}_{\text{ELBO}}(x) = \mathbb{E}_{q_\phi(z \mid x)}\big[\log p_\theta(x_{\text{obs}} \mid z)\big] - \beta \, D_{\mathrm{KL}}\big(q_\phi(z \mid x) \parallel p(z)\big),
 $$
 其中 $x_{\text{obs}}$ 表示通过掩码选择的观测特征，$\beta$ 是 KL 退火系数。对于实值特征，重建项为高斯似然：
+
 
 $$
 \log p_\theta(x^{(r)} \mid z) = -\frac{1}{2}\sum_i m_i \left[ \frac{\big(x^{(r)}_i - \mu^{(r)}_{\theta,i}(z)\big)^2}{\sigma^{2,(r)}_{\theta,i}(z)} + \log \sigma^{2,(r)}_{\theta,i}(z) + \log(2\pi) \right],
@@ -90,10 +93,12 @@ $$
 ### 5.4 总体训练目标
 结合生成与监督任务，最终目标（在联合微调阶段）为：
 
+
 $$
 \mathcal{J}(x, y) = \mathcal{L}_{\text{ELBO}}(x) + \lambda \mathcal{L}_{\text{sup}}(x, y) + \gamma \mathcal{R}_{\text{reg}},
 $$
 其中 $\lambda$ 控制生成与分类的权衡，$\mathcal{R}_{\text{reg}}$ 表示可选的正则项（如权重衰减或对齐约束），$\gamma$ 为其权重。
+
 
 ## 6. 应用与展望
 - **临床预测**：支持 ICU 死亡率、早期预警等任务，通过校准的概率提升决策透明度。
