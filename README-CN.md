@@ -127,6 +127,35 @@ ece = compute_ece(proba, val_y.to_numpy(), n_bins=15)
 
 各指标函数会自动校验概率矩阵的形状，在输入退化时返回 `numpy.nan`。
 
+### 生成数据质量评估
+
+```python
+from sklearn.linear_model import LogisticRegression
+
+from suave.evaluate import (
+    evaluate_trtr,
+    evaluate_tstr,
+    kolmogorov_smirnov_statistic,
+    mutual_information_feature,
+    rbf_mmd,
+    simple_membership_inference,
+)
+
+# 对比真实数据与合成数据的迁移表现
+tstr_scores = evaluate_tstr((X_syn, y_syn), (X_test, y_test), LogisticRegression)
+trtr_scores = evaluate_trtr((X_train, y_train), (X_test, y_test), LogisticRegression)
+
+# 检查特征分布的一致性
+ks_age = kolmogorov_smirnov_statistic(real_age.values, synthetic_age.values)
+mmd_labs = rbf_mmd(real_labs.values, synthetic_labs.values, random_state=0)
+mi_unit = mutual_information_feature(real_unit.values, synthetic_unit.values)
+
+# 评估隐私泄露风险
+attack = simple_membership_inference(train_probs, train_labels, test_probs, test_labels)
+```
+
+`evaluate_tstr` / `evaluate_trtr` 可以搭配任意监督模型验证迁移性能；KS、RBF-MMD 与互信息用于量化单个特征的分布一致性，常见经验是 KS `<0.1`、MMD 接近 `0.0`、互信息接近 `0` 表示较好的拟合。成员推断攻击给出区分训练样本与保留样本的 AUROC 与准确率，用于监控潜在的隐私泄露。
+
 ### 潜变量编码
 
 ```python
