@@ -14,6 +14,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Union,
 )
 
 import numpy as np
@@ -536,19 +537,61 @@ def build_tstr_training_sets(
     real_labels: pd.Series,
     *,
     random_state: int,
-) -> Dict[str, Tuple[pd.DataFrame, pd.Series]]:
-    """Construct real and synthetic training sets for TSTR/TRTR evaluation."""
+    return_raw: bool = False,
+) -> Union[
+    Dict[str, Tuple[pd.DataFrame, pd.Series]],
+    Tuple[
+        Dict[str, Tuple[pd.DataFrame, pd.Series]],
+        Dict[str, Tuple[pd.DataFrame, pd.Series]],
+    ],
+]:
+    """Construct real and synthetic training sets for TSTR/TRTR evaluation.
+
+    Parameters
+    ----------
+    model:
+        The fitted :class:`SUAVE` model used to generate synthetic samples.
+    feature_columns:
+        Ordered collection of feature column names to preserve in each dataset.
+    real_features:
+        Feature frame from the source domain (e.g., MIMIC train split).
+    real_labels:
+        Corresponding label series aligned with ``real_features``.
+    random_state:
+        Seed controlling synthetic sampling reproducibility.
+    return_raw:
+        When ``True``, also return schema-aligned (non-numeric) feature frames for
+        each training set. These are required when re-training SUAVE models that
+        expect categorical values rather than numeric casts.
+
+    Returns
+    -------
+    datasets : Dict[str, Tuple[pd.DataFrame, pd.Series]]
+        Mapping from dataset name to a tuple of numeric feature frame and label
+        series.
+    raw_datasets : Dict[str, Tuple[pd.DataFrame, pd.Series]]
+        Only returned when ``return_raw`` is ``True``. Contains the same data as
+        ``datasets`` but with schema-aligned feature frames prior to
+        ``to_numeric_frame`` conversion.
+    """
 
     feature_columns = list(feature_columns)
-    real_feature_frame = to_numeric_frame(real_features.loc[:, feature_columns])
+    raw_real_features = real_features.loc[:, feature_columns].reset_index(drop=True)
     real_label_series = pd.Series(real_labels).reset_index(drop=True)
     real_label_series.name = real_labels.name
 
-    datasets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+    raw_datasets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
         "TRTR (real)": (
-            real_feature_frame.reset_index(drop=True),
+            raw_real_features.copy(),
             real_label_series.copy(),
         )
+    }
+    datasets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+        name: (
+            to_numeric_frame(features).reset_index(drop=True),
+            labels.copy(),
+        )
+        for name, (features, labels) in raw_datasets.items()
     }
 
     n_train = len(real_label_series)
@@ -566,7 +609,7 @@ def build_tstr_training_sets(
             y=labels if conditional else None,
         )
         frame = _ensure_feature_frame(sampled, feature_columns)
-        return to_numeric_frame(frame).reset_index(drop=True)
+        return frame.reset_index(drop=True)
 
     # Conditional sampling that mirrors the empirical class distribution.
     unconditional_labels = np.random.default_rng(random_state).choice(
@@ -574,13 +617,19 @@ def build_tstr_training_sets(
         size=n_train,
         replace=True,
     )
+    synthesis_features = sample_features(
+        n_train,
+        conditional=True,
+        labels=np.asarray(unconditional_labels),
+    )
+    synthesis_labels = pd.Series(unconditional_labels, name=real_label_series.name)
     datasets["TSTR synthesis"] = (
-        sample_features(
-            n_train,
-            conditional=True,
-            labels=np.asarray(unconditional_labels),
-        ),
-        pd.Series(unconditional_labels, name=real_label_series.name),
+        to_numeric_frame(synthesis_features.copy()).reset_index(drop=True),
+        synthesis_labels.copy(),
+    )
+    raw_datasets["TSTR synthesis"] = (
+        synthesis_features,
+        synthesis_labels,
     )
 
     balanced_labels = _generate_balanced_labels(
@@ -588,18 +637,24 @@ def build_tstr_training_sets(
         n_train,
         random_state=random_state + 10,
     )
+    balance_features = sample_features(
+        len(balanced_labels),
+        conditional=True,
+        labels=np.asarray(balanced_labels),
+    )
+    balance_labels = pd.Series(balanced_labels, name=real_label_series.name)
     datasets["TSTR synthesis-balance"] = (
-        sample_features(
-            len(balanced_labels),
-            conditional=True,
-            labels=np.asarray(balanced_labels),
-        ),
-        pd.Series(balanced_labels, name=real_label_series.name),
+        to_numeric_frame(balance_features.copy()).reset_index(drop=True),
+        balance_labels.copy(),
+    )
+    raw_datasets["TSTR synthesis-balance"] = (
+        balance_features,
+        balance_labels,
     )
 
     label_counts = real_label_series.value_counts().sort_index()
     target_count = int(label_counts.max()) if not label_counts.empty else 0
-    augmented_features = [real_feature_frame.reset_index(drop=True)]
+    augmented_features_raw = [raw_real_features.copy()]
     augmented_labels = [real_label_series.copy()]
     for value, count in label_counts.items():
         deficit = target_count - int(count)
@@ -611,12 +666,20 @@ def build_tstr_training_sets(
             conditional=True,
             labels=class_labels,
         )
-        augmented_features.append(synthetic_block)
+        augmented_features_raw.append(synthetic_block)
         augmented_labels.append(pd.Series(class_labels, name=real_label_series.name))
 
+    raw_augmented = pd.concat(augmented_features_raw, ignore_index=True)
+    augmented_labels_series = (
+        pd.concat(augmented_labels, ignore_index=True).reset_index(drop=True)
+    )
     datasets["TSTR synthesis-augment"] = (
-        to_numeric_frame(pd.concat(augmented_features, ignore_index=True)),
-        pd.concat(augmented_labels, ignore_index=True).reset_index(drop=True),
+        to_numeric_frame(raw_augmented).reset_index(drop=True),
+        augmented_labels_series,
+    )
+    raw_datasets["TSTR synthesis-augment"] = (
+        raw_augmented,
+        augmented_labels_series.copy(),
     )
 
     five_x = n_train * 5
@@ -625,13 +688,19 @@ def build_tstr_training_sets(
         size=five_x,
         replace=True,
     )
+    five_x_features = sample_features(
+        five_x,
+        conditional=True,
+        labels=np.asarray(five_x_labels),
+    )
+    five_x_series = pd.Series(five_x_labels, name=real_label_series.name)
     datasets["TSTR synthesis-5x"] = (
-        sample_features(
-            five_x,
-            conditional=True,
-            labels=np.asarray(five_x_labels),
-        ),
-        pd.Series(five_x_labels, name=real_label_series.name),
+        to_numeric_frame(five_x_features.copy()).reset_index(drop=True),
+        five_x_series.copy(),
+    )
+    raw_datasets["TSTR synthesis-5x"] = (
+        five_x_features,
+        five_x_series,
     )
 
     five_x_balanced = _generate_balanced_labels(
@@ -639,15 +708,25 @@ def build_tstr_training_sets(
         five_x,
         random_state=random_state + 30,
     )
+    five_x_balance_features = sample_features(
+        len(five_x_balanced),
+        conditional=True,
+        labels=np.asarray(five_x_balanced),
+    )
+    five_x_balance_labels = pd.Series(
+        five_x_balanced, name=real_label_series.name
+    )
     datasets["TSTR synthesis-5x balance"] = (
-        sample_features(
-            len(five_x_balanced),
-            conditional=True,
-            labels=np.asarray(five_x_balanced),
-        ),
-        pd.Series(five_x_balanced, name=real_label_series.name),
+        to_numeric_frame(five_x_balance_features.copy()).reset_index(drop=True),
+        five_x_balance_labels.copy(),
+    )
+    raw_datasets["TSTR synthesis-5x balance"] = (
+        five_x_balance_features,
+        five_x_balance_labels,
     )
 
+    if return_raw:
+        return datasets, raw_datasets
     return datasets
 
 
@@ -658,29 +737,77 @@ def evaluate_transfer_baselines(
     model_factories: Mapping[str, Callable[[], Pipeline]],
     bootstrap_n: int,
     random_state: int,
+    raw_training_sets: Optional[Mapping[str, Tuple[pd.DataFrame, pd.Series]]] = None,
+    raw_evaluation_sets: Optional[Mapping[str, Tuple[pd.DataFrame, pd.Series]]] = None,
 ) -> Tuple[
     pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]]
 ]:
-    """Train classical models on each training set and evaluate with bootstraps."""
+    """Train classical models on each training set and evaluate with bootstraps.
+
+    Parameters
+    ----------
+    training_sets, evaluation_sets:
+        Numeric feature frames paired with label series for each dataset.
+    model_factories:
+        Mapping from model name to a callable producing a scikit-learn compatible
+        estimator.
+    bootstrap_n:
+        Number of bootstrap samples for metric confidence intervals.
+    random_state:
+        Seed for reproducible bootstrapping.
+    raw_training_sets, raw_evaluation_sets:
+        Optional schema-aligned feature frames keyed identically to
+        ``training_sets`` and ``evaluation_sets``. Estimators declaring the
+        attribute ``requires_schema_aligned_features`` will be trained and
+        evaluated using these raw frames.
+    """
 
     summary_rows: List[Dict[str, object]] = []
     long_rows: List[Dict[str, object]] = []
     nested_results: Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]] = {}
 
-    for training_name, (train_X, train_y) in training_sets.items():
+    for training_name, (train_X_numeric, train_y_numeric) in training_sets.items():
         nested_results.setdefault(training_name, {})
-        train_columns = list(train_X.columns)
+        raw_training = (
+            raw_training_sets.get(training_name)
+            if raw_training_sets is not None
+            else None
+        )
         for model_name, factory in model_factories.items():
             estimator = factory()
+            use_raw_features = getattr(
+                estimator, "requires_schema_aligned_features", False
+            )
+            if use_raw_features:
+                if raw_training is None:
+                    raise ValueError(
+                        "Raw training data missing for estimator requiring schema-aligned"
+                        f" features on training set '{training_name}'."
+                    )
+                train_X, train_y = raw_training
+            else:
+                train_X, train_y = train_X_numeric, train_y_numeric
+
             estimator.fit(train_X, train_y)
             nested_results[training_name].setdefault(model_name, {})
+            train_columns = list(train_X.columns)
             classes = getattr(estimator, "classes_", None)
             if classes is None:
                 classes = np.unique(np.asarray(train_y))
             class_names = [str(value) for value in classes]
             positive_label = class_names[-1] if len(class_names) == 2 else None
 
-            for evaluation_name, (eval_X, eval_y) in evaluation_sets.items():
+            for evaluation_name, (eval_X_numeric, eval_y_numeric) in evaluation_sets.items():
+                if use_raw_features:
+                    if raw_evaluation_sets is None or evaluation_name not in raw_evaluation_sets:
+                        raise ValueError(
+                            "Raw evaluation data missing for estimator requiring schema-aligned"
+                            f" features on evaluation set '{evaluation_name}'."
+                        )
+                    eval_X, eval_y = raw_evaluation_sets[evaluation_name]
+                else:
+                    eval_X, eval_y = eval_X_numeric, eval_y_numeric
+
                 if eval_X.empty or len(eval_y) == 0:
                     continue
                 aligned_eval = eval_X.loc[:, train_columns]

@@ -213,6 +213,19 @@ def load_optuna_results(
     return best_info, best_params
 
 
+def resolve_suave_fit_kwargs(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return fit-time keyword arguments derived from Optuna parameters."""
+
+    return {
+        "warmup_epochs": int(params.get("warmup_epochs", 3)),
+        "kl_warmup_epochs": int(params.get("kl_warmup_epochs", 0)),
+        "head_epochs": int(params.get("head_epochs", 2)),
+        "finetune_epochs": int(params.get("finetune_epochs", 2)),
+        "joint_decoder_lr_scale": float(params.get("joint_decoder_lr_scale", 0.1)),
+        "early_stop_patience": int(params.get("early_stop_patience", 10)),
+    }
+
+
 def extract_calibrator_estimator(calibrator: Any) -> Optional[SUAVE]:
     """Return the underlying SUAVE estimator from ``calibrator`` if present."""
 
@@ -230,6 +243,30 @@ def extract_calibrator_estimator(calibrator: Any) -> Optional[SUAVE]:
         if isinstance(base_est, SUAVE):
             return base_est
     return None
+
+
+class _TSTRSuaveEstimator:
+    """Wrapper exposing ``SUAVE`` with a scikit-learn-style interface."""
+
+    requires_schema_aligned_features = True
+
+    def __init__(self, base_model: SUAVE, fit_kwargs: Mapping[str, Any]):
+        self._model = base_model
+        self._fit_kwargs = dict(fit_kwargs)
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "_TSTRSuaveEstimator":
+        self._model.fit(X, y, **self._fit_kwargs)
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return self._model.predict(X)
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        return self._model.predict_proba(X)
+
+    @property
+    def classes_(self) -> Optional[np.ndarray]:
+        return getattr(self._model, "classes_", None)
 
 
 # %% [markdown]
@@ -465,17 +502,11 @@ if model is None and optuna_best_params:
         "Training SUAVE with best Optuna parameters because no saved model was found…"
     )
     model = build_suave_model(optuna_best_params, schema, random_state=RANDOM_STATE)
+    fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
     model.fit(
         X_train_model,
         y_train_model,
-        warmup_epochs=int(optuna_best_params.get("warmup_epochs", 3)),
-        kl_warmup_epochs=int(optuna_best_params.get("kl_warmup_epochs", 0)),
-        head_epochs=int(optuna_best_params.get("head_epochs", 2)),
-        finetune_epochs=int(optuna_best_params.get("finetune_epochs", 2)),
-        joint_decoder_lr_scale=float(
-            optuna_best_params.get("joint_decoder_lr_scale", 0.1)
-        ),
-        early_stop_patience=int(optuna_best_params.get("early_stop_patience", 10)),
+        **fit_kwargs,
     )
 else:
     if model is None:
@@ -739,9 +770,9 @@ render_dataframe(
 # %% [markdown]
 # ## TSTR/TRTR comparison
 #
-# Compare models trained on synthetic versus real data. The analysis is only
-# relevant when the current task models in-hospital mortality, matching the
-# publication results.
+# Compare models trained on synthetic versus real data. This block mirrors the
+# published SUAVE protocol and therefore only runs for the in-hospital
+# mortality target, which is the cohort studied in the manuscript.
 
 # %%
 
@@ -761,33 +792,59 @@ if TARGET_LABEL != "in_hospital_mortality":
     )
 else:
     print("Generating synthetic data for TSTR/TRTR comparisons…")
-    training_sets = build_tstr_training_sets(
+    training_sets_numeric, training_sets_raw = build_tstr_training_sets(
         model,
         FEATURE_COLUMNS,
         X_full,
         y_full,
         random_state=RANDOM_STATE,
+        return_raw=True,
     )
     evaluation_sets_numeric: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
         "MIMIC test": (to_numeric_frame(X_test), y_test.reset_index(drop=True)),
+    }
+    evaluation_sets_raw: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+        "MIMIC test": (X_test.reset_index(drop=True), y_test.reset_index(drop=True)),
     }
     if external_features is not None and external_labels is not None:
         evaluation_sets_numeric["eICU external"] = (
             to_numeric_frame(external_features),
             external_labels.reset_index(drop=True),
         )
+        evaluation_sets_raw["eICU external"] = (
+            external_features.reset_index(drop=True),
+            external_labels.reset_index(drop=True),
+        )
 
-    model_factories = make_baseline_model_factories(RANDOM_STATE)
+    model_factories = dict(make_baseline_model_factories(RANDOM_STATE))
+    if optuna_best_params:
+        suave_fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
+
+        def make_suave_transfer_estimator() -> _TSTRSuaveEstimator:
+            base_model = build_suave_model(
+                optuna_best_params,
+                schema,
+                random_state=RANDOM_STATE,
+            )
+            return _TSTRSuaveEstimator(base_model, suave_fit_kwargs)
+
+        model_factories["SUAVE (Optuna best)"] = make_suave_transfer_estimator
+    else:
+        print(
+            "Skipping SUAVE TSTR/TRTR baseline because no Optuna parameters are available."
+        )
     (
         tstr_summary_df,
         tstr_plot_df,
         _,
     ) = evaluate_transfer_baselines(
-        training_sets,
+        training_sets_numeric,
         evaluation_sets_numeric,
         model_factories=model_factories,
         bootstrap_n=1000,
         random_state=RANDOM_STATE,
+        raw_training_sets=training_sets_raw,
+        raw_evaluation_sets=evaluation_sets_raw,
     )
     tstr_summary_path = OUTPUT_DIR / f"tstr_trtr_summary_{TARGET_LABEL}.csv"
     tstr_plot_path = OUTPUT_DIR / f"tstr_trtr_plot_data_{TARGET_LABEL}.csv"
@@ -799,7 +856,7 @@ else:
         floatfmt=".3f",
     )
 
-    training_order = list(training_sets.keys())
+    training_order = list(training_sets_numeric.keys())
     model_order = list(model_factories.keys())
     for evaluation_name in evaluation_sets_numeric.keys():
         for metric_name in ("accuracy", "roc_auc"):
@@ -815,8 +872,8 @@ else:
             if figure_path is not None:
                 tstr_figure_paths.append(figure_path)
 
-    real_features_numeric = training_sets["TRTR (real)"][0]
-    synthesis_features_numeric = training_sets["TSTR synthesis"][0]
+    real_features_numeric = training_sets_numeric["TRTR (real)"][0]
+    synthesis_features_numeric = training_sets_numeric["TSTR synthesis"][0]
     distribution_rows: List[Dict[str, object]] = []
     for column in FEATURE_COLUMNS:
         real_values = real_features_numeric[column].to_numpy()

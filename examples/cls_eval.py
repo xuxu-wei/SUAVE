@@ -6,16 +6,19 @@
 - 可配置label列、预测列、概率列前缀、阳性类等。
 """
 
-import os, time, glob
+import atexit
+import glob
+import inspect
+import os
+import sys
+import tempfile
+from datetime import datetime
 from os import PathLike
 from pathlib import Path
-import inspect, sys, tempfile
-import atexit
-_PREVIEW_TMPDIR = None
-from datetime import datetime
+from typing import Dict, List, Optional, Set, Tuple, Union
+
 import numpy as np
 import pandas as pd
-from typing import List, Tuple, Dict, Optional, Union, Set
 # sklearn 依赖
 from sklearn.metrics import (
     accuracy_score,
@@ -26,6 +29,8 @@ from sklearn.metrics import (
     average_precision_score,
 )
 from sklearn.preprocessing import label_binarize
+
+_PREVIEW_TMPDIR = None
 
 DEFAULT_LABEL_COL_NAME = "label"
 DEFAULT_Y_PRED_COL_NAME = "y_pred"
@@ -383,8 +388,6 @@ def evaluate_predictions(
     # -------------------- Bootstrap 置信区间 --------------------
     if bootstrap_n and bootstrap_n > 0:
         rng = np.random.default_rng(random_state)
-        idx_all = np.arange(len(y_true))
-        by_class_idx = {cls: np.where(y_true == cls)[0] for cls in classes}
 
         # 需要计算 CI 的 overall 指标键
         overall_ci_keys = [
@@ -745,7 +748,8 @@ def write_results_to_excel_unique(
                     if base in out.columns and (base + "_ci_high") in out.columns:
                         metrics.append(base)
             # 去重并保序
-            seen = set(); metrics = [m for m in metrics if not (m in seen or seen.add(m))]
+            seen: Set[str] = set()
+            metrics = [m for m in metrics if not (m in seen or seen.add(m))]
 
         for m in metrics:
             low_col  = f"{m}_ci_low"
@@ -774,7 +778,6 @@ def write_results_to_excel_unique(
                     combo = value_s.astype(str) + " (" + low_s.astype(str) + "–" + high_s.astype(str) + ")"
                 # 删除旧列，再插入新列到原位置
                 out = out.drop(columns=[m, low_col, high_col])
-                cols = list(out.columns)
                 out.insert(pos, new_col, combo)
                 name_map[m] = new_col
             else:
@@ -806,8 +809,10 @@ def write_results_to_excel_unique(
             cols.append(m)
             lo = m + "_ci_low"
             hi = m + "_ci_high"
-            if lo in cols_present: cols.append(lo)
-            if hi in cols_present: cols.append(hi)
+            if lo in cols_present:
+                cols.append(lo)
+            if hi in cols_present:
+                cols.append(hi)
 
         return overall_df_full.loc[:, [c for c in cols if c in overall_df_full.columns]]
 
@@ -926,7 +931,8 @@ def write_results_to_excel_unique(
                 if isinstance(item, tuple):
                     for cand in item:
                         if cand in cols_present:
-                            keep_metrics.append(cand); break
+                            keep_metrics.append(cand)
+                            break
                 else:
                     if item in cols_present:
                         keep_metrics.append(item)
@@ -1142,9 +1148,6 @@ def preview_result_tables(
     dict
         {table_key: {"status": "displayed"|"saved"|"skipped"|"error", "path": <csv或None>, "msg": <错误或说明>}}
     """
-    import os, tempfile, math
-    import pandas as pd
-
     results: Dict[str, Dict[str, Optional[str]]] = {}
     # 判定可用的 UI 渠道
     def _get_ui_backend():
@@ -1503,7 +1506,7 @@ def evaluate_and_export(
     """
     # —— 恢复你原先的“当 output_path 为空则自动命名”的逻辑 ——
     if output_path is None:
-        raise ValueError(f'Must provide `output_path`')
+        raise ValueError("Must provide `output_path`")
         # ts = time.strftime("%Y%m%d_%H%M%S")
         # output_path = f"./model_eval_{ts}.xlsx"
         
