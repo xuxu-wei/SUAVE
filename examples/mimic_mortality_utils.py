@@ -260,7 +260,7 @@ def load_or_create_iteratively_imputed_features(
     from sklearn.experimental import enable_iterative_imputer  # noqa: F401
     from sklearn.impute import IterativeImputer
 
-    imputer = IterativeImputer()
+    imputer = IterativeImputer(max_iter=50, tol=1e-2)
     imputer.fit(feature_sets[reference_key])
 
     imputed_features: Dict[str, pd.DataFrame] = {}
@@ -289,7 +289,7 @@ def make_logistic_pipeline(random_state: Optional[int] = None) -> Pipeline:
 
     return Pipeline(
         [
-            ("imputer", IterativeImputer()),
+            ("imputer", IterativeImputer(max_iter=50, tol=1e-2)),
             ("scaler", StandardScaler()),
             (
                 "classifier",
@@ -314,7 +314,7 @@ def make_random_forest_pipeline(random_state: Optional[int] = None) -> Pipeline:
 
     return Pipeline(
         [
-            ("imputer", IterativeImputer()),
+            ("imputer", IterativeImputer(max_iter=50, tol=1e-2)),
             (
                 "classifier",
                 RandomForestClassifier(
@@ -343,7 +343,7 @@ def make_xgboost_pipeline(random_state: Optional[int] = None) -> Pipeline:
 
     return Pipeline(
         [
-            ("imputer", IterativeImputer()),
+            ("imputer", IterativeImputer(max_iter=50, tol=1e-2)),
             (
                 "classifier",
                 XGBClassifier(

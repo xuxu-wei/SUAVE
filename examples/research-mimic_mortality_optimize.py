@@ -151,7 +151,7 @@ def run_optuna_search(
 
     def objective(trial: "optuna.trial.Trial") -> Tuple[float, float]:
         trial.suggest_categorical("latent_dim", [8, 16, 24, 32, 48, 64])
-        trial.suggest_categorical("n_components", [1, 2, 4, 6])
+        trial.suggest_int("n_components", 1, 10)
         trial.suggest_categorical("hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys()))
         trial.suggest_categorical(
             "head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys())
