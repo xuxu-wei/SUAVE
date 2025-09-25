@@ -1,3 +1,6 @@
+[GitHub Repo stars](https://img.shields.io/github/stars/xuxu-wei/SUAVE)![Static Badge](https://img.shields.io/badge/%E4%B8%AD%E6%96%87%E7%89%88-README-blue?link=https%3A%2F%2Fgithub.com%2Fxuxu-wei%2FSUAVE%2Fblob%2Fmain%2FREADME-CN.md)![PyPI](https://img.shields.io/pypi/v/suave-ml)!
+
+
 # SUAVE: Supervised, Unified, Augmented Variational Embedding
 
 SUAVE is a schema-first variational autoencoder for mixed tabular data that unifies generative modelling and supervised prediction. The project draws direct inspiration from HI-VAE and related research on hierarchical latent variable models while modernising the workflow around explicit schemas, staged training, and probability calibration.
