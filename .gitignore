@@ -1,3 +1,7 @@
+# examples
+/examples/analysis_outputs_*/
+/examples/*local_test.*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
