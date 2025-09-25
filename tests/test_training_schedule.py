@@ -128,7 +128,7 @@ def test_training_monitor_keeps_elbo_semantics(monkeypatch):
 
 def test_classification_weight_heuristic_clipping():
     assert SUAVE._derive_classification_loss_weight(10.0, 2.0) == pytest.approx(5.0)
-    assert SUAVE._derive_classification_loss_weight(1.0, 1e-6) == pytest.approx(100.0)
+    assert SUAVE._derive_classification_loss_weight(1.0, 1e-6) == pytest.approx(1000.0)
     assert SUAVE._derive_classification_loss_weight(1.0, 1e3) == pytest.approx(0.1)
 
 
