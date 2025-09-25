@@ -36,6 +36,7 @@ SUAVE（Supervised, Unified, Augmented Variational Embedding）旨在为临床�
 ### 4.1 组件概览
 1. **Encoder (`modules/encoder.py`)**：对不同类型特征进行嵌入后，经多层感知机输出潜变量的均值 $\mu$ 与尺度参数 $\sigma$。
 2. **Latent Prior**：采用多分量高斯先验或标准正态先验 $p(z)$，支持临床群体的亚群划分。
+
 3. **Decoder (`modules/decoder.py`)**：针对每类特征输出参数（实值的均值/方差、分类概率、泊松率等），并在有缺失掩码的情况下执行重建。
 4. **Supervised Head (`modules/heads.py`)**：在潜空间上添加线性或多层感知机分类器。
 5. **Calibration (`modules/calibrate.py`)**：对分类头 logits 进行温度缩放。
@@ -46,6 +47,7 @@ SUAVE（Supervised, Unified, Augmented Variational Embedding）旨在为临床�
 - **采样与重构**：从 $q_\phi(z \mid x)$ 中采样 $z$，经解码器生成参数化分布 $p_\theta(x \mid z)$ 并计算重建损失。
 - **监督预测**：同一 $z$ 作为分类头输入，输出 logits 并计算监督损失与校准。
 - **合成数据**：从先验 $p(z)$ 采样，经解码器生成合成样本；在条件采样时，利用分类头的逆向约束或条件先验采样特定类别的 $z$。
+
 
 ## 5. 数学公式
 
@@ -86,6 +88,7 @@ $$
 \mathcal{J}(x, y) = \mathcal{L}_{\text{ELBO}}(x) + \lambda \mathcal{L}_{\text{sup}}(x, y) + \gamma \mathcal{R}_{\text{reg}},
 $$
 其中 $\lambda$ 控制生成与分类的权衡，$\mathcal{R}_{\text{reg}}$ 表示可选的正则项（如权重衰减或对齐约束），$\gamma$ 为其权重。
+
 
 ## 6. 应用与展望
 - **临床预测**：支持 ICU 死亡率、早期预警等任务，通过校准的概率提升决策透明度。
