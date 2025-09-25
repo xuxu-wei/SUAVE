@@ -36,37 +36,42 @@ SUAVE（Supervised, Unified, Augmented Variational Embedding）旨在为临床�
 ### 4.1 组件概览
 1. **Encoder (`modules/encoder.py`)**：对不同类型特征进行嵌入后，经多层感知机输出潜变量的均值 $\mu$ 与尺度参数 $\sigma$。
 2. **Latent Prior**：采用多分量高斯先验或标准正态先验 $p(z)$，支持临床群体的亚群划分。
-
 3. **Decoder (`modules/decoder.py`)**：针对每类特征输出参数（实值的均值/方差、分类概率、泊松率等），并在有缺失掩码的情况下执行重建。
 4. **Supervised Head (`modules/heads.py`)**：在潜空间上添加线性或多层感知机分类器。
 5. **Calibration (`modules/calibrate.py`)**：对分类头 logits 进行温度缩放。
 6. **Evaluation (`evaluate.py`)**：计算性能与隐私指标。
 
 ### 4.2 前向与训练流程
-- **编码**：$x$ 经标准化与缺失掩码处理后输入编码器，得到潜在分布 $q_\phi(z \mid x)$。
+- **编码**： $x$ 经标准化与缺失掩码处理后输入编码器，得到潜在分布 $q_\phi(z \mid x)$。
 - **采样与重构**：从 $q_\phi(z \mid x)$ 中采样 $z$，经解码器生成参数化分布 $p_\theta(x \mid z)$ 并计算重建损失。
 - **监督预测**：同一 $z$ 作为分类头输入，输出 logits 并计算监督损失与校准。
 - **合成数据**：从先验 $p(z)$ 采样，经解码器生成合成样本；在条件采样时，利用分类头的逆向约束或条件先验采样特定类别的 $z$。
-
 
 ## 5. 数学公式
 
 ### 5.1 潜变量后验与先验
 编码器给出潜变量的均值 $\mu_\phi(x)$ 与对数方差 $\log \sigma_\phi^2(x)$，近似后验为：
+
 $$
-q_\phi(z \mid x) = \mathcal{N}\big(z;\, \mu_\phi(x), \operatorname{diag}(\sigma_\phi^2(x))\big).
+q_\phi(z \mid x) = \mathcal{N}\big(z;\, \mu_\phi(x), \mathrm{diag}(\sigma_\phi^2(x))\big).
 $$
 若使用混合先验，则：
+
+
 $$
 p(z) = \sum_{k=1}^K \pi_k \mathcal{N}(z; \mu_k, \Sigma_k), \qquad \sum_k \pi_k = 1.
 $$
 
 ### 5.2 证据下界（ELBO）
 SUAVE 的无监督训练目标采用掩码感知的 ELBO：
+
+
 $$
 \mathcal{L}_{\text{ELBO}}(x) = \mathbb{E}_{q_\phi(z \mid x)}\big[\log p_\theta(x_{\text{obs}} \mid z)\big] - \beta \, D_{\mathrm{KL}}\big(q_\phi(z \mid x) \parallel p(z)\big),
 $$
 其中 $x_{\text{obs}}$ 表示通过掩码选择的观测特征，$\beta$ 是 KL 退火系数。对于实值特征，重建项为高斯似然：
+
+
 $$
 \log p_\theta(x^{(r)} \mid z) = -\frac{1}{2}\sum_i m_i \left[ \frac{\big(x^{(r)}_i - \mu^{(r)}_{\theta,i}(z)\big)^2}{\sigma^{2,(r)}_{\theta,i}(z)} + \log \sigma^{2,(r)}_{\theta,i}(z) + \log(2\pi) \right],
 $$
@@ -74,16 +79,21 @@ $$
 
 ### 5.3 监督损失与温度校准
 对于带标签的样本 $(x, y)$，分类头产生 logits $f_\psi(z)$，监督损失为：
+
 $$
-\mathcal{L}_{\text{sup}}(x, y) = - \sum_{c=1}^C y_c \log \operatorname{softmax}_c(f_\psi(z)).
+\mathcal{L}_{\text{sup}}(x, y) = - \sum_{c=1}^C y_c \log \frac{\exp(f_{\psi,c}(z))}{\sum_{c'=1}^C \exp(f_{\psi,c'}(z))}.
 $$
-温度缩放在校准阶段优化标量 $T>0$：
+温度缩放在校准阶段优化标量 $T>0$。缩放后的类别概率和目标函数写为：
+
 $$
-\hat{y} = \operatorname{softmax}\Big(\frac{f_\psi(z)}{T}\Big), \qquad T^* = \arg\min_T \Big(-\sum_{(x,y)\in \mathcal{D}_{\text{val}}} y^\top \log \hat{y}\Big).
+\hat{y}_c = \frac{\exp(f_{\psi,c}(z) / T)}{\sum_{c'=1}^C \exp(f_{\psi,c'}(z) / T)}, \qquad \mathcal{J}_{\text{cal}}(T) = - \sum_{(x,y)\in \mathcal{D}_{\text{val}}} y^\top \log \hat{y}.
 $$
+校准温度由 $T^* = \underset{T>0}{\mathrm{argmin}}\, \mathcal{J}_{\text{cal}}(T)$ 给出。
 
 ### 5.4 总体训练目标
 结合生成与监督任务，最终目标（在联合微调阶段）为：
+
+
 $$
 \mathcal{J}(x, y) = \mathcal{L}_{\text{ELBO}}(x) + \lambda \mathcal{L}_{\text{sup}}(x, y) + \gamma \mathcal{R}_{\text{reg}},
 $$
