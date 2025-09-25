@@ -65,6 +65,7 @@ from cls_eval import evaluate_predictions, write_results_to_excel_unique  # noqa
 
 from suave.evaluate import (  # noqa: E402
     classifier_two_sample_test,
+    energy_distance,
     mutual_information_feature,
     rbf_mmd,
     simple_membership_inference,
@@ -909,6 +910,36 @@ else:
         floatfmt=".3f",
     )
 
+    global_mmd, global_mmd_p_value = rbf_mmd(
+        real_features_numeric,
+        synthesis_features_numeric,
+        random_state=RANDOM_STATE,
+        n_permutations=200,
+    )
+    global_energy, global_energy_p_value = energy_distance(
+        real_features_numeric,
+        synthesis_features_numeric,
+        random_state=RANDOM_STATE,
+        n_permutations=200,
+    )
+    distribution_overall_df = pd.DataFrame(
+        [
+            {
+                "target": TARGET_LABEL,
+                "global_mmd": global_mmd,
+                "global_mmd_p_value": global_mmd_p_value,
+                "global_energy_distance": global_energy,
+                "global_energy_p_value": global_energy_p_value,
+                **c2st_metrics,
+            }
+        ]
+    )
+    render_dataframe(
+        distribution_overall_df,
+        title="Distribution shift overview",
+        floatfmt=".3f",
+    )
+
     distribution_rows: List[Dict[str, object]] = []
     for column in FEATURE_COLUMNS:
         real_values = real_features_numeric[column].to_numpy()
@@ -919,19 +950,28 @@ else:
             random_state=RANDOM_STATE,
             n_permutations=200,
         )
+        energy_value, _ = energy_distance(
+            real_values,
+            synthetic_values,
+            random_state=RANDOM_STATE,
+            n_permutations=0,
+        )
         distribution_rows.append(
             {
                 "feature": column,
                 "mmd": mmd_value,
                 "mmd_p_value": mmd_p,
+                "energy_distance": energy_value,
                 "mutual_information": mutual_information_feature(
                     real_values, synthetic_values
                 ),
             }
         )
     distribution_df = pd.DataFrame(distribution_rows)
-    distribution_path = OUTPUT_DIR / "distribution_shift_metrics.csv"
-    distribution_df.to_csv(distribution_path, index=False)
+    distribution_path = OUTPUT_DIR / "distribution_shift_metrics.xlsx"
+    with pd.ExcelWriter(distribution_path) as writer:
+        distribution_overall_df.to_excel(writer, sheet_name="overall", index=False)
+        distribution_df.to_excel(writer, sheet_name="per_feature", index=False)
     distribution_top = (
         distribution_df.sort_values("mutual_information", ascending=False)
         .head(10)
