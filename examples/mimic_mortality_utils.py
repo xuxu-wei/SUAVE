@@ -44,6 +44,11 @@ if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
 from suave import Schema, SchemaInferencer, SUAVE  # noqa: E402
+from suave.evaluate import (  # noqa: E402
+    kolmogorov_smirnov_statistic,
+    mutual_information_feature,
+    rbf_mmd,
+)
 from cls_eval import evaluate_predictions  # noqa: E402
 
 
@@ -742,95 +747,657 @@ def evaluate_transfer_baselines(
 def kolmogorov_smirnov_statistic(real: np.ndarray, synthetic: np.ndarray) -> float:
     """Compute the Kolmogorov-Smirnov statistic between two samples."""
 
-    real = np.asarray(real, dtype=float)
-    synthetic = np.asarray(synthetic, dtype=float)
-    real = real[np.isfinite(real)]
-    synthetic = synthetic[np.isfinite(synthetic)]
-    if real.size == 0 or synthetic.size == 0:
-        return float("nan")
-
-    real_sorted = np.sort(real)
-    synthetic_sorted = np.sort(synthetic)
-    combined = np.concatenate([real_sorted, synthetic_sorted])
-    cdf_real = np.searchsorted(real_sorted, combined, side="right") / real_sorted.size
-    cdf_synth = (
-        np.searchsorted(synthetic_sorted, combined, side="right")
-        / synthetic_sorted.size
-    )
-    return float(np.max(np.abs(cdf_real - cdf_synth)))
+    if isinstance(samples, pd.DataFrame):
+        missing = [
+            column for column in feature_columns if column not in samples.columns
+        ]
+        if missing:
+            raise KeyError(
+                "Sampled dataframe is missing expected feature columns: " f"{missing}"
+            )
+        frame = samples.loc[:, list(feature_columns)].copy()
+    else:
+        frame = pd.DataFrame(samples, columns=list(feature_columns))
+    return frame
 
 
-def rbf_mmd(
-    real: np.ndarray,
-    synthetic: np.ndarray,
+def _generate_balanced_labels(
+    labels: Sequence[object],
+    total_samples: int,
     *,
     random_state: int,
-    max_samples: int = 5000,
-) -> float:
-    """Compute the RBF maximum mean discrepancy between ``real`` and ``synthetic``."""
+) -> np.ndarray:
+    """Generate a balanced label vector using ``labels`` as candidates."""
 
-    real = np.asarray(real, dtype=float)
-    synthetic = np.asarray(synthetic, dtype=float)
-    real = real[np.isfinite(real)]
-    synthetic = synthetic[np.isfinite(synthetic)]
-    if real.size == 0 or synthetic.size == 0:
-        return float("nan")
+    unique = np.unique(np.asarray(labels))
+    if unique.size == 0:
+        raise ValueError("Cannot balance labels when no classes are present")
+
+    base = total_samples // unique.size
+    remainder = total_samples % unique.size
+    counts = {value: base for value in unique}
 
     rng = np.random.default_rng(random_state)
-    if real.size > max_samples:
-        real = rng.choice(real, size=max_samples, replace=False)
-    if synthetic.size > max_samples:
-        synthetic = rng.choice(synthetic, size=max_samples, replace=False)
+    if remainder > 0:
+        extras = rng.choice(unique, size=remainder, replace=False)
+        for value in extras:
+            counts[value] += 1
 
-    real = real[:, None]
-    synthetic = synthetic[:, None]
-    data = np.concatenate([real, synthetic], axis=0)
-    squared_distances = (data - data.T) ** 2
-    median_sq = float(np.median(squared_distances))
-    bandwidth = np.sqrt(0.5 * median_sq) if median_sq > 1e-12 else 1.0
-
-    def kernel(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        distances = (a - b.T) ** 2
-        return np.exp(-distances / (2.0 * bandwidth**2))
-
-    k_xx = kernel(real, real)
-    k_yy = kernel(synthetic, synthetic)
-    k_xy = kernel(real, synthetic)
-    mmd = k_xx.mean() + k_yy.mean() - 2.0 * k_xy.mean()
-    return float(max(mmd, 0.0))
+    balanced = np.concatenate([np.full(counts[value], value) for value in unique])
+    shuffle_rng = np.random.default_rng(random_state + 1)
+    shuffle_rng.shuffle(balanced)
+    return balanced
 
 
-def mutual_information_feature(
-    real: np.ndarray, synthetic: np.ndarray, n_bins: int = 10
-) -> float:
-    """Estimate mutual information between dataset indicator and feature bins."""
+def build_tstr_training_sets(
+    model: SUAVE,
+    feature_columns: Sequence[str],
+    real_features: pd.DataFrame,
+    real_labels: pd.Series,
+    *,
+    random_state: int,
+) -> Dict[str, Tuple[pd.DataFrame, pd.Series]]:
+    """Construct real and synthetic training sets for TSTR/TRTR evaluation."""
 
-    from sklearn.metrics import mutual_info_score
+    feature_columns = list(feature_columns)
+    real_feature_frame = to_numeric_frame(real_features.loc[:, feature_columns])
+    real_label_series = pd.Series(real_labels).reset_index(drop=True)
+    real_label_series.name = real_labels.name
 
-    real = np.asarray(real, dtype=float)
-    synthetic = np.asarray(synthetic, dtype=float)
-    real = real[np.isfinite(real)]
-    synthetic = synthetic[np.isfinite(synthetic)]
-    if real.size == 0 or synthetic.size == 0:
-        return float("nan")
+    datasets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+        "TRTR (real)": (
+            real_feature_frame.reset_index(drop=True),
+            real_label_series.copy(),
+        )
+    }
 
-    combined = np.concatenate([real, synthetic])
-    quantiles = np.quantile(combined, np.linspace(0.0, 1.0, n_bins + 1))
-    bin_edges = np.unique(quantiles)
-    if bin_edges.size <= 1:
-        return 0.0
-    interior = bin_edges[1:-1]
-    real_binned = np.digitize(real, interior, right=False)
-    synthetic_binned = np.digitize(synthetic, interior, right=False)
+    n_train = len(real_label_series)
+    label_array = real_label_series.to_numpy()
 
-    if np.unique(real_binned).size <= 1 and np.unique(synthetic_binned).size <= 1:
-        return 0.0
+    def sample_features(
+        n_samples: int,
+        *,
+        conditional: bool,
+        labels: Optional[np.ndarray] = None,
+    ) -> pd.DataFrame:
+        sampled = model.sample(
+            n_samples,
+            conditional=conditional,
+            y=labels if conditional else None,
+        )
+        frame = _ensure_feature_frame(sampled, feature_columns)
+        return to_numeric_frame(frame).reset_index(drop=True)
 
-    dataset_indicator = np.concatenate(
-        [
-            np.zeros(real_binned.size, dtype=int),
-            np.ones(synthetic_binned.size, dtype=int),
-        ]
+    # Conditional sampling that mirrors the empirical class distribution.
+    unconditional_labels = np.random.default_rng(random_state).choice(
+        label_array,
+        size=n_train,
+        replace=True,
+    )
+    datasets["TSTR synthesis"] = (
+        sample_features(
+            n_train,
+            conditional=True,
+            labels=np.asarray(unconditional_labels),
+        ),
+        pd.Series(unconditional_labels, name=real_label_series.name),
+    )
+
+    balanced_labels = _generate_balanced_labels(
+        label_array,
+        n_train,
+        random_state=random_state + 10,
+    )
+    datasets["TSTR synthesis-balance"] = (
+        sample_features(
+            len(balanced_labels),
+            conditional=True,
+            labels=np.asarray(balanced_labels),
+        ),
+        pd.Series(balanced_labels, name=real_label_series.name),
+    )
+
+    label_counts = real_label_series.value_counts().sort_index()
+    target_count = int(label_counts.max()) if not label_counts.empty else 0
+    augmented_features = [real_feature_frame.reset_index(drop=True)]
+    augmented_labels = [real_label_series.copy()]
+    for value, count in label_counts.items():
+        deficit = target_count - int(count)
+        if deficit <= 0:
+            continue
+        class_labels = np.full(deficit, value)
+        synthetic_block = sample_features(
+            deficit,
+            conditional=True,
+            labels=class_labels,
+        )
+        augmented_features.append(synthetic_block)
+        augmented_labels.append(pd.Series(class_labels, name=real_label_series.name))
+
+    datasets["TSTR synthesis-augment"] = (
+        to_numeric_frame(pd.concat(augmented_features, ignore_index=True)),
+        pd.concat(augmented_labels, ignore_index=True).reset_index(drop=True),
+    )
+
+    five_x = n_train * 5
+    five_x_labels = np.random.default_rng(random_state + 20).choice(
+        label_array,
+        size=five_x,
+        replace=True,
+    )
+    datasets["TSTR synthesis-5x"] = (
+        sample_features(
+            five_x,
+            conditional=True,
+            labels=np.asarray(five_x_labels),
+        ),
+        pd.Series(five_x_labels, name=real_label_series.name),
+    )
+
+    five_x_balanced = _generate_balanced_labels(
+        label_array,
+        five_x,
+        random_state=random_state + 30,
+    )
+    datasets["TSTR synthesis-5x balance"] = (
+        sample_features(
+            len(five_x_balanced),
+            conditional=True,
+            labels=np.asarray(five_x_balanced),
+        ),
+        pd.Series(five_x_balanced, name=real_label_series.name),
+    )
+
+    return datasets
+
+
+def evaluate_transfer_baselines(
+    training_sets: Mapping[str, Tuple[pd.DataFrame, pd.Series]],
+    evaluation_sets: Mapping[str, Tuple[pd.DataFrame, pd.Series]],
+    *,
+    model_factories: Mapping[str, Callable[[], Pipeline]],
+    bootstrap_n: int,
+    random_state: int,
+) -> Tuple[
+    pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]]
+]:
+    """Train classical models on each training set and evaluate with bootstraps."""
+
+    summary_rows: List[Dict[str, object]] = []
+    long_rows: List[Dict[str, object]] = []
+    nested_results: Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]] = {}
+
+    for training_name, (train_X, train_y) in training_sets.items():
+        nested_results.setdefault(training_name, {})
+        train_columns = list(train_X.columns)
+        for model_name, factory in model_factories.items():
+            estimator = factory()
+            estimator.fit(train_X, train_y)
+            nested_results[training_name].setdefault(model_name, {})
+            classes = getattr(estimator, "classes_", None)
+            if classes is None:
+                classes = np.unique(np.asarray(train_y))
+            class_names = [str(value) for value in classes]
+            positive_label = class_names[-1] if len(class_names) == 2 else None
+
+            for evaluation_name, (eval_X, eval_y) in evaluation_sets.items():
+                if eval_X.empty or len(eval_y) == 0:
+                    continue
+                aligned_eval = eval_X.loc[:, train_columns]
+                probabilities = estimator.predict_proba(aligned_eval)
+                predictions = estimator.predict(aligned_eval)
+                prediction_df = build_prediction_dataframe(
+                    probabilities,
+                    eval_y,
+                    predictions,
+                    class_names,
+                )
+
+                results = evaluate_predictions(
+                    prediction_df,
+                    label_col="label",
+                    pred_col="y_pred",
+                    positive_label=positive_label,
+                    bootstrap_n=bootstrap_n,
+                    random_state=random_state,
+                )
+                nested_results[training_name][model_name][evaluation_name] = results
+
+                overall_df = results.get("overall", pd.DataFrame())
+                if overall_df.empty:
+                    continue
+                row: Dict[str, object] = {
+                    "training_dataset": training_name,
+                    "evaluation_dataset": evaluation_name,
+                    "model": model_name,
+                }
+                for metric in ("accuracy", "roc_auc"):
+                    if metric in overall_df.columns:
+                        value = overall_df.at[0, metric]
+                        row[metric] = float(value)
+                        low_col = f"{metric}_ci_low"
+                        high_col = f"{metric}_ci_high"
+                        row[low_col] = (
+                            float(overall_df.at[0, low_col])
+                            if low_col in overall_df.columns
+                            else float("nan")
+                        )
+                        row[high_col] = (
+                            float(overall_df.at[0, high_col])
+                            if high_col in overall_df.columns
+                            else float("nan")
+                        )
+                        long_rows.append(
+                            {
+                                "training_dataset": training_name,
+                                "evaluation_dataset": evaluation_name,
+                                "model": model_name,
+                                "metric": metric,
+                                "estimate": float(value),
+                                "ci_low": (
+                                    float(overall_df.at[0, low_col])
+                                    if low_col in overall_df.columns
+                                    else float("nan")
+                                ),
+                                "ci_high": (
+                                    float(overall_df.at[0, high_col])
+                                    if high_col in overall_df.columns
+                                    else float("nan")
+                                ),
+                            }
+                        )
+                    else:
+                        row[metric] = float("nan")
+                        row[f"{metric}_ci_low"] = float("nan")
+                        row[f"{metric}_ci_high"] = float("nan")
+                summary_rows.append(row)
+
+    summary_df = pd.DataFrame(summary_rows)
+    long_df = pd.DataFrame(long_rows)
+    return summary_df, long_df, nested_results
+
+
+def extract_positive_probabilities(probabilities: np.ndarray) -> np.ndarray:
+    """Return the positive-class probabilities as a 1-D array."""
+
+    prob_matrix = np.asarray(probabilities)
+    if prob_matrix.ndim == 1:
+        return prob_matrix
+    return prob_matrix[:, -1]
+
+
+def compute_binary_metrics(
+    probabilities: np.ndarray, targets: pd.Series | np.ndarray
+) -> Dict[str, float]:
+    """Compute AUROC, accuracy, specificity, sensitivity, and Brier score."""
+
+    positive_probs = extract_positive_probabilities(probabilities)
+    labels = np.asarray(targets)
+    predictions = (positive_probs >= 0.5).astype(int)
+
+    metrics: Dict[str, float] = {}
+
+    try:
+        roauc = float(roc_auc_score(labels, positive_probs))
+    except ValueError:
+        roauc = float("nan")
+
+    metrics["ROAUC"] = roauc
+    metrics["AUC"] = roauc
+
+    metrics["ACC"] = float(accuracy_score(labels, predictions))
+    tn, fp, fn, tp = confusion_matrix(labels, predictions, labels=[0, 1]).ravel()
+    metrics["SPE"] = float(tn / (tn + fp)) if (tn + fp) > 0 else float("nan")
+    metrics["SEN"] = float(tp / (tp + fn)) if (tp + fn) > 0 else float("nan")
+    metrics["Brier"] = float(brier_score_loss(labels, positive_probs))
+    return metrics
+
+
+def fit_isotonic_calibrator(
+    model: SUAVE,
+    features: pd.DataFrame,
+    targets: pd.Series | np.ndarray,
+) -> CalibratedClassifierCV:
+    """Wrap ``model`` with an isotonic :class:`CalibratedClassifierCV`."""
+
+    calibrator = CalibratedClassifierCV(
+        base_estimator=model,
+        method="isotonic",
+        cv="prefit",
+    )
+    calibrator.fit(features, np.asarray(targets))
+    return calibrator
+
+
+def plot_calibration_curves(
+    probability_map: Mapping[str, np.ndarray],
+    label_map: Mapping[str, np.ndarray],
+    *,
+    target_name: str,
+    output_path: Path,
+    n_bins: int = 10,
+) -> None:
+    """Generate calibration curves with Brier scores annotated in the legend."""
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(
+        [0, 1], [0, 1], linestyle="--", color="tab:gray", label="Perfect calibration"
+    )
+
+    for dataset_name, probs in probability_map.items():
+        labels = label_map[dataset_name]
+        pos_probs = extract_positive_probabilities(probs)
+        try:
+            frac_pos, mean_pred = calibration_curve(labels, pos_probs, n_bins=n_bins)
+        except ValueError:
+            continue
+        brier = brier_score_loss(labels, pos_probs)
+        ax.plot(
+            mean_pred,
+            frac_pos,
+            marker="o",
+            label=f"{dataset_name} (Brier={brier:.3f})",
+        )
+
+    ax.set_xlabel("Predicted probability")
+    ax.set_ylabel("Observed frequency")
+    ax.set_title(f"Calibration: {target_name}")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+
+def plot_latent_space(
+    model: "SUAVE",
+    feature_map: Mapping[str, pd.DataFrame],
+    label_map: Mapping[str, Sequence[object]],
+    *,
+    target_name: str,
+    output_path: Path,
+) -> None:
+    """Project latent representations with PCA and create scatter plots."""
+
+    latent_blocks: List[np.ndarray] = []
+    dataset_keys: List[str] = []
+    for name, features in feature_map.items():
+        if features.empty:
+            continue
+        latents = model.encode(features)
+        if latents.size == 0:
+            continue
+        latent_blocks.append(latents)
+        dataset_keys.append(name)
+
+    if not latent_blocks:
+        return
+
+    concatenated = np.vstack(latent_blocks)
+    pca = PCA(n_components=2)
+    projected = pca.fit_transform(concatenated)
+
+    offsets = np.cumsum([0] + [block.shape[0] for block in latent_blocks])
+    fig, axes = plt.subplots(
+        1,
+        len(latent_blocks),
+        figsize=(6 * len(latent_blocks), 5),
+        sharex=True,
+        sharey=True,
+    )
+
+    if len(latent_blocks) == 1:
+        axes = [axes]
+
+    for idx, (ax, name) in enumerate(zip(axes, dataset_keys)):
+        start, end = offsets[idx], offsets[idx + 1]
+        subset = projected[start:end]
+        labels = np.asarray(label_map[name])
+        scatter = ax.scatter(
+            subset[:, 0],
+            subset[:, 1],
+            c=labels,
+            cmap="coolwarm",
+            alpha=0.7,
+            edgecolor="none",
+        )
+        ax.set_title(f"{name}")
+        ax.set_xlabel("PC1")
+        ax.set_ylabel("PC2")
+        legend = ax.legend(*scatter.legend_elements(), title="Label")
+        ax.add_artist(legend)
+
+    fig.suptitle(f"Latent space projection: {target_name}")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+
+def plot_benchmark_curves(
+    dataset_name: str,
+    y_true: np.ndarray,
+    model_probability_lookup: Mapping[str, np.ndarray],
+    *,
+    output_dir: Path,
+    target_label: str,
+    abbreviation_lookup: Optional[Mapping[str, str]] = None,
+    n_bins: int = 10,
+) -> Optional[Path]:
+    """Plot ROC and calibration curves for the supplied dataset."""
+
+    unique_labels = np.unique(y_true)
+    if unique_labels.size < 2:
+        print(f"Skipping {dataset_name} curves because only one class is present.")
+        return None
+
+    fig, (roc_ax, cal_ax) = plt.subplots(1, 2, figsize=(12, 5))
+
+    roc_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Chance")
+    roc_ax.set_title(f"ROC – {dataset_name}")
+    roc_ax.set_xlabel("False positive rate")
+    roc_ax.set_ylabel("True positive rate")
+
+    cal_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect")
+    cal_ax.set_title(f"Calibration – {dataset_name}")
+    cal_ax.set_xlabel("Mean predicted probability")
+    cal_ax.set_ylabel("Fraction of positives")
+
+    for model_name, probs in model_probability_lookup.items():
+        abbrev = (
+            model_name
+            if abbreviation_lookup is None
+            else abbreviation_lookup.get(model_name, model_name)
+        )
+        positive_probs = extract_positive_probabilities(probs)
+        fpr, tpr, _ = roc_curve(y_true, positive_probs)
+        roc_ax.plot(fpr, tpr, label=abbrev)
+
+        try:
+            frac_pos, mean_pred = calibration_curve(
+                y_true, positive_probs, n_bins=n_bins, strategy="quantile"
+            )
+        except ValueError:
+            print(
+                f"Calibration curve for {model_name} on {dataset_name} skipped due to insufficient variation."
+            )
+        else:
+            cal_ax.plot(mean_pred, frac_pos, marker="o", label=abbrev)
+
+    roc_ax.legend(loc="lower right")
+    cal_ax.legend(loc="upper left")
+    fig.suptitle(f"Benchmark ROC & calibration – {dataset_name}")
+    fig.tight_layout()
+
+    dataset_slug = dataset_name.lower().replace(" ", "_")
+    figure_path = output_dir / f"benchmark_curves_{dataset_slug}_{target_label}.png"
+    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved benchmark curves for {dataset_name} to {figure_path}")
+    return figure_path
+
+
+def plot_transfer_metric_bars(
+    metric_df: pd.DataFrame,
+    *,
+    metric: str,
+    evaluation_dataset: str,
+    training_order: Sequence[str],
+    model_order: Sequence[str],
+    output_dir: Path,
+    target_label: str,
+) -> Optional[Path]:
+    """Plot grouped bar charts with error bars for TSTR/TRTR comparisons."""
+
+    subset = metric_df[
+        (metric_df["metric"] == metric)
+        & (metric_df["evaluation_dataset"] == evaluation_dataset)
+    ]
+    if subset.empty:
+        print(
+            f"Skipping {metric} bars for {evaluation_dataset} because no data was provided."
+        )
+        return None
+
+    training_order = list(training_order)
+    model_order = list(model_order)
+    x_positions = np.arange(len(training_order), dtype=float)
+    width = 0.8 / max(len(model_order), 1)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    for idx, model_name in enumerate(model_order):
+        model_subset = (
+            subset[subset["model"] == model_name]
+            .set_index("training_dataset")
+            .reindex(training_order)
+        )
+        estimates = model_subset["estimate"].to_numpy()
+        lower = estimates - model_subset["ci_low"].to_numpy()
+        upper = model_subset["ci_high"].to_numpy() - estimates
+        lower = np.nan_to_num(lower, nan=0.0, posinf=0.0, neginf=0.0)
+        upper = np.nan_to_num(upper, nan=0.0, posinf=0.0, neginf=0.0)
+        offsets = (idx - (len(model_order) - 1) / 2) * width
+        ax.bar(
+            x_positions + offsets,
+            estimates,
+            width=width,
+            label=model_name,
+            yerr=np.vstack([lower, upper]),
+            capsize=4,
+            alpha=0.9,
+        )
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(training_order, rotation=20, ha="right")
+    ax.set_ylabel(metric.upper())
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title(f"{metric.upper()} – {evaluation_dataset}")
+    ax.legend()
+    fig.tight_layout()
+
+    dataset_slug = slugify_identifier(evaluation_dataset)
+    figure_path = (
+        output_dir
+        / f"tstr_trtr_{dataset_slug}_{metric.lower()}_{slugify_identifier(target_label)}.png"
+    )
+    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {metric.upper()} bars for {evaluation_dataset} to {figure_path}")
+    return figure_path
+
+
+def build_prediction_dataframe(
+    probabilities: np.ndarray,
+    labels: Sequence[object],
+    predictions: Sequence[object],
+    class_names: Sequence[str],
+) -> pd.DataFrame:
+    """Assemble a dataframe compatible with :func:`evaluate_predictions`."""
+
+    prob_matrix = np.asarray(probabilities)
+    class_names = list(class_names)
+    if prob_matrix.ndim == 1:
+        if len(class_names) == 2:
+            negative_name, positive_name = class_names[0], class_names[-1]
+            proba_dict = {
+                f"pred_proba_{negative_name}": 1.0 - prob_matrix,
+                f"pred_proba_{positive_name}": prob_matrix,
+            }
+        else:
+            proba_dict = {"pred_proba_0": prob_matrix}
+    else:
+        if prob_matrix.shape[1] == len(class_names) and len(class_names) > 0:
+            proba_dict = {
+                f"pred_proba_{class_names[idx]}": prob_matrix[:, idx]
+                for idx in range(prob_matrix.shape[1])
+            }
+        else:
+            proba_dict = {
+                f"pred_proba_{idx}": prob_matrix[:, idx]
+                for idx in range(prob_matrix.shape[1])
+            }
+
+    base_df = pd.DataFrame(
+        {
+            "label": np.asarray(labels),
+            "y_pred": np.asarray(predictions),
+        }
+    )
+    if proba_dict:
+        proba_df = pd.DataFrame(proba_dict)
+        base_df = pd.concat([base_df.reset_index(drop=True), proba_df], axis=1)
+    else:
+        base_df = base_df.reset_index(drop=True)
+    return base_df
+
+
+def resolve_classification_loss_weight(params: Mapping[str, object]) -> Optional[float]:
+    """Normalise ``classification_loss_weight`` from Optuna parameters."""
+
+    use_weight = params.get("use_classification_loss_weight")
+    if isinstance(use_weight, str):
+        use_weight = use_weight.lower() in {"1", "true", "yes"}
+    elif isinstance(use_weight, (np.bool_,)):
+        use_weight = bool(use_weight)
+    if not use_weight:
+        return None
+    weight = params.get("classification_loss_weight")
+    if weight is None:
+        return 1.0
+    if isinstance(weight, (np.floating, np.integer)):
+        return float(weight)
+    return float(weight)
+
+
+def build_suave_model(
+    params: Mapping[str, object],
+    schema: Schema,
+    *,
+    random_state: int,
+) -> SUAVE:
+    """Instantiate :class:`SUAVE` using Optuna-style parameters."""
+
+    hidden_key = str(params.get("hidden_dims", "medium"))
+    head_hidden_key = str(params.get("head_hidden_dims", "medium"))
+    hidden_dims = HIDDEN_DIMENSION_OPTIONS.get(
+        hidden_key, HIDDEN_DIMENSION_OPTIONS["medium"]
+    )
+    head_hidden_dims = HEAD_HIDDEN_DIMENSION_OPTIONS.get(
+        head_hidden_key, HEAD_HIDDEN_DIMENSION_OPTIONS["medium"]
+    )
+    classification_loss_weight = resolve_classification_loss_weight(params)
+    return SUAVE(
+        schema=schema,
+        latent_dim=int(params.get("latent_dim", 16)),
+        n_components=int(params.get("n_components", 1)),
+        hidden_dims=hidden_dims,
+        head_hidden_dims=head_hidden_dims,
+        dropout=float(params.get("dropout", 0.1)),
+        learning_rate=float(params.get("learning_rate", 1e-3)),
+        batch_size=int(params.get("batch_size", 256)),
+        beta=float(params.get("beta", 1.5)),
+        classification_loss_weight=classification_loss_weight,
+        random_state=random_state,
+        behaviour="supervised",
     )
     feature_bins = np.concatenate([real_binned, synthetic_binned])
     if np.unique(feature_bins).size <= 1:
