@@ -48,22 +48,25 @@ from mimic_mortality_utils import (  # noqa: E402
     evaluate_transfer_baselines,
     extract_positive_probabilities,
     fit_isotonic_calibrator,
-    kolmogorov_smirnov_statistic,
     load_dataset,
     load_or_create_iteratively_imputed_features,
     make_baseline_model_factories,
-    mutual_information_feature,
     plot_benchmark_curves,
     plot_calibration_curves,
     plot_latent_space,
     plot_transfer_metric_bars,
     prepare_features,
     render_dataframe,
-    rbf_mmd,
     schema_to_dataframe,
     to_numeric_frame,
 )
 from cls_eval import evaluate_predictions, write_results_to_excel_unique  # noqa: E402
+
+from suave.evaluate import (  # noqa: E402
+    kolmogorov_smirnov_statistic,
+    mutual_information_feature,
+    rbf_mmd,
+)
 
 from suave import SUAVE  # noqa: E402
 from suave.evaluate import simple_membership_inference  # noqa: E402
