@@ -213,6 +213,19 @@ def load_optuna_results(
     return best_info, best_params
 
 
+def resolve_suave_fit_kwargs(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return fit-time keyword arguments derived from Optuna parameters."""
+
+    return {
+        "warmup_epochs": int(params.get("warmup_epochs", 3)),
+        "kl_warmup_epochs": int(params.get("kl_warmup_epochs", 0)),
+        "head_epochs": int(params.get("head_epochs", 2)),
+        "finetune_epochs": int(params.get("finetune_epochs", 2)),
+        "joint_decoder_lr_scale": float(params.get("joint_decoder_lr_scale", 0.1)),
+        "early_stop_patience": int(params.get("early_stop_patience", 10)),
+    }
+
+
 def extract_calibrator_estimator(calibrator: Any) -> Optional[SUAVE]:
     """Return the underlying SUAVE estimator from ``calibrator`` if present."""
 
@@ -230,6 +243,28 @@ def extract_calibrator_estimator(calibrator: Any) -> Optional[SUAVE]:
         if isinstance(base_est, SUAVE):
             return base_est
     return None
+
+
+class _TSTRSuaveEstimator:
+    """Wrapper exposing ``SUAVE`` with a scikit-learn-style interface."""
+
+    def __init__(self, base_model: SUAVE, fit_kwargs: Mapping[str, Any]):
+        self._model = base_model
+        self._fit_kwargs = dict(fit_kwargs)
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "_TSTRSuaveEstimator":
+        self._model.fit(X, y, **self._fit_kwargs)
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return self._model.predict(X)
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        return self._model.predict_proba(X)
+
+    @property
+    def classes_(self) -> Optional[np.ndarray]:
+        return getattr(self._model, "classes_", None)
 
 
 # %% [markdown]
@@ -465,17 +500,11 @@ if model is None and optuna_best_params:
         "Training SUAVE with best Optuna parameters because no saved model was found…"
     )
     model = build_suave_model(optuna_best_params, schema, random_state=RANDOM_STATE)
+    fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
     model.fit(
         X_train_model,
         y_train_model,
-        warmup_epochs=int(optuna_best_params.get("warmup_epochs", 3)),
-        kl_warmup_epochs=int(optuna_best_params.get("kl_warmup_epochs", 0)),
-        head_epochs=int(optuna_best_params.get("head_epochs", 2)),
-        finetune_epochs=int(optuna_best_params.get("finetune_epochs", 2)),
-        joint_decoder_lr_scale=float(
-            optuna_best_params.get("joint_decoder_lr_scale", 0.1)
-        ),
-        early_stop_patience=int(optuna_best_params.get("early_stop_patience", 10)),
+        **fit_kwargs,
     )
 else:
     if model is None:
@@ -777,7 +806,23 @@ else:
             external_labels.reset_index(drop=True),
         )
 
-    model_factories = make_baseline_model_factories(RANDOM_STATE)
+    model_factories = dict(make_baseline_model_factories(RANDOM_STATE))
+    if optuna_best_params:
+        suave_fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
+
+        def make_suave_transfer_estimator() -> _TSTRSuaveEstimator:
+            base_model = build_suave_model(
+                optuna_best_params,
+                schema,
+                random_state=RANDOM_STATE,
+            )
+            return _TSTRSuaveEstimator(base_model, suave_fit_kwargs)
+
+        model_factories["SUAVE (Optuna best)"] = make_suave_transfer_estimator
+    else:
+        print(
+            "Skipping SUAVE TSTR/TRTR baseline because no Optuna parameters are available."
+        )
     (
         tstr_summary_df,
         tstr_plot_df,

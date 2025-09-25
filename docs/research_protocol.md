@@ -62,7 +62,7 @@
 
 ### 9. 合成数据（TSTR/TRTR）与分布漂移分析
 
-1. 调用 `build_tstr_training_sets` 创建真实与合成训练集，并通过 `make_baseline_model_factories` 构建一致的下游分类器族。
+1. 调用 `build_tstr_training_sets` 创建真实与合成训练集，并通过 `make_baseline_model_factories` 构建一致的下游分类器族；若 Optuna 已产出最优参数，则额外基于该参数重新实例化并训练一套 SUAVE 模型参与 TSTR/TRTR 对照。
 2. 使用 `plot_transfer_metric_bars`、`kolmogorov_smirnov_statistic`、`rbf_mmd` 与 `mutual_information_feature` 评估分布一致性。
 3. 所有 TRTR/TSTR 指标、KS/MMD/互信息结果应保存为 CSV 与可视化 PNG，纳入附录及复现包。
 
