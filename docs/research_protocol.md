@@ -22,12 +22,13 @@
 1. 训练/内部验证/测试使用 `examples/data/sepsis_mortality_dataset/` 中基于 **MIMIC-IV** 抽样生成的 `mimic-mortality-train.tsv` 与 `mimic-mortality-test.tsv`，其样本均为入院 24h 内满足 Sepsis-3 标准的住院患者。
 2. 外部验证集来自 eICU-CRD（`eicu-mortality-external_val.tsv`），采用与 MIMIC-IV 相同的纳入标准，同样聚焦于入院 24h 内满足 Sepsis-3 标准的患者。
 3. MIMIC-IV 测试集与 eICU 外部验证集仅用于最终评估，不参与 Optuna 搜索或其他超参选择流程。
-4. 所有 TSV 均需保留原始列名；脚本在 `analysis_outputs_supervised/` 下派生的缓存、插补产物与评估文件应纳入审计归档。
+4. 所有 TSV 均需保留原始列名；主流程在 `examples/research_outputs_supervised/` 下派生的缓存、插补产物与评估文件应纳入审计归档，根目录仅保留研究整体的 Markdown 总结。
+5. `examples/research_outputs_supervised/` 采用分阶段目录结构：`01_schema_validation/`、`02_feature_engineering/`、`03_optuna_search/`、`04_suave_model/`、`05_evaluation_metrics/`、`06_bootstrap_analysis/`、`07_baseline_models/`、`08_transfer_learning/`、`09_distribution_shift/`、`10_privacy_assessment/` 与 `11_visualizations/`。各阶段产物应写入对应子目录，便于审计检索。
 
 ### 3. 准备阶段
 
 1. 确认目标标签（默认 `in_hospital_mortality`）存在于 `TARGET_COLUMNS` 列表，并记录所有候选标签以备扩展分析。
-2. 建立输出目录 `examples/analysis_outputs_supervised/`，若 Optuna 存储不存在则自动创建；必要时备份历史运行的 best trial JSON。
+2. 建立输出目录 `examples/research_outputs_supervised/`，若 Optuna 存储不存在则自动创建；必要时备份历史运行的 best trial JSON。
 3. 若已有 Optuna trial 或 SUAVE 模型缓存，需在研究日志中记录其生成配置，以便差异分析。
 
 ### 4. 数据加载与 Schema 校验
@@ -60,7 +61,7 @@
 
 1. 通过 `fit_isotonic_calibrator` 在内部验证集上拟合等渗校准器，必要时回退至逻辑回归温度缩放，并保存校准对象。
 2. 使用 `evaluate_predictions` 对训练、验证、MIMIC-IV 测试与 eICU 集执行 bootstrap（默认 1000 次）以估计指标置信区间，并生成 Excel 汇总；除表格主列的 AUC、ACC、SPE、SEN、Brier 外，Excel 中还会给出 `accuracy`、`balanced_accuracy`、`f1_macro`、`recall_macro`、`specificity_macro`、`sensitivity_pos`、`specificity_pos`、`roc_auc`、`pr_auc` 及其置信区间，以支撑不同风险偏好的诊断分析。
-3. 将生成的 `evaluation_metrics.csv`、校准曲线 PNG 等评估产物写入输出目录，并在实验日志中登记路径，便于后续报告引用与审计复核。
+3. 将生成的 `evaluation_metrics.csv`、校准曲线及相关图表保存为 PNG/SVG/PDF/JPG 四种格式，并写入 `05_evaluation_metrics/` 子目录，同时在实验日志中登记路径，便于后续报告引用与审计复核。
 
 ### 9. 合成数据（TSTR/TRTR）与分布漂移分析
 
@@ -71,7 +72,7 @@
 5. `rbf_mmd`、`energy_distance` 与 `mutual_information_feature` 继续按特征逐列计算，定位非单调差异或潜在信息泄露风险的列，并与 C2ST 结果交叉验证。
 6. `plot_transfer_metric_bars` 负责绘制 TSTR/TRTR 方案在 `accuracy`、`roc_auc` 等指标上的分组柱状图（含置信区间），展示不同生成数据训练集对下游分类器的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
 7. 在生成数据性能分析后运行 `simple_membership_inference`，补充隐私攻击基线并记录攻击 AUC/阈值，支撑隐私风险评估章节。
-8. 所有 TRTR/TSTR 指标、C2ST 结果及分布漂移指标需导出至同一个 Excel 工作簿：`overall` 工作表整合 C2ST 与全局 MMD/能量距离统计，`per_feature` 工作表罗列逐列 MMD/能量距离/互信息，并配套可视化 PNG，纳入附录及复现包。
+8. 所有 TRTR/TSTR 指标、C2ST 结果及分布漂移指标需导出至同一个 Excel 工作簿：`overall` 工作表整合 C2ST 与全局 MMD/能量距离统计，`per_feature` 工作表罗列逐列 MMD/能量距离/互信息；配套的分布漂移可视化图表需在 `09_distribution_shift/` 中以 PNG/SVG/PDF/JPG 四种格式保存，纳入附录及复现包。
 
 
 ### 10. 潜空间可视化、报告生成与归档

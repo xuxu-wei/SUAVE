@@ -89,7 +89,7 @@ analysis_config = {
     "optuna_timeout": 3600 * 48,
     "optuna_study_prefix": "supervised",
     "optuna_storage": None,
-    "output_dir_name": "analysis_outputs_supervised",
+    "output_dir_name": "research_outputs_supervised",
 }
 
 
@@ -105,8 +105,36 @@ analysis_config = {
 DATA_DIR = (EXAMPLES_DIR / "data" / "sepsis_mortality_dataset").resolve()
 OUTPUT_DIR = EXAMPLES_DIR / analysis_config["output_dir_name"]
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+SCHEMA_DIR = OUTPUT_DIR / "01_schema_validation"
+FEATURE_ENGINEERING_DIR = OUTPUT_DIR / "02_feature_engineering"
+OPTUNA_DIR = OUTPUT_DIR / "03_optuna_search"
+MODEL_DIR = OUTPUT_DIR / "04_suave_model"
+EVALUATION_DIR = OUTPUT_DIR / "05_evaluation_metrics"
+BOOTSTRAP_DIR = OUTPUT_DIR / "06_bootstrap_analysis"
+BASELINE_DIR = OUTPUT_DIR / "07_baseline_models"
+TRANSFER_DIR = OUTPUT_DIR / "08_transfer_learning"
+DISTRIBUTION_DIR = OUTPUT_DIR / "09_distribution_shift"
+PRIVACY_DIR = OUTPUT_DIR / "10_privacy_assessment"
+VISUALISATION_DIR = OUTPUT_DIR / "11_visualizations"
+
+for directory in (
+    SCHEMA_DIR,
+    FEATURE_ENGINEERING_DIR,
+    OPTUNA_DIR,
+    MODEL_DIR,
+    EVALUATION_DIR,
+    BOOTSTRAP_DIR,
+    BASELINE_DIR,
+    TRANSFER_DIR,
+    DISTRIBUTION_DIR,
+    PRIVACY_DIR,
+    VISUALISATION_DIR,
+):
+    directory.mkdir(parents=True, exist_ok=True)
+
 analysis_config["optuna_storage"] = (
-    f"sqlite:///{OUTPUT_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
+    f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
 )
 
 train_df = load_dataset(DATA_DIR / "mimic-mortality-train.tsv")
@@ -331,7 +359,7 @@ if external_features is not None:
     baseline_loaded_from_cache,
 ) = load_or_create_iteratively_imputed_features(
     baseline_feature_frames,
-    output_dir=OUTPUT_DIR,
+    output_dir=FEATURE_ENGINEERING_DIR,
     target_label=TARGET_LABEL,
     reference_key="Train",
 )
@@ -440,7 +468,7 @@ for model_name, estimator in baseline_models.items():
 baseline_df = pd.DataFrame(baseline_rows)
 baseline_order = ["Model", "Dataset", *metric_columns, "Notes"]
 baseline_df = baseline_df.loc[:, baseline_order]
-baseline_path = OUTPUT_DIR / f"baseline_models_{TARGET_LABEL}.csv"
+baseline_path = BASELINE_DIR / f"baseline_models_{TARGET_LABEL}.csv"
 baseline_df.to_csv(baseline_path, index=False)
 render_dataframe(
     baseline_df,
@@ -457,12 +485,12 @@ render_dataframe(
 # %%
 
 optuna_best_info, optuna_best_params = load_optuna_results(
-    OUTPUT_DIR,
+    OPTUNA_DIR,
     TARGET_LABEL,
     study_prefix=analysis_config.get("optuna_study_prefix"),
     storage=analysis_config.get("optuna_storage"),
 )
-optuna_trials_path = OUTPUT_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
+optuna_trials_path = OPTUNA_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
 
 if not optuna_best_params:
     print(
@@ -480,8 +508,8 @@ if not optuna_best_params:
 
 # %%
 
-model_path = OUTPUT_DIR / f"suave_best_{TARGET_LABEL}.pt"
-calibrator_path = OUTPUT_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
+model_path = MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
+calibrator_path = MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
 
 model: Optional[SUAVE] = None
 calibrator: Optional[Any] = None
@@ -575,7 +603,7 @@ existing_columns = [
 ]
 if existing_columns:
     metrics_df = metrics_df.loc[:, existing_columns]
-metrics_path = OUTPUT_DIR / "evaluation_metrics.csv"
+metrics_path = EVALUATION_DIR / "evaluation_metrics.csv"
 metrics_df.to_csv(metrics_path, index=False)
 render_dataframe(
     metrics_df,
@@ -583,7 +611,7 @@ render_dataframe(
     floatfmt=".3f",
 )
 
-calibration_path = OUTPUT_DIR / f"calibration_{TARGET_LABEL}.png"
+calibration_path = EVALUATION_DIR / f"calibration_{TARGET_LABEL}.png"
 plot_calibration_curves(
     probability_map, label_map, target_name=TARGET_LABEL, output_path=calibration_path
 )
@@ -621,7 +649,7 @@ for dataset_name in benchmark_datasets:
         dataset_name,
         label_map[dataset_name],
         model_probabilities,
-        output_dir=OUTPUT_DIR,
+        output_dir=EVALUATION_DIR,
         target_label=TARGET_LABEL,
         abbreviation_lookup=model_abbreviation_lookup,
     )
@@ -698,20 +726,20 @@ for dataset_name, (features, labels) in evaluation_datasets.items():
 
 bootstrap_overall_df = pd.concat(bootstrap_overall_frames, ignore_index=True)
 bootstrap_per_class_df = pd.concat(bootstrap_per_class_frames, ignore_index=True)
-bootstrap_overall_path = OUTPUT_DIR / f"bootstrap_overall_{TARGET_LABEL}.csv"
-bootstrap_per_class_path = OUTPUT_DIR / f"bootstrap_per_class_{TARGET_LABEL}.csv"
+bootstrap_overall_path = BOOTSTRAP_DIR / f"bootstrap_overall_{TARGET_LABEL}.csv"
+bootstrap_per_class_path = BOOTSTRAP_DIR / f"bootstrap_per_class_{TARGET_LABEL}.csv"
 bootstrap_overall_df.to_csv(bootstrap_overall_path, index=False)
 bootstrap_per_class_df.to_csv(bootstrap_per_class_path, index=False)
 
 bootstrap_warning_path: Optional[Path]
 if bootstrap_warnings_frames:
     bootstrap_warning_df = pd.concat(bootstrap_warnings_frames, ignore_index=True)
-    bootstrap_warning_path = OUTPUT_DIR / f"bootstrap_warnings_{TARGET_LABEL}.csv"
+    bootstrap_warning_path = BOOTSTRAP_DIR / f"bootstrap_warnings_{TARGET_LABEL}.csv"
     bootstrap_warning_df.to_csv(bootstrap_warning_path, index=False)
 else:
     bootstrap_warning_path = None
 
-bootstrap_excel_path = OUTPUT_DIR / f"bootstrap_{TARGET_LABEL}.xlsx"
+bootstrap_excel_path = BOOTSTRAP_DIR / f"bootstrap_{TARGET_LABEL}.xlsx"
 write_results_to_excel_unique(
     bootstrap_results,
     str(bootstrap_excel_path),
@@ -741,7 +769,7 @@ for metric_name in summary_metric_candidates:
             summary_columns.append(high_col)
 
 bootstrap_summary_df = bootstrap_overall_df.loc[:, summary_columns]
-bootstrap_summary_path = OUTPUT_DIR / f"bootstrap_summary_{TARGET_LABEL}.csv"
+bootstrap_summary_path = BOOTSTRAP_DIR / f"bootstrap_summary_{TARGET_LABEL}.csv"
 bootstrap_summary_df.to_csv(bootstrap_summary_path, index=False)
 render_dataframe(
     bootstrap_summary_df,
@@ -829,8 +857,8 @@ else:
         raw_training_sets=training_sets_raw,
         raw_evaluation_sets=evaluation_sets_raw,
     )
-    tstr_summary_path = OUTPUT_DIR / f"tstr_trtr_summary_{TARGET_LABEL}.csv"
-    tstr_plot_path = OUTPUT_DIR / f"tstr_trtr_plot_data_{TARGET_LABEL}.csv"
+    tstr_summary_path = TRANSFER_DIR / f"tstr_trtr_summary_{TARGET_LABEL}.csv"
+    tstr_plot_path = TRANSFER_DIR / f"tstr_trtr_plot_data_{TARGET_LABEL}.csv"
     tstr_summary_df.to_csv(tstr_summary_path, index=False)
     tstr_plot_df.to_csv(tstr_plot_path, index=False)
     render_dataframe(
@@ -849,7 +877,7 @@ else:
                 evaluation_dataset=evaluation_name,
                 training_order=training_order,
                 model_order=model_order,
-                output_dir=OUTPUT_DIR,
+                output_dir=TRANSFER_DIR,
                 target_label=TARGET_LABEL,
             )
             if figure_path is not None:
@@ -902,7 +930,7 @@ else:
         n_bootstrap=1000,
     )
     c2st_df = pd.DataFrame([{"target": TARGET_LABEL, **c2st_metrics}])
-    c2st_path = OUTPUT_DIR / "c2st_distribution_test.csv"
+    c2st_path = DISTRIBUTION_DIR / "c2st_distribution_test.csv"
     c2st_df.to_csv(c2st_path, index=False)
     render_dataframe(
         c2st_df,
@@ -968,7 +996,7 @@ else:
             }
         )
     distribution_df = pd.DataFrame(distribution_rows)
-    distribution_path = OUTPUT_DIR / "distribution_shift_metrics.xlsx"
+    distribution_path = DISTRIBUTION_DIR / "distribution_shift_metrics.xlsx"
     with pd.ExcelWriter(distribution_path) as writer:
         distribution_overall_df.to_excel(writer, sheet_name="overall", index=False)
         distribution_df.to_excel(writer, sheet_name="per_feature", index=False)
@@ -992,7 +1020,7 @@ else:
         np.asarray(y_test),
     )
     membership_df = pd.DataFrame([{"target": TARGET_LABEL, **membership_metrics}])
-    membership_path = OUTPUT_DIR / "membership_inference.csv"
+    membership_path = PRIVACY_DIR / "membership_inference.csv"
     membership_df.to_csv(membership_path, index=False)
     render_dataframe(
         membership_df,
@@ -1013,7 +1041,7 @@ latent_features = {
     name: features for name, (features, _) in evaluation_datasets.items()
 }
 latent_labels = {name: labels for name, (_, labels) in evaluation_datasets.items()}
-latent_path = OUTPUT_DIR / f"latent_{TARGET_LABEL}.png"
+latent_path = VISUALISATION_DIR / f"latent_{TARGET_LABEL}.png"
 plot_latent_space(
     model,
     latent_features,

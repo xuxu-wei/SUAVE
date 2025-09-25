@@ -53,7 +53,12 @@ from cls_eval import evaluate_predictions  # noqa: E402
 
 RANDOM_STATE: int = 20201021
 TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
-BENCHMARK_COLUMNS = ('APS_III', 'APACHE_IV', 'SAPS_II', 'OASIS') # do not include in training. Only use for benchamrk validation.
+BENCHMARK_COLUMNS = (
+    "APS_III",
+    "APACHE_IV",
+    "SAPS_II",
+    "OASIS",
+)  # do not include in training. Only use for benchamrk validation.
 
 CALIBRATION_SIZE: float = 0.2
 VALIDATION_SIZE: float = 0.2
@@ -132,6 +137,22 @@ def is_interactive_session() -> bool:
     except ImportError:  # pragma: no cover - optional dependency
         return False
     return get_ipython() is not None
+
+
+def _save_figure_multiformat(
+    figure: "plt.Figure",
+    base_path: Path,
+    *,
+    dpi: int = 300,
+    use_tight_layout: bool = False,
+) -> None:
+    """Persist ``figure`` to PNG, SVG, PDF, and JPG variants."""
+
+    save_kwargs: Dict[str, object] = {"dpi": dpi}
+    if use_tight_layout:
+        save_kwargs["bbox_inches"] = "tight"
+    for suffix in (".png", ".svg", ".pdf", ".jpg"):
+        figure.savefig(base_path.with_suffix(suffix), **save_kwargs)
 
 
 def render_dataframe(
@@ -670,9 +691,9 @@ def build_tstr_training_sets(
         augmented_labels.append(pd.Series(class_labels, name=real_label_series.name))
 
     raw_augmented = pd.concat(augmented_features_raw, ignore_index=True)
-    augmented_labels_series = (
-        pd.concat(augmented_labels, ignore_index=True).reset_index(drop=True)
-    )
+    augmented_labels_series = pd.concat(
+        augmented_labels, ignore_index=True
+    ).reset_index(drop=True)
     datasets["TSTR synthesis-augment"] = (
         to_numeric_frame(raw_augmented).reset_index(drop=True),
         augmented_labels_series,
@@ -713,9 +734,7 @@ def build_tstr_training_sets(
         conditional=True,
         labels=np.asarray(five_x_balanced),
     )
-    five_x_balance_labels = pd.Series(
-        five_x_balanced, name=real_label_series.name
-    )
+    five_x_balance_labels = pd.Series(five_x_balanced, name=real_label_series.name)
     datasets["TSTR synthesis-5x balance"] = (
         to_numeric_frame(five_x_balance_features.copy()).reset_index(drop=True),
         five_x_balance_labels.copy(),
@@ -797,9 +816,15 @@ def evaluate_transfer_baselines(
             class_names = [str(value) for value in classes]
             positive_label = class_names[-1] if len(class_names) == 2 else None
 
-            for evaluation_name, (eval_X_numeric, eval_y_numeric) in evaluation_sets.items():
+            for evaluation_name, (
+                eval_X_numeric,
+                eval_y_numeric,
+            ) in evaluation_sets.items():
                 if use_raw_features:
-                    if raw_evaluation_sets is None or evaluation_name not in raw_evaluation_sets:
+                    if (
+                        raw_evaluation_sets is None
+                        or evaluation_name not in raw_evaluation_sets
+                    ):
                         raise ValueError(
                             "Raw evaluation data missing for estimator requiring schema-aligned"
                             f" features on evaluation set '{evaluation_name}'."
@@ -1007,7 +1032,7 @@ def plot_calibration_curves(
     ax.set_title(f"Calibration: {target_name}")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
+    _save_figure_multiformat(fig, output_path.with_suffix(""))
     plt.close(fig)
 
 
@@ -1071,7 +1096,7 @@ def plot_latent_space(
 
     fig.suptitle(f"Latent space projection: {target_name}")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    fig.savefig(output_path, dpi=300)
+    _save_figure_multiformat(fig, output_path.with_suffix(""))
     plt.close(fig)
 
 
@@ -1132,7 +1157,7 @@ def plot_benchmark_curves(
 
     dataset_slug = dataset_name.lower().replace(" ", "_")
     figure_path = output_dir / f"benchmark_curves_{dataset_slug}_{target_label}.png"
-    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+    _save_figure_multiformat(fig, figure_path.with_suffix(""), use_tight_layout=True)
     plt.close(fig)
     print(f"Saved benchmark curves for {dataset_name} to {figure_path}")
     return figure_path
@@ -1202,7 +1227,7 @@ def plot_transfer_metric_bars(
         output_dir
         / f"tstr_trtr_{dataset_slug}_{metric.lower()}_{slugify_identifier(target_label)}.png"
     )
-    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+    _save_figure_multiformat(fig, figure_path.with_suffix(""), use_tight_layout=True)
     plt.close(fig)
     print(f"Saved {metric.upper()} bars for {evaluation_dataset} to {figure_path}")
     return figure_path
@@ -1302,4 +1327,3 @@ def build_suave_model(
         random_state=random_state,
         behaviour="supervised",
     )
-
