@@ -53,7 +53,12 @@ from cls_eval import evaluate_predictions  # noqa: E402
 
 RANDOM_STATE: int = 20201021
 TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
-BENCHMARK_COLUMNS = ('APS_III', 'APACHE_IV', 'SAPS_II', 'OASIS') # do not include in training. Only use for benchamrk validation.
+BENCHMARK_COLUMNS = (
+    "APS_III",
+    "APACHE_IV",
+    "SAPS_II",
+    "OASIS",
+)  # do not include in training. Only use for benchamrk validation.
 
 CALIBRATION_SIZE: float = 0.2
 VALIDATION_SIZE: float = 0.2
@@ -106,6 +111,7 @@ __all__ = [
     "make_baseline_model_factories",
     "mutual_information_feature",
     "plot_benchmark_curves",
+    "plot_distribution_shift_diagnostics",
     "plot_calibration_curves",
     "plot_latent_space",
     "plot_transfer_metric_bars",
@@ -191,6 +197,45 @@ def slugify_identifier(value: str) -> str:
     while "__" in slug:
         slug = slug.replace("__", "_")
     return slug.strip("_")
+
+
+def _save_figure_with_formats(
+    figure: "plt.Figure",
+    base_path: Path,
+    *,
+    formats: Sequence[str] = ("png", "svg", "pdf", "jpg"),
+    dpi: int = 300,
+) -> Dict[str, Path]:
+    """Persist ``figure`` to ``base_path`` across multiple file formats.
+
+    Parameters
+    ----------
+    figure:
+        Matplotlib figure instance to serialise.
+    base_path:
+        Destination path without an extension. Parent directories are created
+        when required.
+    formats:
+        Iterable of file suffixes (without leading dots) that should be
+        generated. The default includes ``png``, ``svg``, ``pdf`` and ``jpg``
+        to provide both raster and vector representations.
+    dpi:
+        Rendering DPI applied to raster exports.
+
+    Returns
+    -------
+    Dict[str, Path]
+        Mapping from format suffix to the saved :class:`pathlib.Path`.
+    """
+
+    base_path = base_path.with_suffix("")
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    saved_paths: Dict[str, Path] = {}
+    for suffix in formats:
+        target = base_path.with_suffix(f".{suffix}")
+        figure.savefig(target, dpi=dpi, bbox_inches="tight", format=suffix)
+        saved_paths[suffix] = target
+    return saved_paths
 
 
 def load_or_create_iteratively_imputed_features(
@@ -670,9 +715,9 @@ def build_tstr_training_sets(
         augmented_labels.append(pd.Series(class_labels, name=real_label_series.name))
 
     raw_augmented = pd.concat(augmented_features_raw, ignore_index=True)
-    augmented_labels_series = (
-        pd.concat(augmented_labels, ignore_index=True).reset_index(drop=True)
-    )
+    augmented_labels_series = pd.concat(
+        augmented_labels, ignore_index=True
+    ).reset_index(drop=True)
     datasets["TSTR synthesis-augment"] = (
         to_numeric_frame(raw_augmented).reset_index(drop=True),
         augmented_labels_series,
@@ -713,9 +758,7 @@ def build_tstr_training_sets(
         conditional=True,
         labels=np.asarray(five_x_balanced),
     )
-    five_x_balance_labels = pd.Series(
-        five_x_balanced, name=real_label_series.name
-    )
+    five_x_balance_labels = pd.Series(five_x_balanced, name=real_label_series.name)
     datasets["TSTR synthesis-5x balance"] = (
         to_numeric_frame(five_x_balance_features.copy()).reset_index(drop=True),
         five_x_balance_labels.copy(),
@@ -797,9 +840,15 @@ def evaluate_transfer_baselines(
             class_names = [str(value) for value in classes]
             positive_label = class_names[-1] if len(class_names) == 2 else None
 
-            for evaluation_name, (eval_X_numeric, eval_y_numeric) in evaluation_sets.items():
+            for evaluation_name, (
+                eval_X_numeric,
+                eval_y_numeric,
+            ) in evaluation_sets.items():
                 if use_raw_features:
-                    if raw_evaluation_sets is None or evaluation_name not in raw_evaluation_sets:
+                    if (
+                        raw_evaluation_sets is None
+                        or evaluation_name not in raw_evaluation_sets
+                    ):
                         raise ValueError(
                             "Raw evaluation data missing for estimator requiring schema-aligned"
                             f" features on evaluation set '{evaluation_name}'."
@@ -979,7 +1028,7 @@ def plot_calibration_curves(
     target_name: str,
     output_path: Path,
     n_bins: int = 10,
-) -> None:
+) -> Optional[Path]:
     """Generate calibration curves with Brier scores annotated in the legend."""
 
     fig, ax = plt.subplots(figsize=(6, 5))
@@ -987,6 +1036,7 @@ def plot_calibration_curves(
         [0, 1], [0, 1], linestyle="--", color="tab:gray", label="Perfect calibration"
     )
 
+    plotted = False
     for dataset_name, probs in probability_map.items():
         labels = label_map[dataset_name]
         pos_probs = extract_positive_probabilities(probs)
@@ -1001,14 +1051,20 @@ def plot_calibration_curves(
             marker="o",
             label=f"{dataset_name} (Brier={brier:.3f})",
         )
+        plotted = True
 
     ax.set_xlabel("Predicted probability")
     ax.set_ylabel("Observed frequency")
     ax.set_title(f"Calibration: {target_name}")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
+    if not plotted:
+        plt.close(fig)
+        return None
+
+    _save_figure_with_formats(fig, output_path)
     plt.close(fig)
+    return output_path.with_suffix("")
 
 
 def plot_latent_space(
@@ -1018,7 +1074,7 @@ def plot_latent_space(
     *,
     target_name: str,
     output_path: Path,
-) -> None:
+) -> Optional[Path]:
     """Project latent representations with PCA and create scatter plots."""
 
     latent_blocks: List[np.ndarray] = []
@@ -1033,7 +1089,7 @@ def plot_latent_space(
         dataset_keys.append(name)
 
     if not latent_blocks:
-        return
+        return None
 
     concatenated = np.vstack(latent_blocks)
     pca = PCA(n_components=2)
@@ -1071,8 +1127,9 @@ def plot_latent_space(
 
     fig.suptitle(f"Latent space projection: {target_name}")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    fig.savefig(output_path, dpi=300)
+    _save_figure_with_formats(fig, output_path)
     plt.close(fig)
+    return output_path.with_suffix("")
 
 
 def plot_benchmark_curves(
@@ -1131,11 +1188,16 @@ def plot_benchmark_curves(
     fig.tight_layout()
 
     dataset_slug = dataset_name.lower().replace(" ", "_")
-    figure_path = output_dir / f"benchmark_curves_{dataset_slug}_{target_label}.png"
-    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+    figure_base = output_dir / f"benchmark_curves_{dataset_slug}_{target_label}"
+    _save_figure_with_formats(fig, figure_base)
     plt.close(fig)
-    print(f"Saved benchmark curves for {dataset_name} to {figure_path}")
-    return figure_path
+    print(
+        "Saved benchmark curves for {dataset} to {path}.[png/svg/pdf/jpg]".format(
+            dataset=dataset_name,
+            path=figure_base,
+        )
+    )
+    return figure_base.with_suffix("")
 
 
 def plot_transfer_metric_bars(
@@ -1198,14 +1260,264 @@ def plot_transfer_metric_bars(
     fig.tight_layout()
 
     dataset_slug = slugify_identifier(evaluation_dataset)
-    figure_path = (
+    figure_base = (
         output_dir
-        / f"tstr_trtr_{dataset_slug}_{metric.lower()}_{slugify_identifier(target_label)}.png"
+        / f"tstr_trtr_{dataset_slug}_{metric.lower()}_{slugify_identifier(target_label)}"
     )
-    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+    _save_figure_with_formats(fig, figure_base)
     plt.close(fig)
-    print(f"Saved {metric.upper()} bars for {evaluation_dataset} to {figure_path}")
-    return figure_path
+    print(
+        "Saved {metric} bars for {dataset} to {path}.[png/svg/pdf/jpg]".format(
+            metric=metric.upper(),
+            dataset=evaluation_dataset,
+            path=figure_base,
+        )
+    )
+    return figure_base.with_suffix("")
+
+
+def _format_metric_label(column: str) -> str:
+    """Return a human-readable label for ``column`` names."""
+
+    tokens = column.replace("_", " ").split()
+    formatted: List[str] = []
+    for token in tokens:
+        lower = token.lower()
+        if lower in {"mmd", "auc"}:
+            formatted.append(lower.upper())
+        elif lower == "xgboost":
+            formatted.append("XGBoost")
+        elif lower == "logistic":
+            formatted.append("Logistic")
+        elif lower == "global":
+            formatted.append("Global")
+        elif lower == "ci":
+            formatted.append("CI")
+        elif lower == "energy":
+            formatted.append("Energy")
+        elif lower == "distance":
+            formatted.append("Distance")
+        else:
+            formatted.append(token.capitalize())
+    return " ".join(formatted).strip()
+
+
+def plot_distribution_shift_diagnostics(
+    overall_df: pd.DataFrame,
+    per_feature_df: pd.DataFrame,
+    *,
+    output_dir: Path,
+    target_label: str,
+    top_n: int = 10,
+) -> Dict[str, Path]:
+    """Create companion figures for distribution shift reporting.
+
+    Parameters
+    ----------
+    overall_df:
+        Dataframe containing a single row with global distribution shift
+        metrics such as MMD, energy distance, permutation ``p`` values, and
+        classifier two-sample test (C2ST) scores.
+    per_feature_df:
+        Table of per-feature diagnostics that includes the columns ``feature``,
+        ``mutual_information`` and, when available, ``mmd`` and
+        ``energy_distance``.
+    output_dir:
+        Directory used to persist the generated figures.
+    target_label:
+        Name of the outcome under analysis; it is incorporated into the output
+        filenames.
+    top_n:
+        Number of features ranked by mutual information to visualise.
+
+    Returns
+    -------
+    Dict[str, Path]
+        Mapping from figure identifier to the saved path stem (without file
+        extension). Each stem corresponds to ``.png``, ``.svg``, ``.pdf`` and
+        ``.jpg`` files on disk.
+
+    Example
+    -------
+    >>> overall = pd.DataFrame(
+    ...     [{"global_mmd": 0.02, "global_energy_distance": 0.15, "global_mmd_p_value": 0.4}]
+    ... )
+    >>> per_feature = pd.DataFrame(
+    ...     {
+    ...         "feature": ["age", "sofa"],
+    ...         "mutual_information": [0.05, 0.02],
+    ...         "mmd": [0.01, 0.02],
+    ...         "energy_distance": [0.10, 0.20],
+    ...     }
+    ... )
+    >>> from pathlib import Path
+    >>> outputs = plot_distribution_shift_diagnostics(
+    ...     overall,
+    ...     per_feature,
+    ...     output_dir=Path("./out"),
+    ...     target_label="demo",
+    ...     top_n=2,
+    ... )
+    >>> sorted(outputs.keys())
+    ['global_overview', 'top_features']
+    """
+
+    figures: Dict[str, Path] = {}
+    if overall_df.empty:
+        return figures
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    overall_row = overall_df.iloc[0]
+
+    metric_labels: List[str] = []
+    metric_values: List[float] = []
+    ci_offsets: List[Tuple[float, float]] = []
+    for column, value in overall_row.items():
+        if (
+            column.endswith("_p_value")
+            or column.endswith("_ci_low")
+            or column.endswith("_ci_high")
+        ):
+            continue
+        if column in {"target", "dataset", "Target", "Dataset"}:
+            continue
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        metric_labels.append(_format_metric_label(column))
+        metric_values.append(numeric_value)
+        low = overall_row.get(f"{column}_ci_low")
+        high = overall_row.get(f"{column}_ci_high")
+        if low is not None and high is not None:
+            ci_offsets.append((float(numeric_value - low), float(high - numeric_value)))
+        else:
+            ci_offsets.append((float("nan"), float("nan")))
+
+    pvalue_labels: List[str] = []
+    pvalue_values: List[float] = []
+    for column, value in overall_row.items():
+        if not column.endswith("_p_value"):
+            continue
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        pvalue_labels.append(_format_metric_label(column.replace("_p_value", "")))
+        pvalue_values.append(numeric_value)
+
+    if metric_labels:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        metric_ax, pvalue_ax = axes
+        positions = np.arange(len(metric_labels))
+        metric_ax.bar(positions, metric_values, color="tab:blue", alpha=0.85)
+        for idx, (offset_low, offset_high) in enumerate(ci_offsets):
+            if not np.isfinite(offset_low) or not np.isfinite(offset_high):
+                continue
+            metric_ax.errorbar(
+                positions[idx],
+                metric_values[idx],
+                yerr=[[offset_low], [offset_high]],
+                fmt="none",
+                ecolor="black",
+                elinewidth=1.2,
+                capsize=4,
+            )
+        metric_ax.set_xticks(positions)
+        metric_ax.set_xticklabels(metric_labels, rotation=20, ha="right")
+        metric_ax.set_ylabel("Score")
+        metric_ax.set_title("Global shift metrics")
+
+        if pvalue_labels:
+            pv_positions = np.arange(len(pvalue_labels))
+            pvalue_ax.bar(pv_positions, pvalue_values, color="tab:orange", alpha=0.85)
+            pvalue_ax.axhline(0.05, color="tab:red", linestyle="--", linewidth=1.0)
+            pvalue_ax.set_xticks(pv_positions)
+            pvalue_ax.set_xticklabels(pvalue_labels, rotation=20, ha="right")
+            pvalue_ax.set_yscale("log")
+            pvalue_ax.set_ylabel("p-value (log scale)")
+            pvalue_ax.set_title("Permutation tests")
+        else:
+            pvalue_ax.axis("off")
+
+        fig.suptitle(f"Distribution shift overview – {target_label}")
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        global_base = (
+            output_dir / f"distribution_shift_global_{slugify_identifier(target_label)}"
+        )
+        _save_figure_with_formats(fig, global_base)
+        plt.close(fig)
+        figures["global_overview"] = global_base.with_suffix("")
+
+    if per_feature_df.empty or "mutual_information" not in per_feature_df.columns:
+        return figures
+
+    top_features = (
+        per_feature_df.sort_values("mutual_information", ascending=False)
+        .head(top_n)
+        .copy()
+    )
+    if top_features.empty:
+        return figures
+
+    features = list(top_features["feature"].astype(str))
+    scores = top_features["mutual_information"].astype(float).to_numpy()
+    y_positions = np.arange(len(features))
+
+    fig, ax = plt.subplots(figsize=(12, max(4.0, 0.5 * len(features))))
+    ax.barh(
+        y_positions, scores, color="tab:blue", alpha=0.85, label="Mutual information"
+    )
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(features)
+    ax.invert_yaxis()
+    ax.set_xlabel("Mutual information")
+    ax.set_title(f"Top {len(features)} shift features – {target_label}")
+
+    has_secondary = False
+    secondary_ax = ax.twiny()
+    if "mmd" in top_features.columns:
+        secondary_ax.plot(
+            top_features["mmd"].to_numpy(),
+            y_positions,
+            marker="o",
+            color="tab:orange",
+            linestyle="",
+            label="MMD",
+        )
+        has_secondary = True
+    if "energy_distance" in top_features.columns:
+        secondary_ax.plot(
+            top_features["energy_distance"].to_numpy(),
+            y_positions,
+            marker="s",
+            color="tab:green",
+            linestyle="",
+            label="Energy distance",
+        )
+        has_secondary = True
+
+    if has_secondary:
+        secondary_ax.set_xlabel("MMD / Energy distance")
+        handles, labels = ax.get_legend_handles_labels()
+        sec_handles, sec_labels = secondary_ax.get_legend_handles_labels()
+        combined_handles = handles + sec_handles
+        combined_labels = labels + sec_labels
+        ax.legend(combined_handles, combined_labels, loc="lower right")
+    else:
+        secondary_ax.axis("off")
+        ax.legend(loc="lower right")
+
+    fig.tight_layout()
+    feature_base = (
+        output_dir
+        / f"distribution_shift_top_features_{slugify_identifier(target_label)}"
+    )
+    _save_figure_with_formats(fig, feature_base)
+    plt.close(fig)
+    figures["top_features"] = feature_base.with_suffix("")
+
+    return figures
 
 
 def build_prediction_dataframe(
@@ -1302,4 +1614,3 @@ def build_suave_model(
         random_state=random_state,
         behaviour="supervised",
     )
-
