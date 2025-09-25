@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 from typing import (
+    Callable,
     Dict,
     Iterable,
     List,
@@ -36,7 +39,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+EXAMPLES_DIR = Path(__file__).resolve().parent
+if str(EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(EXAMPLES_DIR))
+
 from suave import Schema, SchemaInferencer, SUAVE  # noqa: E402
+from cls_eval import evaluate_predictions  # noqa: E402
 
 
 RANDOM_STATE: int = 20201021
@@ -87,10 +95,14 @@ __all__ = [
     "load_dataset",
     "load_or_create_iteratively_imputed_features",
     "make_logistic_pipeline",
+    "make_random_forest_pipeline",
+    "make_xgboost_pipeline",
+    "make_baseline_model_factories",
     "mutual_information_feature",
     "plot_benchmark_curves",
     "plot_calibration_curves",
     "plot_latent_space",
+    "plot_transfer_metric_bars",
     "prepare_features",
     "render_dataframe",
     "rbf_mmd",
@@ -99,6 +111,8 @@ __all__ = [
     "slugify_identifier",
     "split_train_validation_calibration",
     "to_numeric_frame",
+    "build_tstr_training_sets",
+    "evaluate_transfer_baselines",
     "build_suave_model",
     "resolve_classification_loss_weight",
 ]
@@ -238,7 +252,7 @@ def load_or_create_iteratively_imputed_features(
     return imputed_features, dataset_paths, False
 
 
-def make_logistic_pipeline() -> Pipeline:
+def make_logistic_pipeline(random_state: Optional[int] = None) -> Pipeline:
     """Factory for the baseline classifier used in TSTR/TRTR evaluations."""
 
     from sklearn.experimental import enable_iterative_imputer  # noqa: F401
@@ -250,7 +264,10 @@ def make_logistic_pipeline() -> Pipeline:
         [
             ("imputer", IterativeImputer()),
             ("scaler", StandardScaler()),
-            ("classifier", LogisticRegression(max_iter=200)),
+            (
+                "classifier",
+                LogisticRegression(max_iter=200, random_state=random_state),
+            ),
         ]
     )
 
@@ -259,6 +276,77 @@ def load_dataset(path: Path) -> pd.DataFrame:
     """Load a TSV file into a :class:`pandas.DataFrame`."""
 
     return pd.read_csv(path, sep="\t")
+
+
+def make_random_forest_pipeline(random_state: Optional[int] = None) -> Pipeline:
+    """Return a random forest pipeline with iterative imputation."""
+
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+    from sklearn.impute import IterativeImputer
+
+    return Pipeline(
+        [
+            ("imputer", IterativeImputer()),
+            (
+                "classifier",
+                RandomForestClassifier(
+                    n_estimators=400,
+                    max_depth=None,
+                    random_state=random_state,
+                    n_jobs=-1,
+                ),
+            ),
+        ]
+    )
+
+
+def make_xgboost_pipeline(random_state: Optional[int] = None) -> Pipeline:
+    """Return an XGBoost pipeline with iterative imputation."""
+
+    from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+    from sklearn.impute import IterativeImputer
+
+    try:
+        from xgboost import XGBClassifier
+    except ImportError as error:  # pragma: no cover - optional dependency
+        raise ImportError(
+            "xgboost is required for the mortality TSTR evaluation."
+        ) from error
+
+    return Pipeline(
+        [
+            ("imputer", IterativeImputer()),
+            (
+                "classifier",
+                XGBClassifier(
+                    n_estimators=400,
+                    learning_rate=0.05,
+                    max_depth=4,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    objective="binary:logistic",
+                    eval_metric="auc",
+                    reg_lambda=1.0,
+                    random_state=random_state,
+                    tree_method="hist",
+                    n_jobs=-1,
+                ),
+            ),
+        ]
+    )
+
+
+def make_baseline_model_factories(
+    random_state: int,
+) -> Dict[str, Callable[[], Pipeline]]:
+    """Return model factories for the supervised transfer comparison."""
+
+    return {
+        "Logistic regression": lambda: make_logistic_pipeline(random_state),
+        "Random forest": lambda: make_random_forest_pipeline(random_state),
+        "XGBoost": lambda: make_xgboost_pipeline(random_state),
+    }
 
 
 def define_schema(
@@ -373,6 +461,274 @@ def to_numeric_frame(df: pd.DataFrame) -> pd.DataFrame:
     for column in numeric.columns:
         numeric[column] = pd.to_numeric(numeric[column], errors="coerce")
     return numeric
+
+
+def _ensure_feature_frame(
+    samples: pd.DataFrame | np.ndarray,
+    feature_columns: Sequence[str],
+) -> pd.DataFrame:
+    """Return ``samples`` restricted to ``feature_columns`` as a dataframe."""
+
+    if isinstance(samples, pd.DataFrame):
+        missing = [
+            column for column in feature_columns if column not in samples.columns
+        ]
+        if missing:
+            raise KeyError(
+                "Sampled dataframe is missing expected feature columns: " f"{missing}"
+            )
+        frame = samples.loc[:, list(feature_columns)].copy()
+    else:
+        frame = pd.DataFrame(samples, columns=list(feature_columns))
+    return frame
+
+
+def _generate_balanced_labels(
+    labels: Sequence[object],
+    total_samples: int,
+    *,
+    random_state: int,
+) -> np.ndarray:
+    """Generate a balanced label vector using ``labels`` as candidates."""
+
+    unique = np.unique(np.asarray(labels))
+    if unique.size == 0:
+        raise ValueError("Cannot balance labels when no classes are present")
+
+    base = total_samples // unique.size
+    remainder = total_samples % unique.size
+    counts = {value: base for value in unique}
+
+    rng = np.random.default_rng(random_state)
+    if remainder > 0:
+        extras = rng.choice(unique, size=remainder, replace=False)
+        for value in extras:
+            counts[value] += 1
+
+    balanced = np.concatenate([np.full(counts[value], value) for value in unique])
+    shuffle_rng = np.random.default_rng(random_state + 1)
+    shuffle_rng.shuffle(balanced)
+    return balanced
+
+
+def build_tstr_training_sets(
+    model: SUAVE,
+    feature_columns: Sequence[str],
+    real_features: pd.DataFrame,
+    real_labels: pd.Series,
+    *,
+    random_state: int,
+) -> Dict[str, Tuple[pd.DataFrame, pd.Series]]:
+    """Construct real and synthetic training sets for TSTR/TRTR evaluation."""
+
+    feature_columns = list(feature_columns)
+    real_feature_frame = to_numeric_frame(real_features.loc[:, feature_columns])
+    real_label_series = pd.Series(real_labels).reset_index(drop=True)
+    real_label_series.name = real_labels.name
+
+    datasets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+        "TRTR (real)": (
+            real_feature_frame.reset_index(drop=True),
+            real_label_series.copy(),
+        )
+    }
+
+    n_train = len(real_label_series)
+    label_array = real_label_series.to_numpy()
+
+    def sample_features(
+        n_samples: int,
+        *,
+        conditional: bool,
+        labels: Optional[np.ndarray] = None,
+    ) -> pd.DataFrame:
+        sampled = model.sample(
+            n_samples,
+            conditional=conditional,
+            y=labels if conditional else None,
+        )
+        frame = _ensure_feature_frame(sampled, feature_columns)
+        return to_numeric_frame(frame).reset_index(drop=True)
+
+    # Unconditional sampling with label resampling.
+    unconditional_labels = np.random.default_rng(random_state).choice(
+        label_array,
+        size=n_train,
+        replace=True,
+    )
+    datasets["TSTR synthesis"] = (
+        sample_features(n_train, conditional=False),
+        pd.Series(unconditional_labels, name=real_label_series.name),
+    )
+
+    balanced_labels = _generate_balanced_labels(
+        label_array,
+        n_train,
+        random_state=random_state + 10,
+    )
+    datasets["TSTR synthesis-balance"] = (
+        sample_features(
+            len(balanced_labels),
+            conditional=True,
+            labels=np.asarray(balanced_labels),
+        ),
+        pd.Series(balanced_labels, name=real_label_series.name),
+    )
+
+    label_counts = real_label_series.value_counts().sort_index()
+    target_count = int(label_counts.max()) if not label_counts.empty else 0
+    augmented_features = [real_feature_frame.reset_index(drop=True)]
+    augmented_labels = [real_label_series.copy()]
+    for value, count in label_counts.items():
+        deficit = target_count - int(count)
+        if deficit <= 0:
+            continue
+        class_labels = np.full(deficit, value)
+        synthetic_block = sample_features(
+            deficit,
+            conditional=True,
+            labels=class_labels,
+        )
+        augmented_features.append(synthetic_block)
+        augmented_labels.append(pd.Series(class_labels, name=real_label_series.name))
+
+    datasets["TSTR synthesis-augment"] = (
+        to_numeric_frame(pd.concat(augmented_features, ignore_index=True)),
+        pd.concat(augmented_labels, ignore_index=True).reset_index(drop=True),
+    )
+
+    five_x = n_train * 5
+    five_x_labels = np.random.default_rng(random_state + 20).choice(
+        label_array,
+        size=five_x,
+        replace=True,
+    )
+    datasets["TSTR synthesis-5x"] = (
+        sample_features(five_x, conditional=False),
+        pd.Series(five_x_labels, name=real_label_series.name),
+    )
+
+    five_x_balanced = _generate_balanced_labels(
+        label_array,
+        five_x,
+        random_state=random_state + 30,
+    )
+    datasets["TSTR synthesis-5x balance"] = (
+        sample_features(
+            len(five_x_balanced),
+            conditional=True,
+            labels=np.asarray(five_x_balanced),
+        ),
+        pd.Series(five_x_balanced, name=real_label_series.name),
+    )
+
+    return datasets
+
+
+def evaluate_transfer_baselines(
+    training_sets: Mapping[str, Tuple[pd.DataFrame, pd.Series]],
+    evaluation_sets: Mapping[str, Tuple[pd.DataFrame, pd.Series]],
+    *,
+    model_factories: Mapping[str, Callable[[], Pipeline]],
+    bootstrap_n: int,
+    random_state: int,
+) -> Tuple[
+    pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]]
+]:
+    """Train classical models on each training set and evaluate with bootstraps."""
+
+    summary_rows: List[Dict[str, object]] = []
+    long_rows: List[Dict[str, object]] = []
+    nested_results: Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]] = {}
+
+    for training_name, (train_X, train_y) in training_sets.items():
+        nested_results.setdefault(training_name, {})
+        train_columns = list(train_X.columns)
+        for model_name, factory in model_factories.items():
+            estimator = factory()
+            estimator.fit(train_X, train_y)
+            nested_results[training_name].setdefault(model_name, {})
+            classes = getattr(estimator, "classes_", None)
+            if classes is None:
+                classes = np.unique(np.asarray(train_y))
+            class_names = [str(value) for value in classes]
+            positive_label = class_names[-1] if len(class_names) == 2 else None
+
+            for evaluation_name, (eval_X, eval_y) in evaluation_sets.items():
+                if eval_X.empty or len(eval_y) == 0:
+                    continue
+                aligned_eval = eval_X.loc[:, train_columns]
+                probabilities = estimator.predict_proba(aligned_eval)
+                predictions = estimator.predict(aligned_eval)
+                prediction_df = build_prediction_dataframe(
+                    probabilities,
+                    eval_y,
+                    predictions,
+                    class_names,
+                )
+
+                results = evaluate_predictions(
+                    prediction_df,
+                    label_col="label",
+                    pred_col="y_pred",
+                    positive_label=positive_label,
+                    bootstrap_n=bootstrap_n,
+                    random_state=random_state,
+                )
+                nested_results[training_name][model_name][evaluation_name] = results
+
+                overall_df = results.get("overall", pd.DataFrame())
+                if overall_df.empty:
+                    continue
+                row: Dict[str, object] = {
+                    "training_dataset": training_name,
+                    "evaluation_dataset": evaluation_name,
+                    "model": model_name,
+                }
+                for metric in ("accuracy", "roc_auc"):
+                    if metric in overall_df.columns:
+                        value = overall_df.at[0, metric]
+                        row[metric] = float(value)
+                        low_col = f"{metric}_ci_low"
+                        high_col = f"{metric}_ci_high"
+                        row[low_col] = (
+                            float(overall_df.at[0, low_col])
+                            if low_col in overall_df.columns
+                            else float("nan")
+                        )
+                        row[high_col] = (
+                            float(overall_df.at[0, high_col])
+                            if high_col in overall_df.columns
+                            else float("nan")
+                        )
+                        long_rows.append(
+                            {
+                                "training_dataset": training_name,
+                                "evaluation_dataset": evaluation_name,
+                                "model": model_name,
+                                "metric": metric,
+                                "estimate": float(value),
+                                "ci_low": (
+                                    float(overall_df.at[0, low_col])
+                                    if low_col in overall_df.columns
+                                    else float("nan")
+                                ),
+                                "ci_high": (
+                                    float(overall_df.at[0, high_col])
+                                    if high_col in overall_df.columns
+                                    else float("nan")
+                                ),
+                            }
+                        )
+                    else:
+                        row[metric] = float("nan")
+                        row[f"{metric}_ci_low"] = float("nan")
+                        row[f"{metric}_ci_high"] = float("nan")
+                summary_rows.append(row)
+
+    summary_df = pd.DataFrame(summary_rows)
+    long_df = pd.DataFrame(long_rows)
+    return summary_df, long_df, nested_results
 
 
 def kolmogorov_smirnov_statistic(real: np.ndarray, synthetic: np.ndarray) -> float:
@@ -689,6 +1045,76 @@ def plot_benchmark_curves(
     fig.savefig(figure_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved benchmark curves for {dataset_name} to {figure_path}")
+    return figure_path
+
+
+def plot_transfer_metric_bars(
+    metric_df: pd.DataFrame,
+    *,
+    metric: str,
+    evaluation_dataset: str,
+    training_order: Sequence[str],
+    model_order: Sequence[str],
+    output_dir: Path,
+    target_label: str,
+) -> Optional[Path]:
+    """Plot grouped bar charts with error bars for TSTR/TRTR comparisons."""
+
+    subset = metric_df[
+        (metric_df["metric"] == metric)
+        & (metric_df["evaluation_dataset"] == evaluation_dataset)
+    ]
+    if subset.empty:
+        print(
+            f"Skipping {metric} bars for {evaluation_dataset} because no data was provided."
+        )
+        return None
+
+    training_order = list(training_order)
+    model_order = list(model_order)
+    x_positions = np.arange(len(training_order), dtype=float)
+    width = 0.8 / max(len(model_order), 1)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    for idx, model_name in enumerate(model_order):
+        model_subset = (
+            subset[subset["model"] == model_name]
+            .set_index("training_dataset")
+            .reindex(training_order)
+        )
+        estimates = model_subset["estimate"].to_numpy()
+        lower = estimates - model_subset["ci_low"].to_numpy()
+        upper = model_subset["ci_high"].to_numpy() - estimates
+        lower = np.nan_to_num(lower, nan=0.0, posinf=0.0, neginf=0.0)
+        upper = np.nan_to_num(upper, nan=0.0, posinf=0.0, neginf=0.0)
+        offsets = (idx - (len(model_order) - 1) / 2) * width
+        ax.bar(
+            x_positions + offsets,
+            estimates,
+            width=width,
+            label=model_name,
+            yerr=np.vstack([lower, upper]),
+            capsize=4,
+            alpha=0.9,
+        )
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(training_order, rotation=20, ha="right")
+    ax.set_ylabel(metric.upper())
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title(f"{metric.upper()} – {evaluation_dataset}")
+    ax.legend()
+    fig.tight_layout()
+
+    dataset_slug = slugify_identifier(evaluation_dataset)
+    figure_path = (
+        output_dir
+        / f"tstr_trtr_{dataset_slug}_{metric.lower()}_{slugify_identifier(target_label)}.png"
+    )
+    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {metric.upper()} bars for {evaluation_dataset} to {figure_path}")
     return figure_path
 
 

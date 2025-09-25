@@ -41,19 +41,22 @@ from mimic_mortality_utils import (  # noqa: E402
     VALIDATION_SIZE,
     build_prediction_dataframe,
     build_suave_model,
+    build_tstr_training_sets,
     compute_binary_metrics,
     dataframe_to_markdown,
     define_schema,
+    evaluate_transfer_baselines,
     extract_positive_probabilities,
     fit_isotonic_calibrator,
     kolmogorov_smirnov_statistic,
     load_dataset,
     load_or_create_iteratively_imputed_features,
-    make_logistic_pipeline,
+    make_baseline_model_factories,
     mutual_information_feature,
     plot_benchmark_curves,
     plot_calibration_curves,
     plot_latent_space,
+    plot_transfer_metric_bars,
     prepare_features,
     render_dataframe,
     rbf_mmd,
@@ -63,11 +66,7 @@ from mimic_mortality_utils import (  # noqa: E402
 from cls_eval import evaluate_predictions, write_results_to_excel_unique  # noqa: E402
 
 from suave import SUAVE  # noqa: E402
-from suave.evaluate import (  # noqa: E402
-    evaluate_tstr,
-    evaluate_trtr,
-    simple_membership_inference,
-)
+from suave.evaluate import simple_membership_inference  # noqa: E402
 
 
 # %% [markdown]
@@ -740,8 +739,11 @@ render_dataframe(
 
 # %%
 
-tstr_results: Optional[pd.DataFrame] = None
-tstr_path: Optional[Path] = None
+tstr_summary_df: Optional[pd.DataFrame] = None
+tstr_plot_df: Optional[pd.DataFrame] = None
+tstr_summary_path: Optional[Path] = None
+tstr_plot_path: Optional[Path] = None
+tstr_figure_paths: List[Path] = []
 distribution_df: Optional[pd.DataFrame] = None
 distribution_path: Optional[Path] = None
 distribution_top: Optional[pd.DataFrame] = None
@@ -753,42 +755,66 @@ if TARGET_LABEL != "in_hospital_mortality":
     )
 else:
     print("Generating synthetic data for TSTR/TRTR comparisons…")
-    numeric_train = to_numeric_frame(X_full)
-
-    rng = np.random.default_rng(RANDOM_STATE)
-    synthetic_labels = rng.choice(y_full, size=len(y_full), replace=True)
-
-    synthetic_features = model.sample(
-        len(synthetic_labels), conditional=True, y=synthetic_labels
+    training_sets = build_tstr_training_sets(
+        model,
+        FEATURE_COLUMNS,
+        X_full,
+        y_full,
+        random_state=RANDOM_STATE,
     )
-    numeric_synthetic = to_numeric_frame(synthetic_features[FEATURE_COLUMNS])
+    evaluation_sets_numeric: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+        "MIMIC test": (to_numeric_frame(X_test), y_test.reset_index(drop=True)),
+    }
+    if external_features is not None and external_labels is not None:
+        evaluation_sets_numeric["eICU external"] = (
+            to_numeric_frame(external_features),
+            external_labels.reset_index(drop=True),
+        )
 
-    numeric_test = to_numeric_frame(X_test)
+    model_factories = make_baseline_model_factories(RANDOM_STATE)
+    (
+        tstr_summary_df,
+        tstr_plot_df,
+        _,
+    ) = evaluate_transfer_baselines(
+        training_sets,
+        evaluation_sets_numeric,
+        model_factories=model_factories,
+        bootstrap_n=1000,
+        random_state=RANDOM_STATE,
+    )
+    tstr_summary_path = OUTPUT_DIR / f"tstr_trtr_summary_{TARGET_LABEL}.csv"
+    tstr_plot_path = OUTPUT_DIR / f"tstr_trtr_plot_data_{TARGET_LABEL}.csv"
+    tstr_summary_df.to_csv(tstr_summary_path, index=False)
+    tstr_plot_df.to_csv(tstr_plot_path, index=False)
+    render_dataframe(
+        tstr_summary_df,
+        title="TSTR/TRTR supervised evaluation",
+        floatfmt=".3f",
+    )
 
-    tstr_metrics = evaluate_tstr(
-        (numeric_synthetic.to_numpy(), np.asarray(synthetic_labels)),
-        (numeric_test.to_numpy(), y_test.to_numpy()),
-        make_logistic_pipeline,
-    )
-    trtr_metrics = evaluate_trtr(
-        (numeric_train.to_numpy(), y_full.to_numpy()),
-        (numeric_test.to_numpy(), y_test.to_numpy()),
-        make_logistic_pipeline,
-    )
-    tstr_results = pd.DataFrame(
-        [
-            {"setting": "TSTR", **tstr_metrics},
-            {"setting": "TRTR", **trtr_metrics},
-        ]
-    )
-    tstr_path = OUTPUT_DIR / "tstr_trtr_comparison.csv"
-    tstr_results.to_csv(tstr_path, index=False)
-    render_dataframe(tstr_results, title="TSTR vs TRTR", floatfmt=".3f")
+    training_order = list(training_sets.keys())
+    model_order = list(model_factories.keys())
+    for evaluation_name in evaluation_sets_numeric.keys():
+        for metric_name in ("accuracy", "roc_auc"):
+            figure_path = plot_transfer_metric_bars(
+                tstr_plot_df,
+                metric=metric_name,
+                evaluation_dataset=evaluation_name,
+                training_order=training_order,
+                model_order=model_order,
+                output_dir=OUTPUT_DIR,
+                target_label=TARGET_LABEL,
+            )
+            if figure_path is not None:
+                tstr_figure_paths.append(figure_path)
 
+    real_features_numeric = training_sets["TRTR (real)"][0]
+    synthesis_features_numeric = training_sets["TSTR synthesis"][0]
     distribution_rows: List[Dict[str, object]] = []
     for column in FEATURE_COLUMNS:
-        real_values = numeric_train[column].to_numpy()
-        synthetic_values = numeric_synthetic[column].to_numpy()
+        real_values = real_features_numeric[column].to_numpy()
+        synthetic_values = synthesis_features_numeric[column].to_numpy()
         distribution_rows.append(
             {
                 "feature": column,
@@ -929,10 +955,18 @@ if bootstrap_warning_path is not None:
     )
 summary_lines.append("")
 
-if tstr_results is not None and tstr_path is not None:
-    summary_lines.append("## TSTR vs TRTR")
-    tstr_summary_df = tstr_results.rename(columns={"setting": "Setting"})
+if tstr_summary_df is not None and tstr_summary_path is not None:
+    summary_lines.append("## TSTR/TRTR supervised baselines")
     summary_lines.append(dataframe_to_markdown(tstr_summary_df, floatfmt=".3f"))
+    summary_lines.append("")
+    summary_lines.append("Artefacts:")
+    summary_lines.append(
+        f"- Summary table: {tstr_summary_path.relative_to(OUTPUT_DIR)}"
+    )
+    if tstr_plot_path is not None:
+        summary_lines.append(f"- Plot data: {tstr_plot_path.relative_to(OUTPUT_DIR)}")
+    for figure_path in tstr_figure_paths:
+        summary_lines.append(f"- Figure: {figure_path.relative_to(OUTPUT_DIR)}")
     summary_lines.append("")
 
 summary_lines.append("## Distribution shift and privacy")
