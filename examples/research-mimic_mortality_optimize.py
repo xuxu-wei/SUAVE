@@ -35,6 +35,7 @@ from mimic_mortality_utils import (  # noqa: E402
     HEAD_HIDDEN_DIMENSION_OPTIONS,
     RANDOM_STATE,
     TARGET_COLUMNS,
+    BENCHMARK_COLUMNS,
     VALIDATION_SIZE,
     Schema,
     build_suave_model,
@@ -100,7 +101,9 @@ if TARGET_LABEL not in TARGET_COLUMNS:
     )
 
 FEATURE_COLUMNS = [
-    column for column in train_df.columns if column not in TARGET_COLUMNS
+    column
+    for column in train_df.columns
+    if column not in TARGET_COLUMNS + BENCHMARK_COLUMNS
 ]
 schema = define_schema(train_df, FEATURE_COLUMNS, mode="interactive")
 schema.update(
