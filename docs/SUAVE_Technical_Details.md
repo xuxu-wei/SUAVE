@@ -52,10 +52,10 @@ SUAVE（Supervised, Unified, Augmented Variational Embedding）旨在为临床�
 ### 5.1 潜变量后验与先验
 编码器给出潜变量的均值 $\mu_\phi(x)$ 与对数方差 $\log \sigma_\phi^2(x)$，近似后验为：
 
-
 $$
 q_\phi(z \mid x) = \mathcal{N}\big(z;\, \mu_\phi(x), \operatorname{diag}(\sigma_\phi^2(x))\big).
 $$
+
 若使用混合先验，则：
 
 $$
@@ -68,11 +68,13 @@ SUAVE 的无监督训练目标采用掩码感知的 ELBO：
 $$
 \mathcal{L}_{\text{ELBO}}(x) = \mathbb{E}_{q_\phi(z \mid x)}\big[\log p_\theta(x_{\text{obs}} \mid z)\big] - \beta \, D_{\mathrm{KL}}\big(q_\phi(z \mid x) \parallel p(z)\big),
 $$
+
 其中 $x_{\text{obs}}$ 表示通过掩码选择的观测特征，$\beta$ 是 KL 退火系数。对于实值特征，重建项为高斯似然：
 
 $$
 \log p_\theta(x^{(r)} \mid z) = -\frac{1}{2}\sum_i m_i \left[ \frac{\big(x^{(r)}_i - \mu^{(r)}_{\theta,i}(z)\big)^2}{\sigma^{2,(r)}_{\theta,i}(z)} + \log \sigma^{2,(r)}_{\theta,i}(z) + \log(2\pi) \right],
 $$
+
 其中 $m_i$ 为缺失掩码。分类特征使用 softmax 分布，计数特征使用泊松或负二项分布，以此类推。
 
 ### 5.3 监督损失与温度校准
@@ -81,7 +83,8 @@ $$
 $$
 \mathcal{L}_{\text{sup}}(x, y) = - \sum_{c=1}^C y_c \log \operatorname{softmax}_c(f_\psi(z)).
 $$
-温度缩放在校准阶段优化标量 $T>0$：
+
+温度缩放在校准阶段优化标量 $T>0$ ：
 
 $$
 \hat{y} = \operatorname{softmax}\Big(\frac{f_\psi(z)}{T}\Big), \qquad T^* = \arg\min_T \Big(-\sum_{(x,y)\in \mathcal{D}_{\text{val}}} y^\top \log \hat{y}\Big).
@@ -93,7 +96,8 @@ $$
 $$
 \mathcal{J}(x, y) = \mathcal{L}_{\text{ELBO}}(x) + \lambda \mathcal{L}_{\text{sup}}(x, y) + \gamma \mathcal{R}_{\text{reg}},
 $$
-其中 $\lambda$ 控制生成与分类的权衡，$\mathcal{R}_{\text{reg}}$ 表示可选的正则项（如权重衰减或对齐约束），$\gamma$ 为其权重。
+
+其中 $\lambda$ 控制生成与分类的权衡， $\mathcal{R}_{\text{reg}}$ 表示可选的正则项（如权重衰减或对齐约束）， $\gamma$ 为其权重。
 
 
 ## 6. 应用与展望
