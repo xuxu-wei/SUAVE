@@ -60,14 +60,17 @@
 
 1. 通过 `fit_isotonic_calibrator` 在内部验证集上拟合等渗校准器，必要时回退至逻辑回归温度缩放，并保存校准对象。
 2. 使用 `evaluate_predictions` 对训练、验证、MIMIC-IV 测试与 eICU 集执行 bootstrap（默认 1000 次）以估计指标置信区间，并生成 Excel 汇总；除表格主列的 AUC、ACC、SPE、SEN、Brier 外，Excel 中还会给出 `accuracy`、`balanced_accuracy`、`f1_macro`、`recall_macro`、`specificity_macro`、`sensitivity_pos`、`specificity_pos`、`roc_auc`、`pr_auc` 及其置信区间，以支撑不同风险偏好的诊断分析。
-3. 运行 `simple_membership_inference` 获得隐私攻击基线，将结果写入研究报告的风险评估章节。
+3. 将生成的 `evaluation_metrics.csv`、校准曲线 PNG 等评估产物写入输出目录，并在实验日志中登记路径，便于后续报告引用与审计复核。
 
 ### 9. 合成数据（TSTR/TRTR）与分布漂移分析
 
 1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR synthesis`、`TSTR synthesis-balance`、`TSTR synthesis-augment`、`TSTR synthesis-5x` 与 `TSTR synthesis-5x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
 2. 通过 `make_baseline_model_factories` 注册 `Logistic regression`、`Random forest` 与 `XGBoost` 三类下游分类器，对每个训练方案分别拟合并在 `evaluate_transfer_baselines` 中统计 `accuracy` 与 `roc_auc`（含置信区间）。
-3. 使用 `plot_transfer_metric_bars`、`kolmogorov_smirnov_statistic`、`rbf_mmd` 与 `mutual_information_feature` 评估分布一致性；其中 KS>0.1、RBF-MMD>0.05~0.1 或互信息>0.1 bits 时提示显著漂移，需要进一步人工排查。
-4. 所有 TRTR/TSTR 指标、KS/MMD/互信息结果应保存为 CSV 与可视化 PNG，纳入附录及复现包。
+3. 分布漂移的主要结局指标采用 `classifier_two_sample_test`：以 `TRTR (real)` 与 `TSTR synthesis` 作为两类样本，使用 XGBoost 分类器执行 C2ST 并报告 ROC-AUC 及 95% bootstrap 置信区间；同一流程下的逻辑回归 AUC 作为次要敏感性指标。
+4. `rbf_mmd` 与 `mutual_information_feature` 继续按特征逐列计算，用于辅助定位非单调差异或潜在信息泄露风险的列，并与 C2ST 结果交叉验证。
+5. `plot_transfer_metric_bars` 负责绘制 TSTR/TRTR 方案在 `accuracy`、`roc_auc` 等指标上的分组柱状图（含置信区间），展示不同生成数据训练集对下游分类器的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
+6. 在生成数据性能分析后运行 `simple_membership_inference`，补充隐私攻击基线并记录攻击 AUC/阈值，支撑隐私风险评估章节。
+7. 所有 TRTR/TSTR 指标、C2ST 结果及 MMD/互信息指标应保存为 CSV 与可视化 PNG，纳入附录及复现包。
 
 
 ### 10. 潜空间可视化、报告生成与归档

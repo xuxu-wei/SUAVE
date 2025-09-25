@@ -6,12 +6,18 @@ import math
 
 import numpy as np
 import pytest
-pytest.importorskip("sklearn", reason="scikit-learn is required for evaluation metrics tests")
+
+pytest.importorskip(
+    "sklearn", reason="scikit-learn is required for evaluation metrics tests"
+)
 
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 from suave.evaluate import (
+    classifier_two_sample_test,
     compute_auprc,
     compute_auroc,
     compute_brier,
@@ -78,7 +84,9 @@ def test_metric_helpers_match_sklearn_multi_class() -> None:
     auprc = compute_auprc(probabilities, targets)
     brier = compute_brier(probabilities, targets)
 
-    expected_auroc = roc_auc_score(targets, probabilities, multi_class="ovr", average="macro")
+    expected_auroc = roc_auc_score(
+        targets, probabilities, multi_class="ovr", average="macro"
+    )
     expected_auprc = np.mean(
         [
             average_precision_score((targets == idx).astype(int), probabilities[:, idx])
@@ -110,7 +118,9 @@ def test_compute_ece_known_value() -> None:
             continue
         bin_confidence = np.mean(confidences[mask])
         bin_accuracy = np.mean(np.argmax(probabilities[mask], axis=1) == targets[mask])
-        expected += abs(bin_confidence - bin_accuracy) * (np.sum(mask) / len(confidences))
+        expected += abs(bin_confidence - bin_accuracy) * (
+            np.sum(mask) / len(confidences)
+        )
     assert ece == pytest.approx(expected)
 
 
@@ -127,6 +137,16 @@ def test_evaluate_accepts_one_dimensional_probabilities() -> None:
 def _logistic_regression_factory() -> LogisticRegression:
     return LogisticRegression(max_iter=500, solver="lbfgs")
 
+
+def _make_logistic_pipeline() -> Pipeline:
+    return Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            ("classifier", LogisticRegression(max_iter=500, solver="lbfgs")),
+        ]
+    )
+
+
 def test_tstr_and_trtr_workflow() -> None:
     X_syn = np.array([[0.0], [0.1], [1.0], [1.1]])
     y_syn = np.array([0, 0, 1, 1])
@@ -139,7 +159,9 @@ def test_tstr_and_trtr_workflow() -> None:
         (X_syn, y_syn), (X_real_test, y_real_test), _logistic_regression_factory
     )
     trtr_metrics = evaluate_trtr(
-        (X_real_train, y_real_train), (X_real_test, y_real_test), _logistic_regression_factory
+        (X_real_train, y_real_train),
+        (X_real_test, y_real_test),
+        _logistic_regression_factory,
     )
 
     assert tstr_metrics["accuracy"] >= 0.75
@@ -176,3 +198,93 @@ def test_simple_membership_inference_identical_scores_majority_accuracy() -> Non
     assert metrics["attack_best_accuracy"] == pytest.approx(majority_ratio)
     assert metrics["attack_majority_class_accuracy"] == pytest.approx(majority_ratio)
     assert metrics["attack_best_threshold"] > float(test_probabilities[:, 0].max())
+
+
+def test_classifier_two_sample_test_produces_auc_and_intervals() -> None:
+    pytest.importorskip("xgboost", reason="xgboost is required for C2ST evaluation")
+    from xgboost import XGBClassifier
+
+    rng = np.random.default_rng(0)
+    real = rng.normal(size=(120, 4))
+    synthetic = rng.normal(loc=0.2, size=(120, 4))
+
+    results = classifier_two_sample_test(
+        real,
+        synthetic,
+        model_factories={
+            "xgboost": lambda: XGBClassifier(
+                objective="binary:logistic",
+                eval_metric="auc",
+                n_estimators=100,
+                learning_rate=0.05,
+                max_depth=3,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_lambda=1.0,
+                random_state=0,
+                tree_method="hist",
+                n_jobs=-1,
+                use_label_encoder=False,
+            ),
+            "logistic": _make_logistic_pipeline,
+        },
+        random_state=0,
+        n_splits=4,
+        n_bootstrap=50,
+    )
+
+    for key in (
+        "xgboost_auc",
+        "xgboost_auc_ci_low",
+        "xgboost_auc_ci_high",
+        "logistic_auc",
+        "logistic_auc_ci_low",
+        "logistic_auc_ci_high",
+    ):
+        assert key in results
+
+    assert 0.0 <= results["xgboost_auc"] <= 1.0
+    assert 0.0 <= results["logistic_auc"] <= 1.0
+    assert results["xgboost_auc_ci_low"] <= results["xgboost_auc_ci_high"]
+    assert results["logistic_auc_ci_low"] <= results["logistic_auc_ci_high"]
+    assert results["xgboost_bootstrap_samples"] <= 50.0
+    assert results["logistic_bootstrap_samples"] <= 50.0
+
+
+def test_classifier_two_sample_test_filters_non_finite_rows() -> None:
+    pytest.importorskip("xgboost", reason="xgboost is required for C2ST evaluation")
+    from xgboost import XGBClassifier
+
+    real = np.ones((10, 3))
+    real[0, 0] = np.nan
+    synthetic = np.ones((12, 3))
+    synthetic[0, 1] = np.inf
+    synthetic[1, 2] = np.nan
+
+    results = classifier_two_sample_test(
+        real,
+        synthetic,
+        model_factories={
+            "xgboost": lambda: XGBClassifier(
+                objective="binary:logistic",
+                eval_metric="auc",
+                n_estimators=50,
+                max_depth=3,
+                random_state=1,
+                tree_method="hist",
+                n_jobs=-1,
+                use_label_encoder=False,
+            ),
+            "logistic": _make_logistic_pipeline,
+        },
+        random_state=1,
+        n_splits=5,
+        n_bootstrap=10,
+    )
+
+    assert results["n_real_samples"] == 9
+    assert results["n_synthetic_samples"] == 10
+    assert results["cv_splits"] >= 2
+    assert results["cv_splits"] <= min(
+        results["n_real_samples"], results["n_synthetic_samples"]
+    )

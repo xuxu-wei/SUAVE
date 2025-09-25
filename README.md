@@ -149,11 +149,12 @@ Each helper validates probability shapes, performs necessary conversions for bin
 
 ```python
 from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
 
 from suave.evaluate import (
     evaluate_trtr,
     evaluate_tstr,
-    kolmogorov_smirnov_statistic,
+    classifier_two_sample_test,
     mutual_information_feature,
     rbf_mmd,
     simple_membership_inference,
@@ -163,8 +164,21 @@ from suave.evaluate import (
 tstr_scores = evaluate_tstr((X_syn, y_syn), (X_test, y_test), LogisticRegression)
 trtr_scores = evaluate_trtr((X_train, y_train), (X_test, y_test), LogisticRegression)
 
+# Run the classifier two-sample test (C2ST) on full feature matrices
+real_matrix = real_features.values
+synthetic_matrix = synthetic_features.values
+c2st = classifier_two_sample_test(
+    real_matrix,
+    synthetic_matrix,
+    model_factories={
+        "xgboost": lambda: XGBClassifier(random_state=0),
+        "logistic": lambda: LogisticRegression(max_iter=200),
+    },
+    random_state=0,
+    n_bootstrap=200,
+)
+
 # Inspect per-feature distribution alignment
-ks_age = kolmogorov_smirnov_statistic(real_age.values, synthetic_age.values)
 mmd_labs = rbf_mmd(real_labs.values, synthetic_labs.values, random_state=0)
 mi_unit = mutual_information_feature(real_unit.values, synthetic_unit.values)
 
@@ -172,7 +186,7 @@ mi_unit = mutual_information_feature(real_unit.values, synthetic_unit.values)
 attack = simple_membership_inference(train_probs, train_labels, test_probs, test_labels)
 ```
 
-The `evaluate_tstr`/`evaluate_trtr` pair supports model-agnostic baselines for benchmarking synthetic cohorts, while the Kolmogorov–Smirnov statistic, RBF-MMD, and mutual information helpers quantify per-feature fidelity. Low KS (`<0.1`), low MMD (≈`0.0`), and near-zero mutual information indicate strong alignment; larger values call for manual inspection. The membership attack reports AUROC and accuracy for separating training members from held-out data, highlighting potential privacy leakage.
+The `evaluate_tstr`/`evaluate_trtr` pair supports model-agnostic baselines for benchmarking synthetic cohorts. `classifier_two_sample_test` accepts a mapping of estimator factories—by default we pair an XGBoost endpoint with a logistic regression sensitivity check—while the RBF-MMD and mutual information helpers quantify per-feature fidelity. Low C2ST AUCs (≈`0.5`), low MMD (≈`0.0`), and near-zero mutual information indicate strong alignment; larger values call for manual inspection. The membership attack reports AUROC and accuracy for separating training members from held-out data, highlighting potential privacy leakage.
 
 ### Latent representations
 
