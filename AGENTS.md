@@ -47,3 +47,4 @@ data-dependent and stored in the **same directory as the user's data** (e.g., sc
 ## Documentation
 - Each public method must include an example code snippet.
 - Keep examples minimal and data-directory-centric (schema in the same folder as the CSV).
+- 当 `examples/` 下与研究流程相关的脚本更新时，需要同步审阅并更新 `docs/research_protocol.md`，确保协议步骤与脚本实现一致。
