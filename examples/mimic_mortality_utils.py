@@ -550,14 +550,18 @@ def build_tstr_training_sets(
         frame = _ensure_feature_frame(sampled, feature_columns)
         return to_numeric_frame(frame).reset_index(drop=True)
 
-    # Unconditional sampling with label resampling.
+    # Conditional sampling that mirrors the empirical class distribution.
     unconditional_labels = np.random.default_rng(random_state).choice(
         label_array,
         size=n_train,
         replace=True,
     )
     datasets["TSTR synthesis"] = (
-        sample_features(n_train, conditional=False),
+        sample_features(
+            n_train,
+            conditional=True,
+            labels=np.asarray(unconditional_labels),
+        ),
         pd.Series(unconditional_labels, name=real_label_series.name),
     )
 
@@ -604,7 +608,11 @@ def build_tstr_training_sets(
         replace=True,
     )
     datasets["TSTR synthesis-5x"] = (
-        sample_features(five_x, conditional=False),
+        sample_features(
+            five_x,
+            conditional=True,
+            labels=np.asarray(five_x_labels),
+        ),
         pd.Series(five_x_labels, name=real_label_series.name),
     )
 
