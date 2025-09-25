@@ -4,7 +4,7 @@
 # This script runs Optuna to tune SUAVE hyperparameters for the selected
 # mortality target and fits an isotonic calibrator on the internal validation
 # split. The resulting artefacts (model checkpoint, calibrator, and Optuna
-# summary) are written to the analysis output directory for downstream
+# summary) are written to the research output directory for downstream
 # evaluation.
 
 # %%
@@ -64,7 +64,7 @@ except ImportError as exc:  # pragma: no cover - optuna provided via requirement
 # ## Analysis configuration
 #
 # Configure the analysis outputs and Optuna storage. Artefacts are written to
-# ``analysis_outputs_supervised`` so they can be reused by the downstream
+# ``research_outputs_supervised`` so they can be reused by the downstream
 # evaluation script.
 
 # %%
@@ -76,7 +76,7 @@ analysis_config = {
     "optuna_timeout": 3600 * 48,
     "optuna_study_prefix": "supervised",
     "optuna_storage": None,
-    "output_dir_name": "analysis_outputs_supervised",
+    "output_dir_name": "research_outputs_supervised",
 }
 
 
@@ -88,8 +88,14 @@ analysis_config = {
 DATA_DIR = (EXAMPLES_DIR / "data" / "sepsis_mortality_dataset").resolve()
 OUTPUT_DIR = EXAMPLES_DIR / analysis_config["output_dir_name"]
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+OPTUNA_DIR = OUTPUT_DIR / "03_optuna_search"
+MODEL_DIR = OUTPUT_DIR / "04_suave_model"
+for directory in (OPTUNA_DIR, MODEL_DIR):
+    directory.mkdir(parents=True, exist_ok=True)
+
 analysis_config["optuna_storage"] = (
-    f"sqlite:///{OUTPUT_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
+    f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
 )
 
 train_df = load_dataset(DATA_DIR / "mimic-mortality-train.tsv")
@@ -338,7 +344,7 @@ for trial in study.trials:
     )
 
 optuna_trials_df = pd.DataFrame(trial_rows)
-optuna_trials_path = OUTPUT_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
+optuna_trials_path = OPTUNA_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
 if not optuna_trials_df.empty:
     optuna_trials_df.to_csv(optuna_trials_path, index=False)
 else:
@@ -362,8 +368,8 @@ def _json_ready(value: object) -> object:
 
 
 best_params = dict(optuna_best_info.get("params", {}))
-best_info_path = OUTPUT_DIR / f"optuna_best_info_{TARGET_LABEL}.json"
-best_params_path = OUTPUT_DIR / f"optuna_best_params_{TARGET_LABEL}.json"
+best_info_path = OPTUNA_DIR / f"optuna_best_info_{TARGET_LABEL}.json"
+best_params_path = OPTUNA_DIR / f"optuna_best_params_{TARGET_LABEL}.json"
 best_info_path.write_text(
     json.dumps(_json_ready(optuna_best_info), indent=2, ensure_ascii=False)
 )
@@ -397,8 +403,8 @@ model.fit(
 
 isotonic_calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
 
-model_path = OUTPUT_DIR / f"suave_best_{TARGET_LABEL}.pt"
-calibrator_path = OUTPUT_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
+model_path = MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
+calibrator_path = MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
 
 model.save(model_path)
 joblib.dump(isotonic_calibrator, calibrator_path)
@@ -426,7 +432,7 @@ summary_lines = [
     f"- Isotonic calibrator: {calibrator_path.relative_to(OUTPUT_DIR)}",
 ]
 
-summary_path = OUTPUT_DIR / f"optimisation_summary_{TARGET_LABEL}.md"
+summary_path = OPTUNA_DIR / f"optimisation_summary_{TARGET_LABEL}.md"
 summary_path.write_text("\n".join(summary_lines))
 render_dataframe(
     pd.DataFrame([_json_ready(optuna_best_info.get("validation_metrics", {}))]),
