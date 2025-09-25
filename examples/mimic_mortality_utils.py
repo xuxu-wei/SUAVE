@@ -52,6 +52,7 @@ from cls_eval import evaluate_predictions  # noqa: E402
 
 RANDOM_STATE: int = 20201021
 TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
+BENCHMARK_COLUMNS = ('APS_III', 'APACHE_IV', 'SAPS_II', 'OASIS') # do not include in training. Only use for benchamrk validation.
 
 CALIBRATION_SIZE: float = 0.2
 VALIDATION_SIZE: float = 0.2
@@ -79,6 +80,7 @@ HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
 __all__ = [
     "RANDOM_STATE",
     "TARGET_COLUMNS",
+    "BENCHMARK_COLUMNS",
     "CALIBRATION_SIZE",
     "VALIDATION_SIZE",
     "Schema",
