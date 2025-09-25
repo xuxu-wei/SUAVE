@@ -53,7 +53,6 @@ from mimic_mortality_utils import (  # noqa: E402
     load_or_create_iteratively_imputed_features,
     make_baseline_model_factories,
     plot_benchmark_curves,
-    plot_distribution_shift_diagnostics,
     plot_calibration_curves,
     plot_latent_space,
     plot_transfer_metric_bars,
@@ -66,7 +65,6 @@ from cls_eval import evaluate_predictions, write_results_to_excel_unique  # noqa
 
 from suave.evaluate import (  # noqa: E402
     classifier_two_sample_test,
-    energy_distance,
     mutual_information_feature,
     rbf_mmd,
     simple_membership_inference,
@@ -90,7 +88,7 @@ analysis_config = {
     "optuna_timeout": 3600 * 48,
     "optuna_study_prefix": "supervised",
     "optuna_storage": None,
-    "output_dir_name": "research_outputs_supervised",
+    "output_dir_name": "analysis_outputs_supervised",
 }
 
 
@@ -106,31 +104,9 @@ analysis_config = {
 DATA_DIR = (EXAMPLES_DIR / "data" / "sepsis_mortality_dataset").resolve()
 OUTPUT_DIR = EXAMPLES_DIR / analysis_config["output_dir_name"]
 OUTPUT_DIR.mkdir(exist_ok=True)
-OUTPUT_SUBDIRS = {
-    "feature_engineering": OUTPUT_DIR / "feature_engineering",
-    "baselines": OUTPUT_DIR / "baselines",
-    "optuna": OUTPUT_DIR / "optuna",
-    "model": OUTPUT_DIR / "model_training",
-    "evaluation": OUTPUT_DIR / "evaluation",
-    "synthetic": OUTPUT_DIR / "synthetic_transfer",
-    "distribution": OUTPUT_DIR / "distribution_shift",
-    "privacy": OUTPUT_DIR / "privacy",
-    "visualizations": OUTPUT_DIR / "visualizations",
-}
-for path in OUTPUT_SUBDIRS.values():
-    path.mkdir(parents=True, exist_ok=True)
-optuna_db_path = (
-    OUTPUT_SUBDIRS["optuna"] / f"{analysis_config['optuna_study_prefix']}_optuna.db"
+analysis_config["optuna_storage"] = (
+    f"sqlite:///{OUTPUT_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
 )
-analysis_config["optuna_storage"] = f"sqlite:///{optuna_db_path}"
-
-
-def describe_multiformat(path_stem: Path) -> str:
-    """Return a readable reference for multi-format figure outputs."""
-
-    relative = path_stem.with_suffix("").relative_to(OUTPUT_DIR)
-    return f"{relative}.[png/svg/pdf/jpg]"
-
 
 train_df = load_dataset(DATA_DIR / "mimic-mortality-train.tsv")
 test_df = load_dataset(DATA_DIR / "mimic-mortality-test.tsv")
@@ -354,7 +330,7 @@ if external_features is not None:
     baseline_loaded_from_cache,
 ) = load_or_create_iteratively_imputed_features(
     baseline_feature_frames,
-    output_dir=OUTPUT_SUBDIRS["feature_engineering"],
+    output_dir=OUTPUT_DIR,
     target_label=TARGET_LABEL,
     reference_key="Train",
 )
@@ -463,7 +439,7 @@ for model_name, estimator in baseline_models.items():
 baseline_df = pd.DataFrame(baseline_rows)
 baseline_order = ["Model", "Dataset", *metric_columns, "Notes"]
 baseline_df = baseline_df.loc[:, baseline_order]
-baseline_path = OUTPUT_SUBDIRS["baselines"] / f"baseline_models_{TARGET_LABEL}.csv"
+baseline_path = OUTPUT_DIR / f"baseline_models_{TARGET_LABEL}.csv"
 baseline_df.to_csv(baseline_path, index=False)
 render_dataframe(
     baseline_df,
@@ -480,12 +456,12 @@ render_dataframe(
 # %%
 
 optuna_best_info, optuna_best_params = load_optuna_results(
-    OUTPUT_SUBDIRS["optuna"],
+    OUTPUT_DIR,
     TARGET_LABEL,
     study_prefix=analysis_config.get("optuna_study_prefix"),
     storage=analysis_config.get("optuna_storage"),
 )
-optuna_trials_path = OUTPUT_SUBDIRS["optuna"] / f"optuna_trials_{TARGET_LABEL}.csv"
+optuna_trials_path = OUTPUT_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
 
 if not optuna_best_params:
     print(
@@ -503,8 +479,8 @@ if not optuna_best_params:
 
 # %%
 
-model_path = OUTPUT_SUBDIRS["model"] / f"suave_best_{TARGET_LABEL}.pt"
-calibrator_path = OUTPUT_SUBDIRS["model"] / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
+model_path = OUTPUT_DIR / f"suave_best_{TARGET_LABEL}.pt"
+calibrator_path = OUTPUT_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
 
 model: Optional[SUAVE] = None
 calibrator: Optional[Any] = None
@@ -598,7 +574,7 @@ existing_columns = [
 ]
 if existing_columns:
     metrics_df = metrics_df.loc[:, existing_columns]
-metrics_path = OUTPUT_SUBDIRS["evaluation"] / "evaluation_metrics.csv"
+metrics_path = OUTPUT_DIR / "evaluation_metrics.csv"
 metrics_df.to_csv(metrics_path, index=False)
 render_dataframe(
     metrics_df,
@@ -606,12 +582,9 @@ render_dataframe(
     floatfmt=".3f",
 )
 
-calibration_base = OUTPUT_SUBDIRS["evaluation"] / f"calibration_{TARGET_LABEL}"
-calibration_path = plot_calibration_curves(
-    probability_map,
-    label_map,
-    target_name=TARGET_LABEL,
-    output_path=calibration_base,
+calibration_path = OUTPUT_DIR / f"calibration_{TARGET_LABEL}.png"
+plot_calibration_curves(
+    probability_map, label_map, target_name=TARGET_LABEL, output_path=calibration_path
 )
 
 # %% [markdown]
@@ -647,7 +620,7 @@ for dataset_name in benchmark_datasets:
         dataset_name,
         label_map[dataset_name],
         model_probabilities,
-        output_dir=OUTPUT_SUBDIRS["evaluation"],
+        output_dir=OUTPUT_DIR,
         target_label=TARGET_LABEL,
         abbreviation_lookup=model_abbreviation_lookup,
     )
@@ -724,26 +697,20 @@ for dataset_name, (features, labels) in evaluation_datasets.items():
 
 bootstrap_overall_df = pd.concat(bootstrap_overall_frames, ignore_index=True)
 bootstrap_per_class_df = pd.concat(bootstrap_per_class_frames, ignore_index=True)
-bootstrap_overall_path = (
-    OUTPUT_SUBDIRS["evaluation"] / f"bootstrap_overall_{TARGET_LABEL}.csv"
-)
-bootstrap_per_class_path = (
-    OUTPUT_SUBDIRS["evaluation"] / f"bootstrap_per_class_{TARGET_LABEL}.csv"
-)
+bootstrap_overall_path = OUTPUT_DIR / f"bootstrap_overall_{TARGET_LABEL}.csv"
+bootstrap_per_class_path = OUTPUT_DIR / f"bootstrap_per_class_{TARGET_LABEL}.csv"
 bootstrap_overall_df.to_csv(bootstrap_overall_path, index=False)
 bootstrap_per_class_df.to_csv(bootstrap_per_class_path, index=False)
 
 bootstrap_warning_path: Optional[Path]
 if bootstrap_warnings_frames:
     bootstrap_warning_df = pd.concat(bootstrap_warnings_frames, ignore_index=True)
-    bootstrap_warning_path = (
-        OUTPUT_SUBDIRS["evaluation"] / f"bootstrap_warnings_{TARGET_LABEL}.csv"
-    )
+    bootstrap_warning_path = OUTPUT_DIR / f"bootstrap_warnings_{TARGET_LABEL}.csv"
     bootstrap_warning_df.to_csv(bootstrap_warning_path, index=False)
 else:
     bootstrap_warning_path = None
 
-bootstrap_excel_path = OUTPUT_SUBDIRS["evaluation"] / f"bootstrap_{TARGET_LABEL}.xlsx"
+bootstrap_excel_path = OUTPUT_DIR / f"bootstrap_{TARGET_LABEL}.xlsx"
 write_results_to_excel_unique(
     bootstrap_results,
     str(bootstrap_excel_path),
@@ -773,9 +740,7 @@ for metric_name in summary_metric_candidates:
             summary_columns.append(high_col)
 
 bootstrap_summary_df = bootstrap_overall_df.loc[:, summary_columns]
-bootstrap_summary_path = (
-    OUTPUT_SUBDIRS["evaluation"] / f"bootstrap_summary_{TARGET_LABEL}.csv"
-)
+bootstrap_summary_path = OUTPUT_DIR / f"bootstrap_summary_{TARGET_LABEL}.csv"
 bootstrap_summary_df.to_csv(bootstrap_summary_path, index=False)
 render_dataframe(
     bootstrap_summary_df,
@@ -801,8 +766,6 @@ tstr_figure_paths: List[Path] = []
 distribution_df: Optional[pd.DataFrame] = None
 distribution_path: Optional[Path] = None
 distribution_top: Optional[pd.DataFrame] = None
-distribution_figure_stems: Dict[str, Path] = {}
-membership_path = OUTPUT_SUBDIRS["privacy"] / "membership_inference.csv"
 
 if TARGET_LABEL != "in_hospital_mortality":
     print(
@@ -865,12 +828,8 @@ else:
         raw_training_sets=training_sets_raw,
         raw_evaluation_sets=evaluation_sets_raw,
     )
-    tstr_summary_path = (
-        OUTPUT_SUBDIRS["synthetic"] / f"tstr_trtr_summary_{TARGET_LABEL}.csv"
-    )
-    tstr_plot_path = (
-        OUTPUT_SUBDIRS["synthetic"] / f"tstr_trtr_plot_data_{TARGET_LABEL}.csv"
-    )
+    tstr_summary_path = OUTPUT_DIR / f"tstr_trtr_summary_{TARGET_LABEL}.csv"
+    tstr_plot_path = OUTPUT_DIR / f"tstr_trtr_plot_data_{TARGET_LABEL}.csv"
     tstr_summary_df.to_csv(tstr_summary_path, index=False)
     tstr_plot_df.to_csv(tstr_plot_path, index=False)
     render_dataframe(
@@ -889,7 +848,7 @@ else:
                 evaluation_dataset=evaluation_name,
                 training_order=training_order,
                 model_order=model_order,
-                output_dir=OUTPUT_SUBDIRS["synthetic"],
+                output_dir=OUTPUT_DIR,
                 target_label=TARGET_LABEL,
             )
             if figure_path is not None:
@@ -942,41 +901,11 @@ else:
         n_bootstrap=1000,
     )
     c2st_df = pd.DataFrame([{"target": TARGET_LABEL, **c2st_metrics}])
-    c2st_path = OUTPUT_SUBDIRS["distribution"] / "c2st_distribution_test.csv"
+    c2st_path = OUTPUT_DIR / "c2st_distribution_test.csv"
     c2st_df.to_csv(c2st_path, index=False)
     render_dataframe(
         c2st_df,
         title="Classifier two-sample test (C2ST)",
-        floatfmt=".3f",
-    )
-
-    global_mmd, global_mmd_p_value = rbf_mmd(
-        real_features_numeric,
-        synthesis_features_numeric,
-        random_state=RANDOM_STATE,
-        n_permutations=200,
-    )
-    global_energy, global_energy_p_value = energy_distance(
-        real_features_numeric,
-        synthesis_features_numeric,
-        random_state=RANDOM_STATE,
-        n_permutations=200,
-    )
-    distribution_overall_df = pd.DataFrame(
-        [
-            {
-                "target": TARGET_LABEL,
-                "global_mmd": global_mmd,
-                "global_mmd_p_value": global_mmd_p_value,
-                "global_energy_distance": global_energy,
-                "global_energy_p_value": global_energy_p_value,
-                **c2st_metrics,
-            }
-        ]
-    )
-    render_dataframe(
-        distribution_overall_df,
-        title="Distribution shift overview",
         floatfmt=".3f",
     )
 
@@ -990,30 +919,19 @@ else:
             random_state=RANDOM_STATE,
             n_permutations=200,
         )
-        energy_value, _ = energy_distance(
-            real_values,
-            synthetic_values,
-            random_state=RANDOM_STATE,
-            n_permutations=0,
-        )
         distribution_rows.append(
             {
                 "feature": column,
                 "mmd": mmd_value,
                 "mmd_p_value": mmd_p,
-                "energy_distance": energy_value,
                 "mutual_information": mutual_information_feature(
                     real_values, synthetic_values
                 ),
             }
         )
     distribution_df = pd.DataFrame(distribution_rows)
-    distribution_path = (
-        OUTPUT_SUBDIRS["distribution"] / "distribution_shift_metrics.xlsx"
-    )
-    with pd.ExcelWriter(distribution_path) as writer:
-        distribution_overall_df.to_excel(writer, sheet_name="overall", index=False)
-        distribution_df.to_excel(writer, sheet_name="per_feature", index=False)
+    distribution_path = OUTPUT_DIR / "distribution_shift_metrics.csv"
+    distribution_df.to_csv(distribution_path, index=False)
     distribution_top = (
         distribution_df.sort_values("mutual_information", ascending=False)
         .head(10)
@@ -1023,13 +941,6 @@ else:
         distribution_top,
         title="Top distribution shift features (mutual information)",
         floatfmt=".3f",
-    )
-    distribution_figure_stems = plot_distribution_shift_diagnostics(
-        distribution_overall_df,
-        distribution_df,
-        output_dir=OUTPUT_SUBDIRS["distribution"],
-        target_label=TARGET_LABEL,
-        top_n=10,
     )
 
     train_probabilities = probability_map["Train"]
@@ -1041,7 +952,7 @@ else:
         np.asarray(y_test),
     )
     membership_df = pd.DataFrame([{"target": TARGET_LABEL, **membership_metrics}])
-    membership_path = OUTPUT_SUBDIRS["privacy"] / "membership_inference.csv"
+    membership_path = OUTPUT_DIR / "membership_inference.csv"
     membership_df.to_csv(membership_path, index=False)
     render_dataframe(
         membership_df,
@@ -1062,13 +973,13 @@ latent_features = {
     name: features for name, (features, _) in evaluation_datasets.items()
 }
 latent_labels = {name: labels for name, (_, labels) in evaluation_datasets.items()}
-latent_base = OUTPUT_SUBDIRS["visualizations"] / f"latent_{TARGET_LABEL}"
-latent_path = plot_latent_space(
+latent_path = OUTPUT_DIR / f"latent_{TARGET_LABEL}.png"
+plot_latent_space(
     model,
     latent_features,
     latent_labels,
     target_name=TARGET_LABEL,
-    output_path=latent_base,
+    output_path=latent_path,
 )
 
 
@@ -1140,10 +1051,8 @@ summary_lines.append(dataframe_to_markdown(metrics_summary_df, floatfmt=".3f"))
 summary_lines.append(
     f"Optuna trials logged at: {optuna_trials_path.relative_to(OUTPUT_DIR)}"
 )
-if calibration_path is not None:
-    summary_lines.append(f"Calibration plot: {describe_multiformat(calibration_path)}")
-if latent_path is not None:
-    summary_lines.append(f"Latent projection: {describe_multiformat(latent_path)}")
+summary_lines.append(f"Calibration plot: {calibration_path.relative_to(OUTPUT_DIR)}")
+summary_lines.append(f"Latent projection: {latent_path.relative_to(OUTPUT_DIR)}")
 summary_lines.append("")
 
 summary_lines.append("Bootstrap evaluation artefacts:")
@@ -1176,7 +1085,7 @@ if tstr_summary_df is not None and tstr_summary_path is not None:
     if tstr_plot_path is not None:
         summary_lines.append(f"- Plot data: {tstr_plot_path.relative_to(OUTPUT_DIR)}")
     for figure_path in tstr_figure_paths:
-        summary_lines.append(f"- Figure: {describe_multiformat(figure_path)}")
+        summary_lines.append(f"- Figure: {figure_path.relative_to(OUTPUT_DIR)}")
     summary_lines.append("")
 
 summary_lines.append("## Distribution shift and privacy")
@@ -1184,18 +1093,13 @@ if distribution_df is not None and distribution_path is not None:
     summary_lines.append(
         f"- Distribution metrics: {distribution_path.relative_to(OUTPUT_DIR)}"
     )
-    summary_lines.append(f"- C2ST metrics: {c2st_path.relative_to(OUTPUT_DIR)}")
-for name, figure_path in distribution_figure_stems.items():
-    summary_lines.append(
-        f"- {name.replace('_', ' ').title()} plot: {describe_multiformat(figure_path)}"
-    )
 if membership_path.exists():
     summary_lines.append(
         f"- Membership inference: {membership_path.relative_to(OUTPUT_DIR)}"
     )
 summary_lines.append(f"- Baseline metrics: {baseline_path.relative_to(OUTPUT_DIR)}")
 for figure_path in benchmark_curve_paths:
-    summary_lines.append(f"- Benchmark curves: {describe_multiformat(figure_path)}")
+    summary_lines.append(f"- Benchmark curves: {figure_path.relative_to(OUTPUT_DIR)}")
 summary_lines.append("")
 
 summary_path = OUTPUT_DIR / f"evaluation_summary_{TARGET_LABEL}.md"
