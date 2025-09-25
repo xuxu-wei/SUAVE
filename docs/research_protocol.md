@@ -2,54 +2,72 @@
 
 本文档汇总 SUAVE 项目的研究流程约定，帮助在不同数据集上复现实验、整理结果并产出可审计的研究报告。
 
-## MIMIC-III 住院死亡率（监督）分析方案
+## MIMIC-IV 住院死亡率（监督）分析方案
 
-以下步骤基于 `examples/research-mimic_mortality_supervised.py`，该脚本整合 Optuna 搜索结果、经典基线、SUAVE 模型校准与合成数据评估，最终生成标准化的 Markdown 报告与配套制品。
+以下流程对齐 `examples/research-mimic_mortality_supervised.py` 的实现，目标是在 MIMIC-IV 住院患者的死亡率预测任务上复现 SUAVE 研究级评估，并生成可直接纳入技术报告的成果物。
 
-### 准备阶段
+### 1. 研究目标与核心指标
 
-1. 设定目标标签（默认 `in_hospital_mortality`）与输出目录，并记录 Optuna 试验的数量、超时时间和存储后端。
-2. 确保 `examples/data/sepsis_mortality_dataset/` 下的训练、测试与外部验证（eICU）切分可用。
-3. 若提供 Optuna SQLite 存储，脚本可直接回读最优试验与参数；否则将使用磁盘缓存或默认值重新训练。
+1. 主要目标：基于 ICU 入科时刻前 24h 内的结构化特征预测 `in_hospital_mortality`。
+2. 判定指标：AUROC/AUPRC 作为判别性能主指标，Brier Score 与校准曲线衡量概率校准，ECE 作为补充。
+3. 次要分析：eICU 外部验证集的一致性评估、合成数据 TSTR/TRTR、潜空间可视化及隐私基线。
 
-### 数据加载与 Schema 校验
+### 2. 数据来源与管理
 
-1. 读取 train/test/external TSV 数据框，校验目标列是否在 `TARGET_COLUMNS` 白名单中。
-2. 调用 `define_schema(..., mode="interactive")` 生成初始 schema，并对 BMI、呼吸支持等级等存在歧义的列执行手动修正。
-3. 使用 `schema_to_dataframe` 与 `render_dataframe` 输出列类型概览，便于人工复核。
+1. 训练/内部验证/测试使用 `examples/data/sepsis_mortality_dataset/` 中基于 **MIMIC-IV** 抽样生成的 `mimic-mortality-train.tsv` 与 `mimic-mortality-test.tsv`。
+2. 外部验证集来自 eICU（`eicu-mortality-external_val.tsv`），按照脚本约定仅作评估，不参与任何超参选择。
+3. 所有 TSV 均需保留原始列名；脚本在 `analysis_outputs_supervised/` 下派生的缓存、插补产物与评估文件应纳入审计归档。
 
-### 数据集切分与特征工程
+### 3. 计算环境与配置记录
 
-1. 通过 `prepare_features` 对训练样本构建特征矩阵，结合目标标签调用 `train_test_split`（分层抽样）划分内部验证集。
-2. 对测试集与外部 eICU 数据应用相同的特征处理流程，确保列顺序与训练集一致。
-3. 将结果缓存为 `baseline_feature_frames`，供后续基线模型与 SUAVE 共同复用。
+1. 推荐使用与仓库 `requirements.txt` 一致的 Python 环境；若启用 GPU，请记录 CUDA 版本及可复现的随机种子 `RANDOM_STATE`。
+2. 通过 `analysis_config` 设定 Optuna 试验数量（默认 60）、最大运行时间（48 小时）与 SQLite 存储路径；配置更改需写入附录。
+3. 在输出目录生成 `*_optuna.json` 与 `evaluation_summary_{label}.md` 等文件时，请记录脚本版本（Git commit）与运行日期。
 
-### 基线模型基准
+### 4. 准备阶段
 
-1. 借助 `load_or_create_iteratively_imputed_features` 完成各评估集的多重迭代插补，并缓存到磁盘以复用。
-2. 训练并评估 Logistic Regression、KNN、Decision Tree、Random Forest 与 RBF-SVM 等 scikit-learn 管线，记录 AUC/ACC/SPE/SEN/Brier 指标。
-3. 保存基线指标 CSV，并通过 `render_dataframe` 生成 Markdown 表格，必要时补充外部验证缺失标签的说明。
+1. 确认目标标签（默认 `in_hospital_mortality`）存在于 `TARGET_COLUMNS` 列表，并记录所有候选标签以备扩展分析。
+2. 建立输出目录 `examples/analysis_outputs_supervised/`，若 Optuna 存储不存在则自动创建；必要时备份历史运行的 best trial JSON。
+3. 若已有 Optuna trial 或 SUAVE 模型缓存，需在研究日志中记录其生成配置，以便差异分析。
 
-### SUAVE 模型与校准
+### 5. 数据加载与 Schema 校验
 
-1. 优先尝试加载磁盘上的最佳 SUAVE 模型与等渗（isotonic）校准器；若仅存在校准器则从中提取底层估计器。
-2. 如均不可用且存在 Optuna 最优参数，则调用 `build_suave_model` 重建模型并依次执行 warm-up、head 与 joint fine-tuning 阶段。
-3. 使用 `fit_isotonic_calibrator` 在验证集上拟合或更新校准器，确保预测概率可靠。
+1. 调用 `load_dataset` 读取 MIMIC-IV 训练/测试及 eICU 外部验证集的 TSV，确保无缺失列并保留原始数据类型。
+2. 通过 `define_schema(train_df, FEATURE_COLUMNS, mode="interactive")` 生成初始 schema；对 BMI、呼吸支持等级（`Respiratory_Support`）和淋巴细胞百分比（`LYM%`）执行人工修正，以保证类型一致性。
+3. 使用 `schema_to_dataframe` 与 `render_dataframe` 输出列类型摘要并保存截图/Markdown，作为数据说明附件的一部分。
 
-### 预测评估与置信区间
+### 6. 特征构建与内部验证划分
 
-1. 对训练、验证、MIMIC 测试和（如适用）eICU 外部集计算校准后概率，生成校准曲线与 ROC/PR 基准图。
-2. 调用 `evaluate_predictions` 进行自举（bootstrap）评估，输出整体与按类别的置信区间，并生成 Excel 汇总。
-3. 运行 `simple_membership_inference` 记录隐私攻击基线，所有路径写入 `analysis_outputs_supervised/` 目录。
+1. 采用 `prepare_features` 对训练集进行特征工程；随后调用 `train_test_split`（`VALIDATION_SIZE`、`RANDOM_STATE`）在训练集内部创建分层验证集。
+2. 对测试集与外部验证集复用同一特征处理函数，确保列顺序与训练集匹配，并将结果缓存至 `baseline_feature_frames`。
+3. 若后续分析扩展到其他标签，需要复用相同的特征转换并记录生成时间及校验摘要。
 
-### 合成数据评估（TSTR/TRTR）
+### 7. 基线模型与对照实验
 
-1. 针对目标标签构建真实与合成训练集（`build_tstr_training_sets`），必要时跳过非住院死亡率任务。
-2. 组合 `make_baseline_model_factories` 产生统一的下游分类器，对真实与合成训练集分别进行训练/评估。
-3. 汇总并渲染 TSTR/TRTR 指标、导出柱状图数据，同时计算 KS、RBF-MMD 与互信息衡量合成分布漂移。
+1. 借助 `load_or_create_iteratively_imputed_features` 对各评估集执行迭代插补，生成可复用的 `*_imputed.joblib` 文件。
+2. 构建 Logistic Regression（带标准化）、KNN、Decision Tree、Random Forest 与 RBF-SVM 等 `Pipeline`，通过 `evaluate_transfer_baselines` 统一训练并评估。
+3. 输出的指标 CSV 与 Markdown 表格需包含训练/验证/测试/eICU 全量指标，若外部验证缺失标签需在脚注注明处理策略。
 
-### 潜空间可视化与报告生成
+### 8. SUAVE 模型构建、调参与训练
 
-1. 使用 `plot_latent_space` 对各评估集的潜在表示执行 PCA 投影，检查类间可分性。
-2. 汇总 schema、Optuna 最优结果、预测指标、引导自举摘要、TSTR/TRTR 与分布漂移产物，最终写入 `evaluation_summary_{label}.md`。
-3. 保留所有 CSV/PNG/Markdown 路径，方便后续打包与论文附录引用。
+1. 若存在历史最优 trial，优先读取 `optuna_best_params_{label}.json`；否则调用 `build_suave_model` 以默认超参初始化模型，并记录关键参数（latent_dim、beta、dropout 等）。
+2. 训练顺序遵循脚本：先执行 VAE warm-up，再进行分类头独立训练，最后 joint fine-tuning，必要时启用分类损失权重自动调节。
+3. 对于每个阶段，记录训练轮数、早停标准、最优模型路径以及 GPU/CPU 运行时长，用于技术报告的实验设置章节。
+
+### 9. 概率校准与不确定性量化
+
+1. 通过 `fit_isotonic_calibrator` 在内部验证集上拟合等渗校准器，必要时回退至逻辑回归温度缩放，并保存校准对象。
+2. 使用 `evaluate_predictions` 对训练、验证、MIMIC-IV 测试与 eICU 集执行 bootstrap（默认 1000 次）以估计指标置信区间，并生成 Excel 汇总。
+3. 运行 `simple_membership_inference` 获得隐私攻击基线，将结果写入研究报告的风险评估章节。
+
+### 10. 合成数据（TSTR/TRTR）与分布漂移分析
+
+1. 调用 `build_tstr_training_sets` 创建真实与合成训练集，并通过 `make_baseline_model_factories` 构建一致的下游分类器族。
+2. 使用 `plot_transfer_metric_bars`、`kolmogorov_smirnov_statistic`、`rbf_mmd` 与 `mutual_information_feature` 评估分布一致性。
+3. 所有 TRTR/TSTR 指标、KS/MMD/互信息结果应保存为 CSV 与可视化 PNG，纳入附录及复现包。
+
+### 11. 潜空间可视化、报告生成与归档
+
+1. 借助 `plot_latent_space` 对潜空间执行 PCA/UMAP（视脚本配置）投影，输出训练、验证、测试与外部集的可视化比较。
+2. 使用 `dataframe_to_markdown`、`render_dataframe` 与 `write_results_to_excel_unique` 汇总评估结果，最终通过 `build_prediction_dataframe` 与 `evaluate_predictions` 生成 `evaluation_summary_{label}.md` 技术报告草稿。
+3. 在归档目录保留所有原始数据引用、模型权重（`.pt`/`.joblib`）、插补缓存、图表、Markdown 报告及运行日志，以支持第三方审计与论文附录撰写。
