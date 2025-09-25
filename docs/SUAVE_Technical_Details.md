@@ -52,6 +52,7 @@ SUAVE（Supervised, Unified, Augmented Variational Embedding）旨在为临床�
 ### 5.1 潜变量后验与先验
 编码器给出潜变量的均值 $\mu_\phi(x)$ 与对数方差 $\log \sigma_\phi^2(x)$，近似后验为：
 
+
 $$
 q_\phi(z \mid x) = \mathcal{N}\big(z;\, \mu_\phi(x), \operatorname{diag}(\sigma_\phi^2(x))\big).
 $$
@@ -93,6 +94,7 @@ $$
 \mathcal{J}(x, y) = \mathcal{L}_{\text{ELBO}}(x) + \lambda \mathcal{L}_{\text{sup}}(x, y) + \gamma \mathcal{R}_{\text{reg}},
 $$
 其中 $\lambda$ 控制生成与分类的权衡，$\mathcal{R}_{\text{reg}}$ 表示可选的正则项（如权重衰减或对齐约束），$\gamma$ 为其权重。
+
 
 ## 6. 应用与展望
 - **临床预测**：支持 ICU 死亡率、早期预警等任务，通过校准的概率提升决策透明度。
