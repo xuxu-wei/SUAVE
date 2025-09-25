@@ -9,3 +9,5 @@
 - Each public method must include an example code snippet.
 - Keep examples minimal and data-directory-centric (schema in the same folder as the CSV).
 - When example scripts change their research workflows, update `docs/research_protocol.md` in the same PR to stay aligned.
+- Public APIs must use pandas-style docstrings that include an `Example` section. For APIs related to evaluation, provide generally applicable or empirical benchmark thresholds within the docstring commentary.
+- Add inline comments that explain the intent of each critical step in function bodies.
