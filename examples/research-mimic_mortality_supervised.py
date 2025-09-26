@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import joblib
 import numpy as np
 import pandas as pd
@@ -55,7 +56,6 @@ from mimic_mortality_utils import (  # noqa: E402
     plot_benchmark_curves,
     plot_calibration_curves,
     plot_latent_space,
-    plot_latent_feature_correlation_heatmap,
     plot_transfer_metric_bars,
     prepare_features,
     render_dataframe,
@@ -73,6 +73,7 @@ from suave.evaluate import (  # noqa: E402
 )
 
 from suave import SUAVE  # noqa: E402
+from suave.plots import plot_feature_latent_correlation  # noqa: E402
 
 
 # %% [markdown]
@@ -152,6 +153,33 @@ FEATURE_COLUMNS = [
     for column in train_df.columns
     if column not in TARGET_COLUMNS + BENCHMARK_COLUMNS
 ]
+
+VAR_GROUP_DICT = {
+    "basic_feature_and_organ_support": [
+        "sex",
+        "age",
+        "BMI",
+        "temperature",
+        "heart_rate",
+        "respir_rate",
+        "GCS",
+        "CRRT",
+        "Respiratory_Support",
+    ],
+    "BP_and_perfusion": ["SBP", "MAP", "Lac", "septic_shock"],
+    "respiratory_and_bg": [
+        "SPO2",
+        "PaO2",
+        "PaO2/FiO2",
+        "PaCO2",
+        "HCO3-",
+        "PH",
+    ],
+    "blood_routine": ["RBC", "Hb", "HCT", "WBC", "NE%", "LYM%"],
+    "coagulation": ["PLT", "PT", "APTT", "Fg"],
+    "biochem_lab": ["ALT", "AST", "STB", "BUN", "Scr", "Glu", "K+", "Na+"],
+}
+
 schema = define_schema(train_df, FEATURE_COLUMNS, mode="interactive")
 
 # Manual schema corrections ensure columns with ambiguous types are treated
@@ -1041,28 +1069,76 @@ else:
 latent_correlation_base = (
     VISUALISATION_DIR / f"latent_clinical_correlation_{TARGET_LABEL}"
 )
-latent_correlation_figure = latent_correlation_base.with_suffix(".jpg")
-latent_correlation_df = plot_latent_feature_correlation_heatmap(
+overall_figure_path = latent_correlation_base.with_suffix(".png")
+overall_corr_path = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_correlations.csv"
+)
+overall_pval_path = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_pvalues.csv"
+)
+
+overall_fig, _overall_axes, overall_corr, overall_pvals = plot_feature_latent_correlation(
     model,
     X_train_model,
-    feature_columns=FEATURE_COLUMNS,
+    targets=y_train_model,
     target_name=TARGET_LABEL,
+    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
+    title=f"Latent correlations ({TARGET_LABEL}) – all variables",
     output_path=latent_correlation_base,
 )
-latent_correlation_csv = latent_correlation_base.with_suffix(".csv")
-if latent_correlation_df is not None and not latent_correlation_df.empty:
-    latent_correlation_df.to_csv(latent_correlation_csv)
+plt.close(overall_fig)
+overall_corr.to_csv(overall_corr_path)
+overall_pvals.to_csv(overall_pval_path)
+
+feature_only_corr = overall_corr.drop(index=TARGET_LABEL, errors="ignore")
+has_latent_correlations = not feature_only_corr.empty
+if not has_latent_correlations:
+    print("Latent-clinical correlation heatmap could not be generated.")
+else:
     top_correlated = (
-        latent_correlation_df.abs().max(axis=0).sort_values(ascending=False).head(10)
+        feature_only_corr.abs().max(axis=1).sort_values(ascending=False).head(10)
     )
     render_dataframe(
         top_correlated.rename("max_abs_correlation").reset_index().rename(
-            columns={"index": "feature"}
+            columns={"index": "variable"}
         ),
         title="Top latent-clinical correlations (absolute)",
+        floatfmt=".3f",
     )
-else:
-    print("Latent-clinical correlation heatmap could not be generated.")
+
+available_features = set(FEATURE_COLUMNS)
+latent_group_outputs: list[tuple[str, Path, Path, Path]] = []
+for group_name, candidate_columns in VAR_GROUP_DICT.items():
+    missing = sorted(set(candidate_columns) - available_features)
+    if missing:
+        print(
+            f"Skipping unavailable variables for {group_name}: {', '.join(missing)}"
+        )
+    group_features = [column for column in candidate_columns if column in available_features]
+    if not group_features:
+        continue
+
+    group_base = latent_correlation_base.with_name(
+        f"{latent_correlation_base.name}_{group_name}"
+    )
+    fig, _axes, group_corr, group_pvals = plot_feature_latent_correlation(
+        model,
+        X_train_model,
+        targets=y_train_model,
+        target_name=TARGET_LABEL,
+        variables=group_features + [TARGET_LABEL],
+        title=(
+            f"Latent correlations ({TARGET_LABEL}) – "
+            f"{group_name.replace('_', ' ').title()}"
+        ),
+        output_path=group_base,
+    )
+    plt.close(fig)
+    corr_path = group_base.with_name(f"{group_base.name}_correlations.csv")
+    pval_path = group_base.with_name(f"{group_base.name}_pvalues.csv")
+    group_corr.to_csv(corr_path)
+    group_pvals.to_csv(pval_path)
+    latent_group_outputs.append((group_name, group_base.with_suffix(".png"), corr_path, pval_path))
 
 
 # %% [markdown]
@@ -1156,13 +1232,24 @@ summary_lines.append(
     f"Optuna trials logged at: {optuna_trials_path.relative_to(OUTPUT_DIR)}"
 )
 summary_lines.append(f"Calibration plot: {calibration_path.relative_to(OUTPUT_DIR)}")
-if latent_correlation_df is not None and not latent_correlation_df.empty:
+if has_latent_correlations:
     summary_lines.append(
-        f"Latent-clinical heatmap: {latent_correlation_figure.relative_to(OUTPUT_DIR)}"
+        f"Latent-clinical heatmap: {overall_figure_path.relative_to(OUTPUT_DIR)}"
     )
     summary_lines.append(
-        f"Latent-clinical correlations: {latent_correlation_csv.relative_to(OUTPUT_DIR)}"
+        f"Latent-clinical correlations: {overall_corr_path.relative_to(OUTPUT_DIR)}"
     )
+    summary_lines.append(
+        f"Latent-clinical p-values: {overall_pval_path.relative_to(OUTPUT_DIR)}"
+    )
+    if latent_group_outputs:
+        summary_lines.append("Latent-clinical group heatmaps:")
+        for group_name, figure_path, corr_path, pval_path in latent_group_outputs:
+            summary_lines.append(
+                f"- {group_name}: figure={figure_path.relative_to(OUTPUT_DIR)}, "
+                f"correlations={corr_path.relative_to(OUTPUT_DIR)}, "
+                f"p_values={pval_path.relative_to(OUTPUT_DIR)}"
+            )
 else:
     summary_lines.append("Latent-clinical heatmap: unavailable")
 summary_lines.append(f"Latent projection: {latent_path.relative_to(OUTPUT_DIR)}")
