@@ -34,6 +34,10 @@ if str(EXAMPLES_DIR) not in sys.path:
 from mimic_mortality_utils import (  # noqa: E402
     HIDDEN_DIMENSION_OPTIONS,
     HEAD_HIDDEN_DIMENSION_OPTIONS,
+    PARETO_MAX_ABS_DELTA_AUC,
+    PARETO_MIN_VALIDATION_ROAUC,
+    build_analysis_config,
+    choose_preferred_pareto_trial,
     RANDOM_STATE,
     TARGET_COLUMNS,
     BENCHMARK_COLUMNS,
@@ -46,10 +50,14 @@ from mimic_mortality_utils import (  # noqa: E402
     load_dataset,
     make_logistic_pipeline,
     prepare_features,
+    prepare_analysis_output_directories,
     render_dataframe,
     schema_to_dataframe,
     to_numeric_frame,
+    record_model_manifest,
     _save_figure_multiformat,
+    make_study_name,
+    resolve_suave_fit_kwargs,
 )
 
 from suave.evaluate import evaluate_tstr, evaluate_trtr  # noqa: E402
@@ -74,13 +82,7 @@ except ImportError as exc:  # pragma: no cover - optuna provided via requirement
 
 TARGET_LABEL = "in_hospital_mortality"
 
-analysis_config = {
-    "optuna_trials": 60,
-    "optuna_timeout": 3600 * 48,
-    "optuna_study_prefix": "supervised",
-    "optuna_storage": None,
-    "output_dir_name": "research_outputs_supervised",
-}
+analysis_config = build_analysis_config()
 
 
 # %% [markdown]
@@ -92,10 +94,16 @@ DATA_DIR = (EXAMPLES_DIR / "data" / "sepsis_mortality_dataset").resolve()
 OUTPUT_DIR = EXAMPLES_DIR / analysis_config["output_dir_name"]
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-OPTUNA_DIR = OUTPUT_DIR / "03_optuna_search"
-MODEL_DIR = OUTPUT_DIR / "04_suave_model"
-for directory in (OPTUNA_DIR, MODEL_DIR):
-    directory.mkdir(parents=True, exist_ok=True)
+analysis_dirs = prepare_analysis_output_directories(
+    OUTPUT_DIR,
+    (
+        "optuna",
+        "model",
+    ),
+)
+
+OPTUNA_DIR = analysis_dirs["optuna"]
+MODEL_DIR = analysis_dirs["model"]
 
 analysis_config["optuna_storage"] = (
     f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
@@ -134,7 +142,9 @@ def _target_accessor(index: int) -> Callable[["optuna.trial.FrozenTrial"], float
 
     def _target(trial: "optuna.trial.FrozenTrial") -> float:
         if trial.values is None or index >= len(trial.values):
-            raise optuna.exceptions.TrialPruned("Trial lacks the requested objective value")
+            raise optuna.exceptions.TrialPruned(
+                "Trial lacks the requested objective value"
+            )
         value = trial.values[index]
         if value is None or not np.isfinite(value):
             raise optuna.exceptions.TrialPruned("Objective value is not finite")
@@ -252,17 +262,11 @@ def run_optuna_search(
         model = build_suave_model(trial.params, schema, random_state=random_state)
 
         start_time = time.perf_counter()
+        fit_kwargs = resolve_suave_fit_kwargs(trial.params)
         model.fit(
             X_train,
             y_train,
-            warmup_epochs=int(trial.params.get("warmup_epochs", 3)),
-            kl_warmup_epochs=int(trial.params.get("kl_warmup_epochs", 0)),
-            head_epochs=int(trial.params.get("head_epochs", 2)),
-            finetune_epochs=int(trial.params.get("finetune_epochs", 2)),
-            joint_decoder_lr_scale=float(
-                trial.params.get("joint_decoder_lr_scale", 0.1)
-            ),
-            early_stop_patience=int(trial.params.get("early_stop_patience", 10)),
+            **fit_kwargs,
         )
         fit_seconds = time.perf_counter() - start_time
         validation_probs = model.predict_proba(X_validation)
@@ -347,13 +351,23 @@ def run_optuna_search(
     if not feasible_trials:
         raise RuntimeError("Optuna search did not produce any completed trials")
 
-    def sort_key(trial: "optuna.trial.Trial") -> Tuple[float, float]:
-        values = trial.values or (float("nan"), float("inf"))
-        primary = values[0]
-        secondary = values[1]
-        return (primary, -secondary if np.isfinite(secondary) else float("-inf"))
+    pareto_trials = [trial for trial in study.best_trials if trial.values is not None]
+    if not pareto_trials:
+        pareto_trials = feasible_trials
 
-    best_trial = max(feasible_trials, key=sort_key)
+    def _trial_objectives(trial: "optuna.trial.FrozenTrial") -> Tuple[float, float]:
+        values = trial.values or (float("nan"), float("nan"))
+        primary = float(values[0])
+        secondary = float(values[1]) if len(values) > 1 else float("nan")
+        return primary, secondary
+
+    best_trial = choose_preferred_pareto_trial(
+        pareto_trials,
+        min_validation_roauc=PARETO_MIN_VALIDATION_ROAUC,
+        max_abs_delta_auc=PARETO_MAX_ABS_DELTA_AUC,
+    )
+    if best_trial is None:
+        best_trial = max(pareto_trials, key=lambda trial: _trial_objectives(trial)[0])
     best_attributes: Dict[str, object] = {
         "trial_number": best_trial.number,
         "values": tuple(best_trial.values or ()),
@@ -395,11 +409,7 @@ y_validation = y_validation.reset_index(drop=True)
 
 # %%
 
-study_name = (
-    f"{analysis_config['optuna_study_prefix']}_{TARGET_LABEL}"
-    if analysis_config["optuna_study_prefix"]
-    else None
-)
+study_name = make_study_name(analysis_config["optuna_study_prefix"], TARGET_LABEL)
 
 study, optuna_best_info, optuna_diagnostics = run_optuna_search(
     X_train_model,
@@ -500,12 +510,7 @@ model = build_suave_model(best_params, schema, random_state=RANDOM_STATE)
 model.fit(
     X_train_model,
     y_train_model,
-    warmup_epochs=int(best_params.get("warmup_epochs", 3)),
-    kl_warmup_epochs=int(best_params.get("kl_warmup_epochs", 0)),
-    head_epochs=int(best_params.get("head_epochs", 2)),
-    finetune_epochs=int(best_params.get("finetune_epochs", 2)),
-    joint_decoder_lr_scale=float(best_params.get("joint_decoder_lr_scale", 0.1)),
-    early_stop_patience=int(best_params.get("early_stop_patience", 10)),
+    **resolve_suave_fit_kwargs(best_params),
 )
 
 isotonic_calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
@@ -515,6 +520,18 @@ calibrator_path = MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
 
 model.save(model_path)
 joblib.dump(isotonic_calibrator, calibrator_path)
+
+manifest_path = record_model_manifest(
+    MODEL_DIR,
+    TARGET_LABEL,
+    trial_number=optuna_best_info.get("trial_number"),
+    values=best_trial_values,
+    params=best_params,
+    model_path=model_path,
+    calibrator_path=calibrator_path,
+    study_name=study.study_name,
+    storage=analysis_config.get("optuna_storage"),
+)
 
 
 # %% [markdown]
@@ -535,6 +552,7 @@ summary_lines = [
     f"- Optuna trials: {optuna_trials_path.relative_to(OUTPUT_DIR)}",
     f"- Best info: {best_info_path.relative_to(OUTPUT_DIR)}",
     f"- Best params: {best_params_path.relative_to(OUTPUT_DIR)}",
+    f"- Model manifest: {manifest_path.relative_to(OUTPUT_DIR)}",
     f"- SUAVE model: {model_path.relative_to(OUTPUT_DIR)}",
     f"- Isotonic calibrator: {calibrator_path.relative_to(OUTPUT_DIR)}",
 ]

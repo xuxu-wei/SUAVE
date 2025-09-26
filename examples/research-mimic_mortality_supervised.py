@@ -9,11 +9,10 @@
 # %%
 
 from __future__ import annotations
-
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import joblib
@@ -41,6 +40,15 @@ from mimic_mortality_utils import (  # noqa: E402
     TARGET_COLUMNS,
     BENCHMARK_COLUMNS,
     VALIDATION_SIZE,
+    PARETO_MAX_ABS_DELTA_AUC,
+    PARETO_MIN_VALIDATION_ROAUC,
+    build_analysis_config,
+    choose_preferred_pareto_trial,
+    load_optuna_study,
+    make_study_name,
+    prepare_analysis_output_directories,
+    parse_script_arguments,
+    summarise_pareto_trials,
     build_prediction_dataframe,
     build_suave_model,
     build_tstr_training_sets,
@@ -50,9 +58,14 @@ from mimic_mortality_utils import (  # noqa: E402
     evaluate_transfer_baselines,
     extract_positive_probabilities,
     fit_isotonic_calibrator,
+    is_interactive_session,
     load_dataset,
+    load_model_manifest,
     load_or_create_iteratively_imputed_features,
+    manifest_artifact_paths,
+    manifest_artifacts_exist,
     make_baseline_model_factories,
+    resolve_suave_fit_kwargs,
     plot_benchmark_curves,
     plot_calibration_curves,
     plot_latent_space,
@@ -91,13 +104,12 @@ from suave.plots import (  # noqa: E402
 
 TARGET_LABEL = "in_hospital_mortality"
 
-analysis_config = {
-    "optuna_trials": 60,
-    "optuna_timeout": 3600 * 48,
-    "optuna_study_prefix": "supervised",
-    "optuna_storage": None,
-    "output_dir_name": "research_outputs_supervised",
-}
+analysis_config = build_analysis_config()
+
+IS_INTERACTIVE = is_interactive_session()
+CLI_REQUESTED_TRIAL_ID: Optional[int] = None
+if not IS_INTERACTIVE:
+    CLI_REQUESTED_TRIAL_ID = parse_script_arguments(sys.argv[1:])
 
 
 # %% [markdown]
@@ -113,32 +125,34 @@ DATA_DIR = (EXAMPLES_DIR / "data" / "sepsis_mortality_dataset").resolve()
 OUTPUT_DIR = EXAMPLES_DIR / analysis_config["output_dir_name"]
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-SCHEMA_DIR = OUTPUT_DIR / "01_schema_validation"
-FEATURE_ENGINEERING_DIR = OUTPUT_DIR / "02_feature_engineering"
-OPTUNA_DIR = OUTPUT_DIR / "03_optuna_search"
-MODEL_DIR = OUTPUT_DIR / "04_suave_model"
-EVALUATION_DIR = OUTPUT_DIR / "05_evaluation_metrics"
-BOOTSTRAP_DIR = OUTPUT_DIR / "06_bootstrap_analysis"
-BASELINE_DIR = OUTPUT_DIR / "07_baseline_models"
-TRANSFER_DIR = OUTPUT_DIR / "08_transfer_learning"
-DISTRIBUTION_DIR = OUTPUT_DIR / "09_distribution_shift"
-PRIVACY_DIR = OUTPUT_DIR / "10_privacy_assessment"
-VISUALISATION_DIR = OUTPUT_DIR / "11_visualizations"
+analysis_dirs = prepare_analysis_output_directories(
+    OUTPUT_DIR,
+    (
+        "schema",
+        "features",
+        "optuna",
+        "model",
+        "evaluation",
+        "bootstrap",
+        "baseline",
+        "transfer",
+        "distribution",
+        "privacy",
+        "visualisation",
+    ),
+)
 
-for directory in (
-    SCHEMA_DIR,
-    FEATURE_ENGINEERING_DIR,
-    OPTUNA_DIR,
-    MODEL_DIR,
-    EVALUATION_DIR,
-    BOOTSTRAP_DIR,
-    BASELINE_DIR,
-    TRANSFER_DIR,
-    DISTRIBUTION_DIR,
-    PRIVACY_DIR,
-    VISUALISATION_DIR,
-):
-    directory.mkdir(parents=True, exist_ok=True)
+SCHEMA_DIR = analysis_dirs["schema"]
+FEATURE_ENGINEERING_DIR = analysis_dirs["features"]
+OPTUNA_DIR = analysis_dirs["optuna"]
+MODEL_DIR = analysis_dirs["model"]
+EVALUATION_DIR = analysis_dirs["evaluation"]
+BOOTSTRAP_DIR = analysis_dirs["bootstrap"]
+BASELINE_DIR = analysis_dirs["baseline"]
+TRANSFER_DIR = analysis_dirs["transfer"]
+DISTRIBUTION_DIR = analysis_dirs["distribution"]
+PRIVACY_DIR = analysis_dirs["privacy"]
+VISUALISATION_DIR = analysis_dirs["visualisation"]
 
 analysis_config["optuna_storage"] = (
     f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
@@ -300,16 +314,6 @@ render_dataframe(schema_df, title="Schema overview", floatfmt=None)
 
 
 # %%
-
-
-def make_study_name(prefix: Optional[str], target_label: str) -> Optional[str]:
-    """Return the Optuna study name for ``target_label`` given ``prefix``."""
-
-    if not prefix:
-        return None
-    return f"{prefix}_{target_label}"
-
-
 def load_optuna_results(
     output_dir: Path,
     target_label: str,
@@ -372,19 +376,6 @@ def load_optuna_results(
     if not best_params and isinstance(best_info.get("params"), Mapping):
         best_params = dict(best_info["params"])
     return best_info, best_params
-
-
-def resolve_suave_fit_kwargs(params: Mapping[str, Any]) -> Dict[str, Any]:
-    """Return fit-time keyword arguments derived from Optuna parameters."""
-
-    return {
-        "warmup_epochs": int(params.get("warmup_epochs", 3)),
-        "kl_warmup_epochs": int(params.get("kl_warmup_epochs", 0)),
-        "head_epochs": int(params.get("head_epochs", 2)),
-        "finetune_epochs": int(params.get("finetune_epochs", 2)),
-        "joint_decoder_lr_scale": float(params.get("joint_decoder_lr_scale", 0.1)),
-        "early_stop_patience": int(params.get("early_stop_patience", 10)),
-    }
 
 
 def extract_calibrator_estimator(calibrator: Any) -> Optional[SUAVE]:
@@ -623,11 +614,40 @@ optuna_best_info, optuna_best_params = load_optuna_results(
     storage=analysis_config.get("optuna_storage"),
 )
 optuna_trials_path = OPTUNA_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
+model_manifest = load_model_manifest(MODEL_DIR, TARGET_LABEL)
 
 if not optuna_best_params:
     print(
         "Optuna best parameters were not found on disk; subsequent steps will "
         "rely on defaults unless the storage backend is available."
+    )
+
+optuna_study = load_optuna_study(
+    study_prefix=analysis_config.get("optuna_study_prefix"),
+    target_label=TARGET_LABEL,
+    storage=analysis_config.get("optuna_storage"),
+)
+
+pareto_trials: List["optuna.trial.FrozenTrial"] = []
+if optuna_study is not None:
+    pareto_trials = [
+        trial for trial in optuna_study.best_trials if trial.values is not None
+    ]
+    if not pareto_trials:
+        pareto_trials = [
+            trial for trial in optuna_study.trials if trial.values is not None
+        ]
+
+if IS_INTERACTIVE and pareto_trials:
+    pareto_summary = summarise_pareto_trials(
+        pareto_trials,
+        manifest=model_manifest,
+        model_dir=MODEL_DIR,
+    )
+    render_dataframe(
+        pareto_summary,
+        title="Pareto-optimal Optuna trials",
+        floatfmt=".4f",
     )
 
 
@@ -640,41 +660,172 @@ if not optuna_best_params:
 
 # %%
 
-model_path = MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
-calibrator_path = MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
+manifest_paths = manifest_artifact_paths(model_manifest, MODEL_DIR)
+saved_model_path = manifest_paths.get("model")
+saved_calibrator_path = manifest_paths.get("calibrator")
+saved_trial_number = model_manifest.get("trial_number")
+
+legacy_model_path = MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
+legacy_calibrator_path = MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
+
+pareto_lookup = {trial.number: trial for trial in pareto_trials}
+all_trials_lookup = (
+    {trial.number: trial for trial in optuna_study.trials if trial.values is not None}
+    if optuna_study is not None
+    else {}
+)
+
+selected_trial_number: Optional[int] = None
+selected_trial: Optional["optuna.trial.FrozenTrial"] = None
+selected_model_path: Optional[Path] = None
+selected_calibrator_path: Optional[Path] = None
+
+if IS_INTERACTIVE and pareto_trials:
+    default_hint = (
+        f"trial #{saved_trial_number}"
+        if saved_trial_number is not None
+        and saved_model_path is not None
+        and saved_model_path.exists()
+        else "a new training run"
+    )
+    prompt = (
+        "Enter the Optuna trial ID from the Pareto front to load or train "
+        f"(press Enter to reuse {default_hint}): "
+    )
+    while True:
+        try:
+            response = input(prompt).strip()
+        except EOFError:
+            response = ""
+        if not response:
+            if saved_model_path and saved_model_path.exists():
+                selected_model_path = saved_model_path
+                selected_calibrator_path = saved_calibrator_path
+                selected_trial_number = saved_trial_number
+            break
+        try:
+            candidate_id = int(response)
+        except ValueError:
+            print(
+                "Please enter a valid integer trial identifier from the listed Pareto front."
+            )
+            continue
+        if candidate_id not in pareto_lookup:
+            print(
+                "The specified trial is not part of the Pareto front; choose one of the displayed IDs."
+            )
+            continue
+        selected_trial_number = candidate_id
+        selected_trial = pareto_lookup[candidate_id]
+        if (
+            saved_trial_number == candidate_id
+            and saved_model_path
+            and saved_model_path.exists()
+        ):
+            selected_model_path = saved_model_path
+            selected_calibrator_path = saved_calibrator_path
+        break
+else:
+    requested_id = CLI_REQUESTED_TRIAL_ID
+    if requested_id is not None:
+        if (
+            saved_trial_number == requested_id
+            and saved_model_path
+            and saved_model_path.exists()
+        ):
+            selected_trial_number = requested_id
+            selected_model_path = saved_model_path
+            selected_calibrator_path = saved_calibrator_path
+        else:
+            selected_trial = all_trials_lookup.get(requested_id)
+            if selected_trial is None:
+                print(
+                    f"Requested Optuna trial #{requested_id} could not be located; proceeding with fallback selection."
+                )
+            else:
+                selected_trial_number = requested_id
+    if selected_model_path is None and selected_trial is None:
+        if saved_model_path and saved_model_path.exists():
+            selected_trial_number = saved_trial_number
+            selected_model_path = saved_model_path
+            selected_calibrator_path = saved_calibrator_path
+        elif legacy_model_path.exists() or legacy_calibrator_path.exists():
+            selected_model_path = (
+                legacy_model_path if legacy_model_path.exists() else None
+            )
+            selected_calibrator_path = (
+                legacy_calibrator_path if legacy_calibrator_path.exists() else None
+            )
+        elif pareto_trials:
+            selected_trial = choose_preferred_pareto_trial(
+                pareto_trials,
+                min_validation_roauc=PARETO_MIN_VALIDATION_ROAUC,
+                max_abs_delta_auc=PARETO_MAX_ABS_DELTA_AUC,
+            )
+            if selected_trial is not None:
+                selected_trial_number = selected_trial.number
+        elif optuna_best_params:
+            print(
+                "Optuna study unavailable; using stored best parameters for training."
+            )
+
+selected_params: Dict[str, Any] = {}
+if selected_trial is not None:
+    selected_params = dict(selected_trial.params)
+elif selected_trial_number == saved_trial_number and isinstance(
+    model_manifest.get("params"), Mapping
+):
+    selected_params = dict(model_manifest["params"])
+elif optuna_best_params:
+    selected_params = dict(optuna_best_params)
 
 model: Optional[SUAVE] = None
 calibrator: Optional[Any] = None
 
-if calibrator_path.exists():
-    calibrator = joblib.load(calibrator_path)
-    model = extract_calibrator_estimator(calibrator)
-    if model is not None:
+if selected_calibrator_path and selected_calibrator_path.exists():
+    calibrator = joblib.load(selected_calibrator_path)
+    embedded = extract_calibrator_estimator(calibrator)
+    if embedded is not None:
+        model = embedded
+        if selected_trial_number is not None:
+            print(
+                f"Loaded isotonic calibrator for Optuna trial #{selected_trial_number} from {selected_calibrator_path}."
+            )
+        else:
+            print(f"Loaded isotonic calibrator from {selected_calibrator_path}.")
+    else:
+        print("Loaded calibrator did not embed a SUAVE estimator; it will be refitted.")
+        calibrator = None
+
+if model is None and selected_model_path and selected_model_path.exists():
+    model = SUAVE.load(selected_model_path)
+    if selected_trial_number is not None:
         print(
-            f"Loaded isotonic calibrator and embedded SUAVE model from {calibrator_path}."
+            f"Loaded SUAVE model for Optuna trial #{selected_trial_number} from {selected_model_path}."
         )
+    else:
+        print(f"Loaded SUAVE model from {selected_model_path}.")
 
-if model is None and model_path.exists():
-    model = SUAVE.load(model_path)
-    print(f"Loaded SUAVE model from {model_path}.")
-
-if model is None and optuna_best_params:
-    print(
-        "Training SUAVE with best Optuna parameters because no saved model was found…"
-    )
-    model = build_suave_model(optuna_best_params, schema, random_state=RANDOM_STATE)
-    fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
+if model is None:
+    if not selected_params:
+        raise RuntimeError(
+            "Unable to determine hyperparameters for training; rerun the optimisation pipeline first."
+        )
+    if selected_trial_number is not None:
+        print(
+            f"Training SUAVE for Optuna trial #{selected_trial_number} because no saved model artefacts were available…"
+        )
+    else:
+        print(
+            "Training SUAVE with fallback hyperparameters because no saved model was available…"
+        )
+    model = build_suave_model(selected_params, schema, random_state=RANDOM_STATE)
+    fit_kwargs = resolve_suave_fit_kwargs(selected_params)
     model.fit(
         X_train_model,
         y_train_model,
         **fit_kwargs,
     )
-else:
-    if model is None:
-        raise RuntimeError(
-            "Unable to load or reconstruct the SUAVE model. Ensure the optimisation "
-            "script has been executed to produce the necessary artefacts."
-        )
 
 if calibrator is None:
     calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
@@ -1274,9 +1425,9 @@ else:
         feature_only_corr.abs().max(axis=1).sort_values(ascending=False).head(10)
     )
     render_dataframe(
-        top_correlated.rename("max_abs_correlation").reset_index().rename(
-            columns={"index": "variable"}
-        ),
+        top_correlated.rename("max_abs_correlation")
+        .reset_index()
+        .rename(columns={"index": "variable"}),
         title="Top latent-clinical correlations (absolute)",
         floatfmt=".3f",
     )
@@ -1286,10 +1437,10 @@ latent_group_outputs: list[tuple[str, Path, Path, Path, Path, Path]] = []
 for group_name, candidate_columns in VAR_GROUP_DICT.items():
     missing = sorted(set(candidate_columns) - available_features)
     if missing:
-        print(
-            f"Skipping unavailable variables for {group_name}: {', '.join(missing)}"
-        )
-    group_features = [column for column in candidate_columns if column in available_features]
+        print(f"Skipping unavailable variables for {group_name}: {', '.join(missing)}")
+    group_features = [
+        column for column in candidate_columns if column in available_features
+    ]
     if not group_features:
         continue
 

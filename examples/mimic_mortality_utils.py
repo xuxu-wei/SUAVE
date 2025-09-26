@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
+from datetime import datetime
+import json
 from pathlib import Path
 from typing import (
+    Any,
     Callable,
     Dict,
     Iterable,
     List,
     Mapping,
-    MutableMapping,
     Optional,
     Sequence,
     Tuple,
@@ -31,6 +34,11 @@ from sklearn.metrics import (
     roc_curve,
 )
 from sklearn.pipeline import Pipeline
+
+
+# =============================================================================
+# === Configuration constants and global options ==============================
+# =============================================================================
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -60,8 +68,11 @@ BENCHMARK_COLUMNS = (
     "OASIS",
 )  # do not include in training. Only use for benchamrk validation.
 
-CALIBRATION_SIZE: float = 0.2
 VALIDATION_SIZE: float = 0.2
+
+# Thresholds governing which Optuna trials are considered viable for persistence.
+PARETO_MIN_VALIDATION_ROAUC: float = 0.81
+PARETO_MAX_ABS_DELTA_AUC: float = 0.035
 
 HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
     "lean": (64, 32),
@@ -83,16 +94,76 @@ HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
     "deep": (128, 64, 32),
 }
 
+DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
+    "optuna_trials": 60,
+    "optuna_timeout": 3600 * 48,
+    "optuna_study_prefix": "supervised",
+    "optuna_storage": None,
+    "output_dir_name": "research_outputs_supervised",
+}
+
+ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
+    "schema": "01_schema_validation",
+    "features": "02_feature_engineering",
+    "optuna": "03_optuna_search",
+    "model": "04_suave_model",
+    "evaluation": "05_evaluation_metrics",
+    "bootstrap": "06_bootstrap_analysis",
+    "baseline": "07_baseline_models",
+    "transfer": "08_transfer_learning",
+    "distribution": "09_distribution_shift",
+    "privacy": "10_privacy_assessment",
+    "visualisation": "11_visualizations",
+}
+
+
+# =============================================================================
+# === Analysis configuration helpers ==========================================
+# =============================================================================
+
+
+def build_analysis_config(**overrides: object) -> Dict[str, object]:
+    """Return the default analysis configuration with optional overrides."""
+
+    config = dict(DEFAULT_ANALYSIS_CONFIG)
+    config.update(overrides)
+    config.setdefault("optuna_storage", None)
+    return config
+
+
+def prepare_analysis_output_directories(
+    output_root: Path, keys: Sequence[str]
+) -> Dict[str, Path]:
+    """Create and return standardised analysis output subdirectories."""
+
+    directories: Dict[str, Path] = {}
+    for key in keys:
+        try:
+            subdir_name = ANALYSIS_SUBDIRECTORIES[key]
+        except KeyError as error:  # pragma: no cover - guard against typos
+            raise KeyError(f"Unknown analysis subdirectory key: {key}") from error
+        path = output_root / subdir_name
+        path.mkdir(parents=True, exist_ok=True)
+        directories[key] = path
+    return directories
+
+
 __all__ = [
     "RANDOM_STATE",
     "TARGET_COLUMNS",
     "BENCHMARK_COLUMNS",
-    "CALIBRATION_SIZE",
     "VALIDATION_SIZE",
     "Schema",
     "SchemaInferencer",
     "HIDDEN_DIMENSION_OPTIONS",
     "HEAD_HIDDEN_DIMENSION_OPTIONS",
+    "PARETO_MIN_VALIDATION_ROAUC",
+    "PARETO_MAX_ABS_DELTA_AUC",
+    "choose_preferred_pareto_trial",
+    "load_model_manifest",
+    "manifest_artifact_paths",
+    "manifest_artifacts_exist",
+    "record_model_manifest",
     "build_prediction_dataframe",
     "compute_auc",
     "compute_binary_metrics",
@@ -117,16 +188,29 @@ __all__ = [
     "prepare_features",
     "render_dataframe",
     "rbf_mmd",
+    "make_study_name",
+    "DEFAULT_ANALYSIS_CONFIG",
+    "ANALYSIS_SUBDIRECTORIES",
+    "build_analysis_config",
+    "prepare_analysis_output_directories",
+    "parse_script_arguments",
+    "load_optuna_study",
+    "summarise_pareto_trials",
     "schema_markdown_table",
     "schema_to_dataframe",
     "slugify_identifier",
-    "split_train_validation_calibration",
     "to_numeric_frame",
     "build_tstr_training_sets",
     "evaluate_transfer_baselines",
     "build_suave_model",
+    "resolve_suave_fit_kwargs",
     "resolve_classification_loss_weight",
 ]
+
+
+# =============================================================================
+# === Session and rendering helpers ==========================================
+# =============================================================================
 
 
 def is_interactive_session() -> bool:
@@ -175,6 +259,369 @@ def render_dataframe(
     if floatfmt is not None:
         tabulate_kwargs["floatfmt"] = floatfmt
     print(tabulate(df, **tabulate_kwargs))
+
+
+# =============================================================================
+# === Model manifest and Optuna metadata helpers ==============================
+# =============================================================================
+
+
+def _normalise_manifest_path(path: Path, base_dir: Path) -> str:
+    """Return ``path`` as a relative string when nested under ``base_dir``."""
+
+    try:
+        return str(path.relative_to(base_dir))
+    except ValueError:
+        return str(path)
+
+
+def manifest_artifact_paths(
+    manifest: Mapping[str, object],
+    model_dir: Path,
+) -> Dict[str, Optional[Path]]:
+    """Return resolved artefact paths declared in ``manifest``.
+
+    Parameters
+    ----------
+    manifest
+        Metadata loaded via :func:`load_model_manifest`.
+    model_dir
+        Directory that stores serialised SUAVE artefacts.
+
+    Returns
+    -------
+    dict
+        Mapping with ``model`` and ``calibrator`` keys pointing to resolved
+        :class:`~pathlib.Path` instances when available.
+
+    Examples
+    --------
+    >>> manifest = {"model_path": "suave_best_label.pt"}
+    >>> paths = manifest_artifact_paths(manifest, Path("/tmp"))
+    >>> paths["model"].name
+    'suave_best_label.pt'
+    """
+
+    resolved: Dict[str, Optional[Path]] = {"model": None, "calibrator": None}
+
+    for key, label in (("model_path", "model"), ("calibrator_path", "calibrator")):
+        raw = manifest.get(key)
+        if not raw:
+            continue
+        candidate = Path(str(raw))
+        if not candidate.is_absolute():
+            candidate = model_dir / candidate
+        resolved[label] = candidate
+    return resolved
+
+
+def manifest_artifacts_exist(manifest: Mapping[str, object], model_dir: Path) -> bool:
+    """Return ``True`` when artefact paths declared in ``manifest`` exist.
+
+    Parameters
+    ----------
+    manifest
+        Metadata loaded via :func:`load_model_manifest`.
+    model_dir
+        Directory that stores serialised SUAVE artefacts.
+
+    Examples
+    --------
+    >>> manifest = {"model_path": "model.pt"}
+    >>> manifest_artifacts_exist(manifest, Path("."))
+    False
+    """
+
+    paths = manifest_artifact_paths(manifest, model_dir)
+    model_path = paths.get("model")
+    calibrator_path = paths.get("calibrator")
+    return bool(
+        model_path
+        and model_path.exists()
+        and calibrator_path
+        and calibrator_path.exists()
+    )
+
+
+def load_model_manifest(model_dir: Path, target_label: str) -> Dict[str, object]:
+    """Load the metadata describing the latest persisted SUAVE artefacts.
+
+    Parameters
+    ----------
+    model_dir
+        Directory storing SUAVE checkpoints and calibrators.
+    target_label
+        Name of the prediction target the artefacts were trained on.
+
+    Returns
+    -------
+    dict
+        Manifest metadata. An empty dictionary is returned when no manifest is
+        present on disk.
+
+    Examples
+    --------
+    >>> tmp = Path("/tmp/model_manifest")
+    >>> _ = tmp.mkdir(parents=True, exist_ok=True)
+    >>> load_model_manifest(tmp, "mortality")
+    {}
+    """
+
+    manifest_path = model_dir / f"suave_model_manifest_{target_label}.json"
+    if not manifest_path.exists():
+        return {}
+    return json.loads(manifest_path.read_text())
+
+
+def record_model_manifest(
+    model_dir: Path,
+    target_label: str,
+    *,
+    trial_number: Optional[int],
+    values: Sequence[float],
+    params: Mapping[str, object],
+    model_path: Path,
+    calibrator_path: Path,
+    study_name: Optional[str] = None,
+    storage: Optional[str] = None,
+) -> Path:
+    """Persist metadata describing the saved SUAVE model artefacts.
+
+    Parameters
+    ----------
+    model_dir
+        Directory storing SUAVE checkpoints and calibrators.
+    target_label
+        Prediction target associated with the artefacts.
+    trial_number
+        Optuna trial identifier used to train the artefacts.
+    values
+        Objective values reported by Optuna for the selected trial.
+    params
+        Hyperparameters used to fit the SUAVE model.
+    model_path
+        Filesystem path to the serialised SUAVE checkpoint.
+    calibrator_path
+        Filesystem path to the isotonic calibrator joblib file.
+    study_name
+        Optional Optuna study name to aid traceability.
+    storage
+        Optional Optuna storage backend URI.
+
+    Returns
+    -------
+    Path
+        Location of the manifest file written to disk.
+
+    Examples
+    --------
+    >>> tmp = Path("/tmp/model_manifest_example")
+    >>> _ = tmp.mkdir(parents=True, exist_ok=True)
+    >>> model = tmp / "model.pt"
+    >>> calibrator = tmp / "calibrator.joblib"
+    >>> _ = model.write_text("dummy")
+    >>> _ = calibrator.write_text("dummy")
+    >>> manifest = record_model_manifest(
+    ...     tmp,
+    ...     "mortality",
+    ...     trial_number=1,
+    ...     values=[0.9, 0.01],
+    ...     params={"lr": 1e-3},
+    ...     model_path=model,
+    ...     calibrator_path=calibrator,
+    ... )
+    >>> manifest.exists()
+    True
+    """
+
+    manifest_path = model_dir / f"suave_model_manifest_{target_label}.json"
+    manifest: Dict[str, object] = {
+        "target_label": target_label,
+        "trial_number": trial_number,
+        "values": [float(value) for value in values],
+        "params": dict(params),
+        "model_path": _normalise_manifest_path(model_path, model_dir),
+        "calibrator_path": _normalise_manifest_path(calibrator_path, model_dir),
+        "study_name": study_name,
+        "storage": storage,
+        "saved_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    return manifest_path
+
+
+# =============================================================================
+# === Optuna study discovery and selection utilities =========================
+# =============================================================================
+
+
+def make_study_name(prefix: Optional[str], target_label: str) -> Optional[str]:
+    """Return the Optuna study name for ``target_label`` given ``prefix``."""
+
+    if not prefix:
+        return None
+    return f"{prefix}_{target_label}"
+
+
+def parse_script_arguments(argv: Sequence[str]) -> Optional[int]:
+    """Parse ``argv`` and return the requested Optuna trial identifier.
+
+    Parameters
+    ----------
+    argv
+        Command-line arguments excluding the executable name.
+
+    Returns
+    -------
+    Optional[int]
+        The requested Optuna trial identifier, if provided.
+
+    Examples
+    --------
+    >>> parse_script_arguments(["--trial-id", "12"])
+    12
+    >>> parse_script_arguments([]) is None
+    True
+    """
+
+    parser = argparse.ArgumentParser(
+        description="Select an Optuna trial for SUAVE model loading/training.",
+    )
+    parser.add_argument(
+        "trial_id",
+        nargs="?",
+        type=int,
+        help="Optuna trial identifier to load or train.",
+    )
+    parser.add_argument(
+        "--trial-id",
+        dest="trial_id_flag",
+        type=int,
+        help="Optuna trial identifier to load or train.",
+    )
+    args = parser.parse_args(list(argv))
+    if args.trial_id_flag is not None:
+        return args.trial_id_flag
+    return args.trial_id
+
+
+def load_optuna_study(
+    *,
+    study_prefix: Optional[str],
+    target_label: str,
+    storage: Optional[str],
+) -> Optional["optuna.study.Study"]:
+    """Return the persisted Optuna study when available."""
+
+    study_name = make_study_name(study_prefix, target_label)
+    if not storage or not study_name:
+        return None
+    try:
+        import optuna  # type: ignore
+    except ImportError:  # pragma: no cover - optional dependency in notebooks
+        return None
+
+    try:
+        return optuna.load_study(study_name=study_name, storage=storage)
+    except Exception as error:  # pragma: no cover - diagnostic logging only
+        print(
+            f"Failed to load Optuna study '{study_name}' from storage '{storage}': {error}"
+        )
+        return None
+
+
+def summarise_pareto_trials(
+    trials: Sequence["optuna.trial.FrozenTrial"],
+    *,
+    manifest: Mapping[str, Any],
+    model_dir: Path,
+) -> pd.DataFrame:
+    """Return a tidy summary of Pareto-optimal Optuna trials."""
+
+    if not trials:
+        return pd.DataFrame()
+
+    saved_trial_number = None
+    if manifest and manifest_artifacts_exist(manifest, model_dir):
+        saved_trial_number = manifest.get("trial_number")
+
+    rows: List[Dict[str, object]] = []
+    for trial in trials:
+        values = trial.values or (float("nan"), float("nan"))
+        validation_roauc = float(values[0])
+        delta_auc = float(values[1]) if len(values) > 1 else float("nan")
+        saved_locally = bool(saved_trial_number == trial.number)
+        rows.append(
+            {
+                "Saved locally": "✅" if saved_locally else "❌",
+                "Trial ID": trial.number,
+                "Validation ROAUC": validation_roauc,
+                "TSTR/TRTR ΔAUC": delta_auc,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+# =============================================================================
+# === Optuna trial scoring ====================================================
+# =============================================================================
+
+
+def choose_preferred_pareto_trial(
+    trials: Sequence["optuna.trial.FrozenTrial"],
+    *,
+    min_validation_roauc: float = PARETO_MIN_VALIDATION_ROAUC,
+    max_abs_delta_auc: float = PARETO_MAX_ABS_DELTA_AUC,
+) -> Optional["optuna.trial.FrozenTrial"]:
+    """Return the trial that best satisfies the Pareto-front constraints.
+
+    Parameters
+    ----------
+    trials
+        Pareto-optimal trials emitted by Optuna.
+    min_validation_roauc
+        Minimum acceptable validation ROC-AUC threshold.
+    max_abs_delta_auc
+        Maximum permissible absolute difference between TSTR/TRTR ROC-AUC.
+
+    Examples
+    --------
+    >>> choose_preferred_pareto_trial([]) is None
+    True
+    """
+
+    if not trials:
+        return None
+
+    def _objective_values(trial: "optuna.trial.FrozenTrial") -> Tuple[float, float]:
+        values = trial.values or (float("nan"), float("nan"))
+        primary = float(values[0])
+        secondary = float(values[1]) if len(values) > 1 else float("nan")
+        return primary, secondary
+
+    def _within_constraints(trial: "optuna.trial.FrozenTrial") -> bool:
+        primary, secondary = _objective_values(trial)
+        return (
+            primary > min_validation_roauc
+            and np.isfinite(primary)
+            and np.isfinite(secondary)
+            and abs(secondary) < max_abs_delta_auc
+        )
+
+    constrained = [trial for trial in trials if _within_constraints(trial)]
+    if constrained:
+        return max(constrained, key=lambda trial: _objective_values(trial)[0])
+
+    eligible = [
+        trial
+        for trial in trials
+        if np.isfinite(_objective_values(trial)[0])
+        and _objective_values(trial)[0] > min_validation_roauc
+    ]
+    if eligible:
+        return eligible[0]
+
+    return max(trials, key=lambda trial: _objective_values(trial)[0])
 
 
 def dataframe_to_markdown(df: pd.DataFrame, *, floatfmt: Optional[str] = ".3f") -> str:
@@ -396,49 +843,6 @@ def prepare_features(df: pd.DataFrame, feature_columns: Iterable[str]) -> pd.Dat
     """Return features aligned to ``feature_columns``."""
 
     return df.loc[:, list(feature_columns)].copy()
-
-
-def split_train_validation_calibration(
-    features: pd.DataFrame,
-    targets: pd.Series,
-    *,
-    calibration_size: float,
-    validation_size: float,
-    random_state: int,
-) -> Tuple[
-    pd.DataFrame,
-    pd.DataFrame,
-    pd.DataFrame,
-    pd.Series,
-    pd.Series,
-    pd.Series,
-]:
-    """Split data into train, validation, and calibration subsets."""
-
-    from sklearn.model_selection import train_test_split
-
-    X_model, X_calibration, y_model, y_calibration = train_test_split(
-        features,
-        targets,
-        test_size=calibration_size,
-        stratify=targets,
-        random_state=random_state,
-    )
-    X_train, X_validation, y_train, y_validation = train_test_split(
-        X_model,
-        y_model,
-        test_size=validation_size,
-        stratify=y_model,
-        random_state=random_state,
-    )
-    return (
-        X_train.reset_index(drop=True),
-        X_validation.reset_index(drop=True),
-        X_calibration.reset_index(drop=True),
-        y_train.reset_index(drop=True),
-        y_validation.reset_index(drop=True),
-        y_calibration.reset_index(drop=True),
-    )
 
 
 def schema_markdown_table(schema: Schema) -> str:
@@ -1276,6 +1680,19 @@ def build_prediction_dataframe(
     else:
         base_df = base_df.reset_index(drop=True)
     return base_df
+
+
+def resolve_suave_fit_kwargs(params: Mapping[str, object]) -> Dict[str, object]:
+    """Map Optuna trial parameters to :class:`SUAVE.fit` keyword arguments."""
+
+    return {
+        "warmup_epochs": int(params.get("warmup_epochs", 3)),
+        "kl_warmup_epochs": int(params.get("kl_warmup_epochs", 0)),
+        "head_epochs": int(params.get("head_epochs", 2)),
+        "finetune_epochs": int(params.get("finetune_epochs", 2)),
+        "joint_decoder_lr_scale": float(params.get("joint_decoder_lr_scale", 0.1)),
+        "early_stop_patience": int(params.get("early_stop_patience", 10)),
+    }
 
 
 def resolve_classification_loss_weight(params: Mapping[str, object]) -> Optional[float]:
