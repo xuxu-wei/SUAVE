@@ -55,6 +55,7 @@ from mimic_mortality_utils import (  # noqa: E402
     plot_benchmark_curves,
     plot_calibration_curves,
     plot_latent_space,
+    plot_latent_feature_correlation_heatmap,
     plot_transfer_metric_bars,
     prepare_features,
     render_dataframe,
@@ -1030,6 +1031,41 @@ else:
 
 
 # %% [markdown]
+# ## Latent space correlation analysis
+#
+# Quantify the relationship between latent representations and clinical
+# features using Pearson correlation and visualise the strongest associations.
+
+# %%
+
+latent_correlation_base = (
+    VISUALISATION_DIR / f"latent_clinical_correlation_{TARGET_LABEL}"
+)
+latent_correlation_figure = latent_correlation_base.with_suffix(".jpg")
+latent_correlation_df = plot_latent_feature_correlation_heatmap(
+    model,
+    X_train_model,
+    feature_columns=FEATURE_COLUMNS,
+    target_name=TARGET_LABEL,
+    output_path=latent_correlation_base,
+)
+latent_correlation_csv = latent_correlation_base.with_suffix(".csv")
+if latent_correlation_df is not None and not latent_correlation_df.empty:
+    latent_correlation_df.to_csv(latent_correlation_csv)
+    top_correlated = (
+        latent_correlation_df.abs().max(axis=0).sort_values(ascending=False).head(10)
+    )
+    render_dataframe(
+        top_correlated.rename("max_abs_correlation").reset_index().rename(
+            columns={"index": "feature"}
+        ),
+        title="Top latent-clinical correlations (absolute)",
+    )
+else:
+    print("Latent-clinical correlation heatmap could not be generated.")
+
+
+# %% [markdown]
 # ## Latent space interpretation
 #
 # Project latent representations using PCA for qualitative assessment of class
@@ -1120,6 +1156,15 @@ summary_lines.append(
     f"Optuna trials logged at: {optuna_trials_path.relative_to(OUTPUT_DIR)}"
 )
 summary_lines.append(f"Calibration plot: {calibration_path.relative_to(OUTPUT_DIR)}")
+if latent_correlation_df is not None and not latent_correlation_df.empty:
+    summary_lines.append(
+        f"Latent-clinical heatmap: {latent_correlation_figure.relative_to(OUTPUT_DIR)}"
+    )
+    summary_lines.append(
+        f"Latent-clinical correlations: {latent_correlation_csv.relative_to(OUTPUT_DIR)}"
+    )
+else:
+    summary_lines.append("Latent-clinical heatmap: unavailable")
 summary_lines.append(f"Latent projection: {latent_path.relative_to(OUTPUT_DIR)}")
 summary_lines.append("")
 

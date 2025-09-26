@@ -113,6 +113,7 @@ __all__ = [
     "plot_benchmark_curves",
     "plot_calibration_curves",
     "plot_latent_space",
+    "plot_latent_feature_correlation_heatmap",
     "plot_transfer_metric_bars",
     "prepare_features",
     "render_dataframe",
@@ -1098,6 +1099,134 @@ def plot_latent_space(
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     _save_figure_multiformat(fig, output_path.with_suffix(""))
     plt.close(fig)
+
+
+def plot_latent_feature_correlation_heatmap(
+    model: "SUAVE",
+    features: pd.DataFrame,
+    *,
+    feature_columns: Sequence[str],
+    target_name: str,
+    output_path: Path,
+    method: str = "pearson",
+    max_features: int = 30,
+) -> Optional[pd.DataFrame]:
+    """Visualise correlations between latent dimensions and clinical features.
+
+    Parameters
+    ----------
+    model : SUAVE
+        Trained SUAVE estimator used to encode the latent representation.
+    features : pandas.DataFrame
+        Feature matrix aligned with ``model`` used to compute latent vectors.
+    feature_columns : Sequence[str]
+        Ordered list of clinical feature columns to retain when computing the
+        correlation matrix. Non-numeric columns are converted via
+        :func:`to_numeric_frame` prior to analysis.
+    target_name : str
+        Name of the prediction target. Included in the figure title.
+    output_path : pathlib.Path
+        Base path used when persisting the heatmap. Files are exported as
+        PNG/SVG/PDF/JPG variants via :func:`_save_figure_multiformat`.
+    method : {"pearson"}, default "pearson"
+        Correlation coefficient to compute. Currently only Pearson is
+        supported.
+    max_features : int, default 30
+        Maximum number of clinical features shown in the heatmap. When more
+        features are available, the subset with the largest absolute
+        correlations across latent dimensions is displayed to maintain
+        readability.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        Correlation matrix with latent dimensions as rows and clinical
+        features as columns. ``None`` is returned when the computation cannot
+        proceed (for example due to empty inputs or constant columns).
+
+    Examples
+    --------
+    >>> heatmap_df = plot_latent_feature_correlation_heatmap(
+    ...     model,
+    ...     train_features,
+    ...     feature_columns=list(train_features.columns),
+    ...     target_name="in_hospital_mortality",
+    ...     output_path=Path("latent_clinical_heatmap"),
+    ... )
+    >>> heatmap_df.shape
+    (model.latent_dim, min(len(train_features.columns), 30))
+    """
+
+    if method != "pearson":
+        raise ValueError("Only Pearson correlation is currently supported.")
+
+    if features.empty:
+        return None
+
+    latent_array = model.encode(features)
+    if latent_array.size == 0:
+        return None
+
+    latent_dim = latent_array.shape[1]
+    latent_columns = [f"latent_{idx+1}" for idx in range(latent_dim)]
+    latent_df = pd.DataFrame(latent_array, columns=latent_columns, index=features.index)
+
+    selected_features = list(feature_columns)
+    numeric_features = to_numeric_frame(features.loc[:, selected_features])
+    combined = pd.concat([latent_df, numeric_features], axis=1).dropna()
+    if combined.empty:
+        return None
+
+    latent_values = combined.loc[:, latent_columns].to_numpy(dtype=float)
+    feature_values = combined.loc[:, selected_features].to_numpy(dtype=float)
+
+    latent_std = latent_values.std(axis=0)
+    feature_std = feature_values.std(axis=0)
+
+    valid_latent = latent_std > 0
+    valid_features = feature_std > 0
+    if not np.any(valid_latent) or not np.any(valid_features):
+        return None
+
+    latent_values = latent_values[:, valid_latent]
+    feature_values = feature_values[:, valid_features]
+    latent_columns = [col for col, keep in zip(latent_columns, valid_latent) if keep]
+    selected_features = [col for col, keep in zip(selected_features, valid_features) if keep]
+
+    latent_values = (latent_values - latent_values.mean(axis=0)) / latent_values.std(axis=0)
+    feature_values = (feature_values - feature_values.mean(axis=0)) / feature_values.std(axis=0)
+
+    n_samples = latent_values.shape[0]
+    if n_samples < 2:
+        return None
+
+    correlation = latent_values.T @ feature_values / (n_samples - 1)
+    correlation_df = pd.DataFrame(correlation, index=latent_columns, columns=selected_features)
+
+    if max_features is not None and correlation_df.shape[1] > max_features:
+        ranked_features = (
+            correlation_df.abs()
+            .max(axis=0)
+            .sort_values(ascending=False)
+            .head(max_features)
+            .index
+        )
+        correlation_df = correlation_df.loc[:, ranked_features]
+
+    fig, ax = plt.subplots(figsize=(1.2 * correlation_df.shape[1] + 2, 0.6 * correlation_df.shape[0] + 2))
+    heatmap = ax.imshow(correlation_df.to_numpy(), cmap="coolwarm", vmin=-1, vmax=1, aspect="auto")
+    ax.set_xticks(np.arange(correlation_df.shape[1]))
+    ax.set_xticklabels(correlation_df.columns, rotation=45, ha="right", fontsize=9)
+    ax.set_yticks(np.arange(correlation_df.shape[0]))
+    ax.set_yticklabels(correlation_df.index, fontsize=10)
+    ax.set_title(f"Latent-clinical correlations: {target_name}")
+    colorbar = fig.colorbar(heatmap, ax=ax, fraction=0.046, pad=0.04)
+    colorbar.set_label("Pearson correlation", rotation=270, labelpad=15)
+    fig.tight_layout()
+    _save_figure_multiformat(fig, output_path.with_suffix(""))
+    plt.close(fig)
+
+    return correlation_df
 
 
 def plot_benchmark_curves(
