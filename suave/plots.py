@@ -720,7 +720,7 @@ def create_centered_colormap(
     return LinearSegmentedColormap.from_list(f"{cmap_name}_centred", colours)
 
 
-def plot_feature_latent_correlation(
+def compute_feature_latent_correlation(
     model,
     X: pd.DataFrame,
     *,
@@ -730,15 +730,10 @@ def plot_feature_latent_correlation(
     latent_indices: Sequence[int] | None = None,
     method: str = "spearman",
     p_adjust: str | None = "fdr_bh",
-    include_corr_heatmap: bool = False,
-    include_pvalue_heatmap: bool = False,
-    title: str | None = None,
-    output_path: str | Path | None = None,
-    output_formats: Sequence[str] | str = ("png",),
     max_dimension: int = 50,
     latents: np.ndarray | None = None,
-) -> tuple[plt.Figure, np.ndarray, pd.DataFrame, pd.DataFrame]:
-    """Visualise correlations between features (and targets) and latent codes.
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compute correlations between clinical features and latent codes.
 
     The helper encodes ``X`` with :meth:`suave.model.SUAVE.encode` to obtain the
     posterior mean of the latent representation. The expectation of the latent
@@ -773,22 +768,6 @@ def plot_feature_latent_correlation(
     p_adjust : {"fdr_bh", "bonferroni", "holm", None}, default "fdr_bh"
         Multiplicity correction applied to the correlation p-values. ``None``
         disables any adjustment.
-    include_corr_heatmap : bool, default False
-        When ``True`` the function prepends a correlation coefficient heatmap to
-        the returned figure.
-    include_pvalue_heatmap : bool, default False
-        When ``True`` the function adds a p-value heatmap before the bubble
-        chart. Both flags can be combined to recreate the original
-        three-panel layout.
-    title : str, optional
-        Figure title displayed above the selected panel layout.
-    output_path : str or pathlib.Path, optional
-        File path used to persist the resulting figure. When supplied the
-        directory is created automatically.
-    output_formats : sequence of str or str, default ("png",)
-        File formats written when :paramref:`output_path` is provided. A single
-        string is treated as a singleton list. Extensions must be supported by
-        :meth:`matplotlib.figure.Figure.savefig`.
     max_dimension : int, default 50
         Guard rail applied when :paramref:`variables` and
         :paramref:`latent_indices` are left unspecified. Larger matrices are
@@ -796,14 +775,17 @@ def plot_feature_latent_correlation(
     latents : numpy.ndarray, optional
         Pre-computed latent representations. When omitted ``model.encode`` is
         invoked which returns the posterior means of the latent distribution.
+    correlations, p_values : pandas.DataFrame, optional
+        Pre-computed correlation and p-value matrices. When both are supplied
+        the function skips recomputing statistics from :paramref:`model` and
+        :paramref:`X` (which can therefore be left as ``None``), enabling reuse
+        across multiple visualisations.
 
     Returns
     -------
-    tuple
-        ``(figure, axes, correlations, p_values)`` containing the Matplotlib
-        figure, the array of axes for further customisation and the numeric
-        correlation/p-value matrices. The bubble chart axis is always the last
-        entry in ``axes``.
+    tuple of pandas.DataFrame
+        Pair of ``(correlations, p_values)`` matrices indexed by the selected
+        clinical variables and latent dimensions.
 
     Examples
     --------
@@ -813,23 +795,16 @@ def plot_feature_latent_correlation(
     ...     def encode(self, frame):
     ...         return np.column_stack([frame["x"], frame["y"]])
     >>> frame = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
-    >>> fig, axes, corr, pvals = plot_feature_latent_correlation(DummyModel(), frame)
-    >>> corr.shape
-    (2, 2)
-    >>> fig, axes, corr, pvals = plot_feature_latent_correlation(
-    ...     DummyModel(),
-    ...     frame,
-    ...     include_corr_heatmap=True,
-    ...     include_pvalue_heatmap=True,
-    ... )
-    >>> len(axes)
-    3
+    >>> corr, pvals = compute_feature_latent_correlation(DummyModel(), frame)
+    >>> corr.loc["x", "z0"]
+    1.0
 
     See Also
     --------
-    plot_matrix_heatmap : Low-level heatmap rendering utility.
-    plot_bubble_matrix : Bubble-chart representation for matrices.
-    create_centered_colormap : Helper to centre diverging colour maps.
+    plot_feature_latent_correlation_bubble : Visualise correlation magnitude and
+        significance as a bubble chart.
+    plot_feature_latent_correlation_heatmap : Render correlation or p-value
+        heatmaps using the computed matrices.
     """
 
     if latents is None:
@@ -974,73 +949,146 @@ def plot_feature_latent_correlation(
             )
         pval_df = _adjust_p_values(pval_df, method=method_lower)
 
-    panel_order: list[str] = []
-    if include_corr_heatmap:
-        panel_order.append("corr")
-    if include_pvalue_heatmap:
-        panel_order.append("pval")
-    panel_order.append("bubble")
+    return corr_df, pval_df
 
-    n_panels = len(panel_order)
-    base_width = max(12.0, 3.5 * n_latents)
-    width = max(4.0 * n_panels, base_width * (n_panels / 3))
-    fig, axes = plt.subplots(
+
+def plot_feature_latent_correlation_bubble(
+    model,
+    X: pd.DataFrame,
+    *,
+    targets: pd.Series | pd.DataFrame | np.ndarray | Mapping[str, Sequence[object]] | None = None,
+    target_name: str = "target",
+    variables: Sequence[str] | None = None,
+    latent_indices: Sequence[int] | None = None,
+    method: str = "spearman",
+    p_adjust: str | None = "fdr_bh",
+    title: str | None = None,
+    output_path: str | Path | None = None,
+    output_formats: Sequence[str] | str = ("png",),
+    max_dimension: int = 50,
+    latents: np.ndarray | None = None,
+    correlations: pd.DataFrame | None = None,
+    p_values: pd.DataFrame | None = None,
+) -> tuple[plt.Figure, Axes]:
+    """Draw a bubble chart summarising feature/latent correlations.
+
+    Each bubble encodes the absolute correlation magnitude as its size and the
+    (optionally adjusted) p-value as its colour. The underlying correlations are
+    derived from :func:`compute_feature_latent_correlation`, which uses
+    :meth:`suave.model.SUAVE.encode` to obtain posterior means unless custom
+    latent samples are supplied.
+
+    Parameters
+    ----------
+    model : suave.model.SUAVE or compatible object
+        Fitted estimator providing an :meth:`encode` method returning latent
+        representations of ``X``.
+    X : pandas.DataFrame
+        Feature matrix aligned with the schema used during training.
+    targets : pandas.Series, pandas.DataFrame, numpy.ndarray or mapping, optional
+        Targets or predictions appended as extra rows in the correlation matrix.
+    target_name : str, default "target"
+        Name assigned to :paramref:`targets` when it is a one-dimensional
+        sequence without an explicit label.
+    variables : sequence of str, optional
+        Subset of feature/target columns to include. ``None`` keeps every
+        column from ``X`` and :paramref:`targets`.
+    latent_indices : sequence of int, optional
+        Indices of the latent dimensions to analyse. ``None`` uses every
+        dimension returned by :meth:`encode`.
+    method : {"spearman", "pearson", "kendall"}, default "spearman"
+        Correlation coefficient applied pairwise between features and latent
+        variables.
+    p_adjust : {"fdr_bh", "bonferroni", "holm", None}, default "fdr_bh"
+        Multiplicity correction applied to the correlation p-values. ``None``
+        disables any adjustment.
+    title : str, optional
+        Axis title displayed above the bubble chart. Defaults to a descriptive
+        label derived from :paramref:`method` and :paramref:`p_adjust`.
+    output_path : str or pathlib.Path, optional
+        File path used to persist the resulting figure. When supplied the
+        directory is created automatically.
+    output_formats : sequence of str or str, default ("png",)
+        File formats written when :paramref:`output_path` is provided. A single
+        string is treated as a singleton list. Extensions must be supported by
+        :meth:`matplotlib.figure.Figure.savefig`.
+    max_dimension : int, default 50
+        Guard rail applied when :paramref:`variables` and
+        :paramref:`latent_indices` are left unspecified. Larger matrices are
+        truncated to ``max_dimension`` in both directions with a warning.
+    latents : numpy.ndarray, optional
+        Pre-computed latent representations. When omitted ``model.encode`` is
+        invoked which returns the posterior means of the latent distribution.
+
+    Returns
+    -------
+    tuple
+        Pair ``(figure, axis)`` exposing the Matplotlib handles for further
+        customisation.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> class DummyModel:
+    ...     def encode(self, frame):
+    ...         return np.column_stack([frame["x"], frame["y"]])
+    >>> frame = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
+    >>> fig, ax = plot_feature_latent_correlation_bubble(DummyModel(), frame)
+    >>> ax.get_title()
+    'Spearman correlation vs. adjusted p-values'
+
+    See Also
+    --------
+    compute_feature_latent_correlation : Return the correlation and p-value
+        matrices without rendering a figure.
+    plot_feature_latent_correlation_heatmap : Render either the correlation or
+        p-value heatmap.
+    plot_bubble_matrix : Low-level bubble chart helper used for rendering.
+    """
+
+    if correlations is None and p_values is None:
+        corr_df, pval_df = compute_feature_latent_correlation(
+            model,
+            X,
+            targets=targets,
+            target_name=target_name,
+            variables=variables,
+            latent_indices=latent_indices,
+            method=method,
+            p_adjust=p_adjust,
+            max_dimension=max_dimension,
+            latents=latents,
+        )
+    elif correlations is not None and p_values is not None:
+        corr_df = correlations.copy()
+        pval_df = p_values.copy()
+    else:
+        raise ValueError(
+            "correlations and p_values must either both be provided or both be omitted"
+        )
+
+    n_features, n_latents = corr_df.shape
+    fig, ax = plt.subplots(
         1,
-        n_panels,
-        figsize=(width, max(5.0, 1.2 * n_features)),
+        1,
+        figsize=(max(6.0, 1.4 * n_latents), max(5.0, 0.35 * n_features)),
         constrained_layout=True,
     )
-    if isinstance(axes, Axes):
-        axes_array = np.array([axes], dtype=object)
-    else:
-        axes_array = np.asarray(axes, dtype=object)
 
-    heatmap_cmap = create_centered_colormap(
-        "RdBu_r", vmin=-1.0, vmax=1.0, midpoint=0.0
+    colorbar_label = "Adjusted p-values" if p_adjust else "P-values"
+    plot_bubble_matrix(
+        corr_df.abs(),
+        color_matrix=pval_df,
+        text_matrix=corr_df,
+        ax=ax,
+        cmap="magma_r",
+        colorbar_label=colorbar_label,
+        size_label=f"|{method.title()}|",
     )
-    pvalue_cmap = "magma_r"
-    pval_values = pval_df.to_numpy(dtype=float)
-    vmax_p = float(np.nanmax(pval_values)) if np.isfinite(pval_values).any() else 1.0
 
-    for axis, panel in zip(axes_array, panel_order):
-        if panel == "corr":
-            plot_matrix_heatmap(
-                corr_df,
-                ax=axis,
-                cmap=heatmap_cmap,
-                annotate=False,
-                colorbar_label=f"{method.title()} correlation",
-                vmin=-1.0,
-                vmax=1.0,
-            )
-            axis.set_title("Correlation coefficients")
-        elif panel == "pval":
-            plot_matrix_heatmap(
-                pval_df,
-                ax=axis,
-                cmap=pvalue_cmap,
-                annotate=False,
-                colorbar_label="Adjusted p-value" if p_adjust else "P-value",
-                vmin=0.0,
-                vmax=min(1.0, vmax_p),
-            )
-            axis.set_title("P-values")
-        else:
-            plot_bubble_matrix(
-                corr_df.abs(),
-                color_matrix=pval_df,
-                text_matrix=corr_df,
-                ax=axis,
-                cmap=pvalue_cmap,
-                colorbar_label="Adjusted p-value" if p_adjust else "P-value",
-                size_label=f"|{method.title()}|",
-            )
-            axis.set_title("Correlation vs. significance")
-
-    axes = axes_array
-
-    if title:
-        fig.suptitle(title)
+    default_title = f"{method.title()} correlation vs. {colorbar_label.lower()}"
+    ax.set_title(title or default_title)
 
     if output_path is not None:
         formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)
@@ -1055,7 +1103,134 @@ def plot_feature_latent_correlation(
         for fmt in formats:
             fig.savefig(base_stem.with_suffix(f".{fmt}"), dpi=300, bbox_inches="tight")
 
-    return fig, axes, corr_df, pval_df
+    return fig, ax
+
+
+def plot_feature_latent_correlation_heatmap(
+    model,
+    X: pd.DataFrame,
+    *,
+    targets: pd.Series | pd.DataFrame | np.ndarray | Mapping[str, Sequence[object]] | None = None,
+    target_name: str = "target",
+    variables: Sequence[str] | None = None,
+    latent_indices: Sequence[int] | None = None,
+    method: str = "spearman",
+    p_adjust: str | None = "fdr_bh",
+    value: str = "correlation",
+    title: str | None = None,
+    output_path: str | Path | None = None,
+    output_formats: Sequence[str] | str = ("png",),
+    max_dimension: int = 50,
+    latents: np.ndarray | None = None,
+    correlations: pd.DataFrame | None = None,
+    p_values: pd.DataFrame | None = None,
+) -> tuple[plt.Figure, Axes]:
+    """Plot either the correlation or p-value heatmap for feature/latent pairs.
+
+    Parameters mirror :func:`compute_feature_latent_correlation`. Set
+    :paramref:`value` to ``"correlation"`` (default) or ``"pvalue"`` to choose
+    the matrix rendered in the heatmap. Providing both :paramref:`correlations`
+    and :paramref:`p_values` allows reusing pre-computed matrices without
+    calling :func:`compute_feature_latent_correlation` again.
+
+    Returns
+    -------
+    tuple
+        Pair ``(figure, axis)`` exposing the Matplotlib handles for further
+        customisation.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> class DummyModel:
+    ...     def encode(self, frame):
+    ...         return np.column_stack([frame["x"], frame["y"]])
+    >>> frame = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
+    >>> fig, ax = plot_feature_latent_correlation_heatmap(DummyModel(), frame)
+    >>> ax.get_title()
+    'Spearman correlation coefficients'
+
+    See Also
+    --------
+    compute_feature_latent_correlation : Return the correlation and p-value
+        matrices for custom processing.
+    plot_feature_latent_correlation_bubble : Bubble-chart overview of correlation
+        magnitude and statistical significance.
+    plot_matrix_heatmap : Low-level heatmap rendering utility.
+    """
+
+    if correlations is None and p_values is None:
+        corr_df, pval_df = compute_feature_latent_correlation(
+            model,
+            X,
+            targets=targets,
+            target_name=target_name,
+            variables=variables,
+            latent_indices=latent_indices,
+            method=method,
+            p_adjust=p_adjust,
+            max_dimension=max_dimension,
+            latents=latents,
+        )
+    elif correlations is not None and p_values is not None:
+        corr_df = correlations.copy()
+        pval_df = p_values.copy()
+    else:
+        raise ValueError(
+            "correlations and p_values must either both be provided or both be omitted"
+        )
+
+    value_lower = value.lower()
+    if value_lower not in {"correlation", "pvalue"}:
+        raise ValueError("value must be either 'correlation' or 'pvalue'")
+
+    matrix = corr_df if value_lower == "correlation" else pval_df
+    fig, ax = plt.subplots(
+        1,
+        1,
+        figsize=(max(6.0, 1.2 * matrix.shape[1]), max(5.0, 0.35 * matrix.shape[0])),
+        constrained_layout=True,
+    )
+
+    if value_lower == "correlation":
+        cmap = create_centered_colormap("RdBu_r", vmin=-1.0, vmax=1.0, midpoint=0.0)
+        colorbar_label = f"{method.title()} correlation"
+        vmin, vmax = -1.0, 1.0
+        default_title = f"{method.title()} correlation coefficients"
+    else:
+        cmap = "magma_r"
+        colorbar_label = "Adjusted p-values" if p_adjust else "P-values"
+        matrix_values = matrix.to_numpy(dtype=float)
+        vmax_value = float(np.nanmax(matrix_values)) if np.isfinite(matrix_values).any() else 1.0
+        vmin, vmax = 0.0, min(1.0, vmax_value)
+        default_title = colorbar_label
+
+    plot_matrix_heatmap(
+        matrix,
+        ax=ax,
+        cmap=cmap,
+        annotate=False,
+        colorbar_label=colorbar_label,
+        vmin=vmin,
+        vmax=vmax,
+    )
+    ax.set_title(title or default_title)
+
+    if output_path is not None:
+        formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)
+        if not formats:
+            formats = ["png"]
+        base_path = Path(output_path)
+        if base_path.suffix:
+            base_stem = base_path.with_suffix("")
+        else:
+            base_stem = base_path
+        base_stem.parent.mkdir(parents=True, exist_ok=True)
+        for fmt in formats:
+            fig.savefig(base_stem.with_suffix(f".{fmt}"), dpi=300, bbox_inches="tight")
+
+    return fig, ax
 
 
 def _adjust_p_values(p_values: pd.DataFrame, *, method: str) -> pd.DataFrame:

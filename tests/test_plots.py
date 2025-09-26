@@ -8,8 +8,10 @@ from statsmodels.stats.multitest import multipletests
 
 from suave.plots import (
     TrainingPlotMonitor,
+    compute_feature_latent_correlation,
     plot_bubble_matrix,
-    plot_feature_latent_correlation,
+    plot_feature_latent_correlation_bubble,
+    plot_feature_latent_correlation_heatmap,
     plot_matrix_heatmap,
     _adjust_p_values,
 )
@@ -49,7 +51,7 @@ def test_plot_bubble_matrix_supports_dataframe_input():
     plt.close(ax.figure)
 
 
-def test_plot_feature_latent_correlation_outputs(tmp_path):
+def test_compute_feature_latent_correlation_and_bubble(tmp_path):
     class DummyModel:
         def encode(self, frame: pd.DataFrame) -> np.ndarray:
             return np.column_stack([frame["x"], frame["y"]])
@@ -64,7 +66,22 @@ def test_plot_feature_latent_correlation_outputs(tmp_path):
     targets = pd.Series([0, 1, 1, 0], name="label")
 
     output_base = tmp_path / "correlation" / "latent_feature"
-    fig, axes, corr, pvals = plot_feature_latent_correlation(
+    corr, pvals = compute_feature_latent_correlation(
+        DummyModel(),
+        X,
+        targets=targets,
+        latent_indices=[0, 1],
+        method="pearson",
+        p_adjust="bonferroni",
+        max_dimension=50,
+    )
+
+    assert corr.loc["x", "z0"] == pytest.approx(1.0)
+    assert corr.loc["y", "z1"] == pytest.approx(1.0)
+    assert "cat" in corr.index
+    assert pvals.shape == corr.shape
+
+    fig, ax = plot_feature_latent_correlation_bubble(
         DummyModel(),
         X,
         targets=targets,
@@ -74,15 +91,12 @@ def test_plot_feature_latent_correlation_outputs(tmp_path):
         title="Example",
         output_path=output_base,
         output_formats=["png", "pdf"],
-        include_corr_heatmap=True,
-        include_pvalue_heatmap=True,
+        correlations=corr,
+        p_values=pvals,
     )
 
-    assert corr.loc["x", "z0"] == pytest.approx(1.0)
-    assert corr.loc["y", "z1"] == pytest.approx(1.0)
-    assert "cat" in corr.index
-    assert pvals.shape == corr.shape
-    assert len(axes) == 3
+    assert ax.get_title() == "Example"
+    assert fig.axes[0] is ax
 
     for extension in (".png", ".pdf"):
         assert output_base.with_suffix(extension).exists()
@@ -90,7 +104,7 @@ def test_plot_feature_latent_correlation_outputs(tmp_path):
     plt.close(fig)
 
 
-def test_plot_feature_latent_correlation_guardrail_truncates():
+def test_compute_feature_latent_correlation_guardrail_truncates():
     rng = np.random.default_rng(0)
     X = pd.DataFrame(
         rng.standard_normal((8, 60)),
@@ -100,7 +114,7 @@ def test_plot_feature_latent_correlation_guardrail_truncates():
 
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
-        fig, axes, corr, pvals = plot_feature_latent_correlation(
+        corr, pvals = compute_feature_latent_correlation(
             None,
             X,
             latents=latents,
@@ -110,25 +124,72 @@ def test_plot_feature_latent_correlation_guardrail_truncates():
     assert "Latent dimensionality exceeds" in str(captured[0].message)
     assert corr.shape == (50, 50)
     assert pvals.shape == (50, 50)
-    assert len(axes) == 1
-
-    plt.close(fig)
 
 
-def test_plot_feature_latent_correlation_default_single_panel():
+def test_plot_feature_latent_correlation_bubble_default_title():
     class DummyModel:
         def encode(self, frame: pd.DataFrame) -> np.ndarray:
             return np.column_stack([frame["x"], frame["y"]])
 
     X = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
 
-    fig, axes, corr, pvals = plot_feature_latent_correlation(DummyModel(), X)
+    fig, ax = plot_feature_latent_correlation_bubble(DummyModel(), X)
 
-    assert corr.shape[1] == 2
-    assert pvals.shape == corr.shape
-    assert len(axes) == 1
+    assert ax.get_title() == "Spearman correlation vs. adjusted p-values"
+    assert fig.axes[0] is ax
 
     plt.close(fig)
+
+
+def test_plot_feature_latent_correlation_heatmap_switch():
+    class DummyModel:
+        def encode(self, frame: pd.DataFrame) -> np.ndarray:
+            return np.column_stack([frame["x"], frame["y"]])
+
+    X = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
+
+    corr, pvals = compute_feature_latent_correlation(DummyModel(), X)
+
+    fig_corr, ax_corr = plot_feature_latent_correlation_heatmap(
+        DummyModel(),
+        X,
+        value="correlation",
+        correlations=corr,
+        p_values=pvals,
+    )
+    fig_p, ax_p = plot_feature_latent_correlation_heatmap(
+        DummyModel(),
+        X,
+        value="pvalue",
+        p_adjust=None,
+        correlations=corr,
+        p_values=pvals,
+    )
+
+    assert "correlation" in ax_corr.get_title().lower()
+    assert "p-value" in ax_p.get_title().lower()
+
+    plt.close(fig_corr)
+    plt.close(fig_p)
+
+
+def test_plot_feature_latent_correlation_requires_pair():
+    class DummyModel:
+        def encode(self, frame: pd.DataFrame) -> np.ndarray:
+            return np.column_stack([frame["x"], frame["y"]])
+
+    X = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
+    corr, pvals = compute_feature_latent_correlation(DummyModel(), X)
+
+    with pytest.raises(ValueError):
+        plot_feature_latent_correlation_bubble(
+            DummyModel(), X, correlations=corr, p_values=None
+        )
+    with pytest.raises(ValueError):
+        plot_feature_latent_correlation_heatmap(
+            DummyModel(), X, correlations=None, p_values=pvals
+        )
+
 
 
 def test_adjust_p_values_matches_statsmodels():

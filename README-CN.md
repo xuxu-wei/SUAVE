@@ -184,15 +184,14 @@ components = model.encode(test_X, return_components=True)
 ### 潜变量-特征相关分析
 
 ```python
-from suave.plots import plot_feature_latent_correlation
+from suave.plots import plot_feature_latent_correlation_bubble
 
-fig, axes, corr, pvals = plot_feature_latent_correlation(model, train_X, targets=train_y)
+fig, ax = plot_feature_latent_correlation_bubble(model, train_X, targets=train_y)
 ```
 
-该函数默认返回气泡图，并给出对应的相关系数 / P 值 `DataFrame`。
-如果需要相关系数热图或 P 值热图，可分别设置
-``include_corr_heatmap=True`` 与 ``include_pvalue_heatmap=True``，它们会在气泡图之前依次排布。
-若额外传入 ``output_path``，图像会写入磁盘（例如 ``outputs/latent_correlations.png``）。
+气泡大小代表 Spearman 相关系数的绝对值，颜色表示（经校正的）P
+值；指定 ``output_path`` 时会将图像写入磁盘（如
+``outputs/latent_correlations.png``）。
 
 ### 数据采样
 

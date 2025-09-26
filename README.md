@@ -202,16 +202,15 @@ The second form exposes mixture assignments and component-specific statistics fo
 ### Latent-feature correlations
 
 ```python
-from suave.plots import plot_feature_latent_correlation
+from suave.plots import plot_feature_latent_correlation_bubble
 
-fig, axes, corr, pvals = plot_feature_latent_correlation(model, train_X, targets=train_y)
+fig, ax = plot_feature_latent_correlation_bubble(model, train_X, targets=train_y)
 ```
 
-The helper returns a bubble chart plus the underlying correlation and
-p-value `DataFrame`s. Set ``include_corr_heatmap=True`` and/or
-``include_pvalue_heatmap=True`` to add coefficient and p-value heatmaps
-ahead of the bubble chart. Supplying ``output_path`` saves the figure
-(for example, ``outputs/latent_correlations.png``).
+The helper draws a bubble chart sized by the absolute Spearman
+correlation and coloured by the (adjusted) `p`-value, saving the figure
+when ``output_path`` is provided (for example,
+``outputs/latent_correlations.png``).
 
 ### Sampling
 

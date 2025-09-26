@@ -6,7 +6,7 @@
    - [x] `SUAVE` 高层 API（一个类就够）：`fit() / predict() / predict_proba() / calibrate() / sample() / save() / load()`
    - [x] `fit()` 内部完成 **train 内部切分验证集**（如 `val_split=0.1`）
    - [x] 分类头：冻结解码器 → 训练 head → **轻联合微调**（warm-start → head → light joint FT）
-   - [x] 温度缩放校准 + 基础可视化（ROC/PR、可靠性图、`plot_feature_latent_correlation` 潜变量-特征热图，p 值由 statsmodels 校正）
+   - [x] 温度缩放校准 + 基础可视化（ROC/PR、可靠性图、`plot_feature_latent_correlation_bubble` 潜变量-特征气泡图，p 值由 statsmodels 校正）
 
 2. **低成本增强** ✅
    - [x] 追加似然头
