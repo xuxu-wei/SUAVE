@@ -2,6 +2,7 @@
 /examples/research_outputs_*/
 /examples/analysis_outputs_*/
 /examples/*local_test.*
+/task_list.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
