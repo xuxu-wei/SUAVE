@@ -154,8 +154,17 @@ def _target_accessor(index: int) -> Callable[["optuna.trial.FrozenTrial"], float
     return _target
 
 
-def _save_optuna_figure(figure: "plt.Figure", output_path: Path) -> Path:
+def _save_optuna_figure(figure_or_axes: "plt.Figure", output_path: Path) -> Path:
     """Persist Optuna diagnostic figures in multiple formats."""
+
+    # Optuna's Matplotlib helpers return ``Axes`` instances while our utility
+    # expects a ``Figure``. Normalise the object so saving succeeds regardless
+    # of the exact return type.
+    figure = getattr(figure_or_axes, "figure", figure_or_axes)
+    if not hasattr(figure, "savefig"):
+        raise TypeError(
+            "Unsupported Matplotlib object returned from Optuna visualisation"
+        )
 
     _save_figure_multiformat(figure, output_path.with_suffix(""))
     plt.close(figure)
