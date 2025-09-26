@@ -5,7 +5,8 @@
 # mortality target and fits an isotonic calibrator on the internal validation
 # split. The resulting artefacts (model checkpoint, calibrator, and Optuna
 # summary) are written to the research output directory for downstream
-# evaluation.
+# evaluation. The workflow is identical whether executed interactively or as a
+# command-line script.
 
 # %%
 
@@ -36,6 +37,7 @@ from mimic_mortality_utils import (  # noqa: E402
     HEAD_HIDDEN_DIMENSION_OPTIONS,
     PARETO_MAX_ABS_DELTA_AUC,
     PARETO_MIN_VALIDATION_ROAUC,
+    DATA_DIR,
     build_analysis_config,
     choose_preferred_pareto_trial,
     RANDOM_STATE,
@@ -51,6 +53,7 @@ from mimic_mortality_utils import (  # noqa: E402
     make_logistic_pipeline,
     prepare_features,
     prepare_analysis_output_directories,
+    resolve_analysis_output_root,
     render_dataframe,
     schema_to_dataframe,
     to_numeric_frame,
@@ -90,9 +93,7 @@ analysis_config = build_analysis_config()
 
 # %%
 
-DATA_DIR = (EXAMPLES_DIR / "data" / "sepsis_mortality_dataset").resolve()
-OUTPUT_DIR = EXAMPLES_DIR / analysis_config["output_dir_name"]
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = resolve_analysis_output_root(analysis_config["output_dir_name"])
 
 analysis_dirs = prepare_analysis_output_directories(
     OUTPUT_DIR,

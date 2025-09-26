@@ -70,6 +70,8 @@ BENCHMARK_COLUMNS = (
 
 VALIDATION_SIZE: float = 0.2
 
+DATA_DIR: Path = (EXAMPLES_DIR / "data" / "sepsis_mortality_dataset").resolve()
+
 # Thresholds governing which Optuna trials are considered viable for persistence.
 PARETO_MIN_VALIDATION_ROAUC: float = 0.81
 PARETO_MAX_ABS_DELTA_AUC: float = 0.035
@@ -118,6 +120,125 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
 
 
 # =============================================================================
+# === Feature grouping and visualisation metadata ============================
+# =============================================================================
+
+
+# fmt: off
+VAR_GROUP_DICT: Dict[str, List[str]] = {
+    "basic_feature_and_organ_support": [
+        "sex", "age", "BMI", "temperature", "heart_rate", "respir_rate",
+        "GCS", "CRRT", "Respiratory_Support",
+    ],
+    "BP_and_perfusion": ["SBP", "MAP", "Lac", "septic_shock"],
+    "respiratory_and_bg": [
+        "SPO2", "PaO2", "PaO2/FiO2", "PaCO2", "HCO3-", "PH",
+    ],
+    "blood_routine": [
+        "RBC", "Hb", "HCT", "WBC", "NE%", "LYM%",
+    ],
+    "coagulation": ["PLT", "PT", "APTT", "Fg"],
+    "biochem_lab": [
+        "ALT", "AST", "STB", "BUN", "Scr", "Glu", "K+", "Na+",
+    ],
+}
+# fmt: on
+
+
+PATH_GRAPH_GROUP_COLORS: Dict[str, str] = {
+    "Demographics & Vitals": "#1f77b4",
+    "Hemodynamics & Perfusion": "#d62728",
+    "Organ Support & Neurology": "#9467bd",
+    "Hematology": "#2ca02c",
+    "Hepatic Function": "#bcbd22",
+    "Renal Function": "#17becf",
+    "Metabolic & Electrolytes": "#ff7f0e",
+    "Coagulation": "#8c564b",
+    "Arterial Blood Gas": "#7f7f7f",
+    "Outcome": "#e377c2",
+    "Latent": "#4c72b0",
+}
+
+
+PATH_GRAPH_NODE_DEFINITIONS: Dict[str, Dict[str, str]] = {
+    "age": {"group": "Demographics & Vitals", "label": "Age (years)"},
+    "sex": {"group": "Demographics & Vitals", "label": "Male sex (indicator)"},
+    "BMI": {
+        "group": "Demographics & Vitals",
+        "label": r"Body mass index (kg/m$^2$)",
+    },
+    "temperature": {"group": "Demographics & Vitals", "label": "Temperature (°C)"},
+    "heart_rate": {
+        "group": "Demographics & Vitals",
+        "label": "Heart rate (beats/min)",
+    },
+    "respir_rate": {
+        "group": "Demographics & Vitals",
+        "label": "Respiratory rate (breaths/min)",
+    },
+    "SBP": {"group": "Hemodynamics & Perfusion", "label": "SBP"},
+    "DBP": {"group": "Hemodynamics & Perfusion", "label": "DBP"},
+    "MAP": {"group": "Hemodynamics & Perfusion", "label": "MAP"},
+    "Lac": {
+        "group": "Hemodynamics & Perfusion",
+        "label": "Serum lactate (mmol/L)",
+    },
+    "SOFA_cns": {"group": "Organ Support & Neurology", "label": "SOFA CNS"},
+    "CRRT": {"group": "Organ Support & Neurology", "label": "CRRT"},
+    "Respiratory_Support": {
+        "group": "Organ Support & Neurology",
+        "label": "Respiratory support level",
+    },
+    "WBC": {"group": "Hematology", "label": "WBC"},
+    "Hb": {"group": "Hematology", "label": "Hb"},
+    "NE%": {"group": "Hematology", "label": "NE%"},
+    "LYM%": {"group": "Hematology", "label": "LYM%"},
+    "PLT": {"group": "Hematology", "label": "PLT"},
+    "ALT": {"group": "Hepatic Function", "label": "ALT"},
+    "AST": {"group": "Hepatic Function", "label": "AST"},
+    "STB": {"group": "Hepatic Function", "label": "TBil"},
+    "BUN": {"group": "Renal Function", "label": "BUN"},
+    "Scr": {"group": "Renal Function", "label": "SCr"},
+    "Glu": {"group": "Metabolic & Electrolytes", "label": "Glucose"},
+    "K+": {"group": "Metabolic & Electrolytes", "label": r"$\mathrm{K}^{+}$"},
+    "Na+": {"group": "Metabolic & Electrolytes", "label": r"$\mathrm{Na}^{+}$"},
+    "HCO3-": {"group": "Metabolic & Electrolytes", "label": r"$\mathrm{HCO}_{3}^{-}$"},
+    "Fg": {"group": "Coagulation", "label": "Fibrinogen"},
+    "PT": {"group": "Coagulation", "label": "PT"},
+    "APTT": {"group": "Coagulation", "label": "aPTT"},
+    "PH": {"group": "Arterial Blood Gas", "label": "Arterial pH"},
+    "PaO2": {"group": "Arterial Blood Gas", "label": r"$\mathrm{PaO}_{2}$ (mmHg)"},
+    "PaO2/FiO2": {
+        "group": "Arterial Blood Gas",
+        "label": r"$\mathrm{PaO}_{2}/\mathrm{FiO}_{2}$ ratio",
+    },
+    "PaCO2": {"group": "Arterial Blood Gas", "label": r"$\mathrm{PaCO}_{2}$ (mmHg)"},
+    "in_hospital_mortality": {
+        "group": "Outcome",
+        "label": "In-hospital mortality",
+    },
+}
+
+
+PATH_GRAPH_NODE_LABELS: Dict[str, str] = {
+    node_id: metadata["label"]
+    for node_id, metadata in PATH_GRAPH_NODE_DEFINITIONS.items()
+}
+
+
+PATH_GRAPH_NODE_GROUPS: Dict[str, str] = {
+    node_id: metadata["group"]
+    for node_id, metadata in PATH_GRAPH_NODE_DEFINITIONS.items()
+}
+
+
+PATH_GRAPH_NODE_COLORS: Dict[str, str] = {
+    node_id: PATH_GRAPH_GROUP_COLORS[metadata["group"]]
+    for node_id, metadata in PATH_GRAPH_NODE_DEFINITIONS.items()
+}
+
+
+# =============================================================================
 # === Analysis configuration helpers ==========================================
 # =============================================================================
 
@@ -148,17 +269,59 @@ def prepare_analysis_output_directories(
     return directories
 
 
+def resolve_analysis_output_root(
+    output_dir: Optional[Union[str, Path]] = None,
+    *,
+    create: bool = True,
+) -> Path:
+    """Return the root directory for mortality analysis outputs.
+
+    Parameters
+    ----------
+    output_dir:
+        Optional custom directory name or path. Relative paths are resolved
+        against the examples directory. When omitted, the default output
+        directory configured in :data:`DEFAULT_ANALYSIS_CONFIG` is used.
+    create:
+        Whether to create the directory (and parents) if it does not exist.
+
+    Returns
+    -------
+    pathlib.Path
+        The resolved output directory path.
+    """
+
+    if output_dir is None:
+        output_dir = str(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+
+    output_path = Path(output_dir)
+    if not output_path.is_absolute():
+        output_path = EXAMPLES_DIR / output_path
+
+    if create:
+        output_path.mkdir(parents=True, exist_ok=True)
+
+    return output_path
+
+
 __all__ = [
     "RANDOM_STATE",
     "TARGET_COLUMNS",
     "BENCHMARK_COLUMNS",
     "VALIDATION_SIZE",
+    "DATA_DIR",
     "Schema",
     "SchemaInferencer",
     "HIDDEN_DIMENSION_OPTIONS",
     "HEAD_HIDDEN_DIMENSION_OPTIONS",
     "PARETO_MIN_VALIDATION_ROAUC",
     "PARETO_MAX_ABS_DELTA_AUC",
+    "VAR_GROUP_DICT",
+    "PATH_GRAPH_GROUP_COLORS",
+    "PATH_GRAPH_NODE_DEFINITIONS",
+    "PATH_GRAPH_NODE_LABELS",
+    "PATH_GRAPH_NODE_GROUPS",
+    "PATH_GRAPH_NODE_COLORS",
     "choose_preferred_pareto_trial",
     "load_model_manifest",
     "manifest_artifact_paths",
@@ -193,6 +356,7 @@ __all__ = [
     "ANALYSIS_SUBDIRECTORIES",
     "build_analysis_config",
     "prepare_analysis_output_directories",
+    "resolve_analysis_output_root",
     "parse_script_arguments",
     "load_optuna_study",
     "summarise_pareto_trials",
