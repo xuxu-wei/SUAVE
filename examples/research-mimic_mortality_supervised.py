@@ -77,6 +77,7 @@ from suave.plots import (  # noqa: E402
     compute_feature_latent_correlation,
     plot_feature_latent_correlation_bubble,
     plot_feature_latent_correlation_heatmap,
+    plot_feature_latent_outcome_path_graph,
 )
 
 
@@ -183,6 +184,106 @@ VAR_GROUP_DICT = {
     "coagulation": ["PLT", "PT", "APTT", "Fg"],
     "biochem_lab": ["ALT", "AST", "STB", "BUN", "Scr", "Glu", "K+", "Na+"],
 }
+
+PATH_GRAPH_FEATURE_GROUPS: Dict[str, str] = {
+    "age": "Demographics & Vitals",
+    "sex": "Demographics & Vitals",
+    "BMI": "Demographics & Vitals",
+    "temperature": "Demographics & Vitals",
+    "heart_rate": "Demographics & Vitals",
+    "respir_rate": "Demographics & Vitals",
+    "SBP": "Hemodynamics & Perfusion",
+    "DBP": "Hemodynamics & Perfusion",
+    "MAP": "Hemodynamics & Perfusion",
+    "Lac": "Hemodynamics & Perfusion",
+    "SOFA_cns": "Organ Support & Neurology",
+    "CRRT": "Organ Support & Neurology",
+    "Respiratory_Support": "Organ Support & Neurology",
+    "WBC": "Hematology",
+    "Hb": "Hematology",
+    "NE%": "Hematology",
+    "LYM%": "Hematology",
+    "PLT": "Hematology",
+    "ALT": "Hepatic Function",
+    "AST": "Hepatic Function",
+    "STB": "Hepatic Function",
+    "BUN": "Renal Function",
+    "Scr": "Renal Function",
+    "Glu": "Metabolic & Electrolytes",
+    "K+": "Metabolic & Electrolytes",
+    "Na+": "Metabolic & Electrolytes",
+    "HCO3-": "Metabolic & Electrolytes",
+    "Fg": "Coagulation",
+    "PT": "Coagulation",
+    "APTT": "Coagulation",
+    "PH": "Arterial Blood Gas",
+    "PaO2": "Arterial Blood Gas",
+    "PaO2/FiO2": "Arterial Blood Gas",
+    "PaCO2": "Arterial Blood Gas",
+}
+
+PATH_GRAPH_GROUP_COLORS: Dict[str, str] = {
+    "Demographics & Vitals": "#1f77b4",
+    "Hemodynamics & Perfusion": "#d62728",
+    "Organ Support & Neurology": "#9467bd",
+    "Hematology": "#2ca02c",
+    "Hepatic Function": "#bcbd22",
+    "Renal Function": "#17becf",
+    "Metabolic & Electrolytes": "#ff7f0e",
+    "Coagulation": "#8c564b",
+    "Arterial Blood Gas": "#7f7f7f",
+    "Outcome": "#e377c2",
+    "Latent": "#4c72b0",
+}
+
+PATH_GRAPH_NODE_LABELS: Dict[str, str] = {
+    "age": "Age (years)",
+    "sex": "Male sex (indicator)",
+    "BMI": r"Body mass index (kg/m$^2$)",
+    "temperature": "Temperature (°C)",
+    "heart_rate": "Heart rate (beats/min)",
+    "respir_rate": "Respiratory rate (breaths/min)",
+    "SBP": "Systolic blood pressure (mmHg)",
+    "DBP": "Diastolic blood pressure (mmHg)",
+    "MAP": "Mean arterial pressure (mmHg)",
+    "Lac": "Serum lactate (mmol/L)",
+    "SOFA_cns": "SOFA central nervous system score",
+    "CRRT": "Continuous renal replacement therapy",
+    "Respiratory_Support": "Respiratory support level",
+    "WBC": r"White blood cells ($10^{9}$/L)",
+    "Hb": "Haemoglobin (g/dL)",
+    "NE%": r"Neutrophils (%)",
+    "LYM%": r"Lymphocytes (%)",
+    "PLT": r"Platelets ($10^{9}$/L)",
+    "ALT": "Alanine aminotransferase (U/L)",
+    "AST": "Aspartate aminotransferase (U/L)",
+    "STB": "Serum total bilirubin (μmol/L)",
+    "BUN": "Blood urea nitrogen (mmol/L)",
+    "Scr": "Serum creatinine (μmol/L)",
+    "Glu": "Glucose (mmol/L)",
+    "K+": r"$\mathrm{K}^{+}$ (mmol/L)",
+    "Na+": r"$\mathrm{Na}^{+}$ (mmol/L)",
+    "HCO3-": r"$\mathrm{HCO}_{3}^{-}$ (mmol/L)",
+    "Fg": "Fibrinogen (g/L)",
+    "PT": "Prothrombin time (s)",
+    "APTT": "Activated partial thromboplastin time (s)",
+    "PH": "Arterial pH",
+    "PaO2": r"$\mathrm{PaO}_{2}$ (mmHg)",
+    "PaO2/FiO2": r"$\mathrm{PaO}_{2}/\mathrm{FiO}_{2}$ ratio",
+    "PaCO2": r"$\mathrm{PaCO}_{2}$ (mmHg)",
+    "in_hospital_mortality": "In-hospital mortality",
+}
+
+PATH_GRAPH_NODE_GROUPS: Dict[str, str] = {
+    **PATH_GRAPH_FEATURE_GROUPS,
+    "in_hospital_mortality": "Outcome",
+}
+
+PATH_GRAPH_NODE_COLORS: Dict[str, str] = {
+    node_id: PATH_GRAPH_GROUP_COLORS[group]
+    for node_id, group in PATH_GRAPH_FEATURE_GROUPS.items()
+}
+PATH_GRAPH_NODE_COLORS["in_hospital_mortality"] = PATH_GRAPH_GROUP_COLORS["Outcome"]
 
 schema = define_schema(train_df, FEATURE_COLUMNS, mode="interactive")
 
@@ -1066,7 +1167,9 @@ else:
 # ## Latent space correlation analysis
 #
 # Quantify the relationship between latent representations and clinical
-# features using Pearson correlation and visualise the strongest associations.
+# features using Spearman correlation. The multilayer path graph provides the
+# primary interpretation of latent-feature-target associations, with heatmaps
+# and bubble charts serving as supplementary summaries.
 
 # %%
 
@@ -1098,6 +1201,28 @@ overall_corr, overall_pvals = compute_feature_latent_correlation(
 )
 overall_corr.to_csv(overall_corr_path)
 overall_pvals.to_csv(overall_pval_path)
+
+overall_path_graph_base = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_path_graph"
+)
+overall_path_fig, _overall_path_ax = plot_feature_latent_outcome_path_graph(
+    model,
+    X_train_model,
+    y=y_train_model,
+    target_name=TARGET_LABEL,
+    node_label_mapping=PATH_GRAPH_NODE_LABELS,
+    node_color_mapping=PATH_GRAPH_NODE_COLORS,
+    node_group_mapping=PATH_GRAPH_NODE_GROUPS,
+    group_color_mapping=PATH_GRAPH_GROUP_COLORS,
+    edge_label_top_k=15,
+    figure_kwargs={"figsize": (14, 8)},
+)
+overall_path_graph_path = overall_path_graph_base.with_suffix(".png")
+overall_path_fig.savefig(overall_path_graph_path, dpi=300, bbox_inches="tight")
+overall_path_fig.savefig(
+    overall_path_graph_base.with_suffix(".pdf"), bbox_inches="tight"
+)
+plt.close(overall_path_fig)
 
 overall_bubble_fig, _overall_bubble_ax = plot_feature_latent_correlation_bubble(
     model,

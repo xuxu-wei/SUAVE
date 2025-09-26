@@ -302,6 +302,58 @@ def test_plot_feature_latent_outcome_path_graph_labels_and_edges():
     plt.close(fig)
 
 
+def test_plot_feature_latent_outcome_path_graph_respects_custom_mappings():
+    class DemoModel:
+        def __init__(self) -> None:
+            self.schema = Schema({"f1": {"type": "real"}, "f2": {"type": "real"}})
+
+        def encode(self, frame: pd.DataFrame) -> np.ndarray:
+            return np.column_stack([frame["f1"], frame["f2"]])
+
+    X = pd.DataFrame({"f1": [0.0, 1.0, 2.0, 3.0], "f2": [3.0, 2.0, 1.0, 0.0]})
+    y = pd.Series([0, 1, 0, 1], name="outcome")
+
+    node_label_mapping = {
+        "f1": "Feature one",
+        "f2": "Feature two",
+        "outcome": "Outcome label",
+    }
+    node_color_mapping = {
+        "f1": "#112233",
+        "f2": "#445566",
+        "outcome": "#778899",
+    }
+    node_group_mapping = {"f1": "Vitals", "f2": "Labs", "outcome": "Outcome"}
+    group_color_mapping = {
+        "Vitals": "#123456",
+        "Labs": "#654321",
+        "Latent": "#abcdef",
+        "Outcome": "#778899",
+    }
+
+    fig, ax = plot_feature_latent_outcome_path_graph(
+        DemoModel(),
+        X,
+        y=y,
+        node_label_mapping=node_label_mapping,
+        node_color_mapping=node_color_mapping,
+        node_group_mapping=node_group_mapping,
+        group_color_mapping=group_color_mapping,
+        edge_label_top_k=0,
+    )
+
+    labels = {text.get_text() for text in ax.texts}
+    assert {"Feature one", "Feature two", "Outcome label"}.issubset(labels)
+
+    scatter = next(collection for collection in ax.collections if collection.get_offsets().size)
+    facecolors = scatter.get_facecolors()
+    np.testing.assert_allclose(facecolors[0], to_rgba("#112233"), atol=1e-6)
+    np.testing.assert_allclose(facecolors[1], to_rgba("#445566"), atol=1e-6)
+    np.testing.assert_allclose(facecolors[-1], to_rgba("#778899"), atol=1e-6)
+
+    plt.close(fig)
+
+
 def test_plot_feature_latent_outcome_path_graph_warns_without_model_schema():
     X = pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]})
     y = pd.Series([1, 0, 1, 0], name="outcome")

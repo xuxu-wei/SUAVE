@@ -2119,6 +2119,8 @@ def plot_feature_latent_outcome_path_graph(
         nodes_records.append(record)
 
     nodes_df = pd.DataFrame(nodes_records)
+    if "color" in nodes_df.columns:
+        nodes_df.loc[nodes_df["color"].isna(), "color"] = None
 
     def _edge_alpha(p_value: float) -> float:
         if not np.isfinite(p_value):
