@@ -15,11 +15,12 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import joblib
 import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
 from sklearn.model_selection import train_test_split
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
@@ -48,12 +49,14 @@ from mimic_mortality_utils import (  # noqa: E402
     render_dataframe,
     schema_to_dataframe,
     to_numeric_frame,
+    _save_figure_multiformat,
 )
 
 from suave.evaluate import evaluate_tstr, evaluate_trtr  # noqa: E402
 
 try:
     import optuna
+    from optuna.visualization import matplotlib as optuna_visualisation
 except ImportError as exc:  # pragma: no cover - optuna provided via requirements
     raise RuntimeError(
         "Optuna is required for the mortality optimisation. Install it via 'pip install optuna'."
@@ -128,6 +131,82 @@ render_dataframe(schema_df, title="Schema overview", floatfmt=None)
 # ## Optuna study helper
 
 
+def _target_accessor(index: int) -> Callable[["optuna.trial.FrozenTrial"], float]:
+    """Return a safe accessor for the multi-objective study targets."""
+
+    def _target(trial: "optuna.trial.FrozenTrial") -> float:
+        if trial.values is None or index >= len(trial.values):
+            raise optuna.exceptions.TrialPruned("Trial lacks the requested objective value")
+        value = trial.values[index]
+        if value is None or not np.isfinite(value):
+            raise optuna.exceptions.TrialPruned("Objective value is not finite")
+        return float(value)
+
+    return _target
+
+
+def _save_optuna_figure(figure: "plt.Figure", output_path: Path) -> Path:
+    """Persist Optuna diagnostic figures in multiple formats."""
+
+    _save_figure_multiformat(figure, output_path.with_suffix(""))
+    plt.close(figure)
+    return output_path.with_suffix(".jpg")
+
+
+def _generate_optuna_diagnostics(
+    study: "optuna.study.Study",
+    *,
+    target_label: str,
+    output_dir: Path,
+) -> Mapping[str, Path]:
+    """Create Optuna diagnostic plots summarising the optimisation dynamics."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics: Dict[str, Path] = {}
+
+    objective_specs = [
+        ("validation_roauc", _target_accessor(0), "Validation ROAUC"),
+        ("tstr_trtr_delta_auc", _target_accessor(1), "TSTR/TRTR ΔAUC"),
+    ]
+
+    for suffix, target_fn, display_name in objective_specs:
+        try:
+            importance_fig = optuna_visualisation.plot_param_importances(
+                study, target=target_fn, target_name=display_name
+            )
+        except Exception as error:
+            print(f"Skipping parameter importance for {display_name}: {error}")
+        else:
+            base_path = output_dir / f"param_importance_{suffix}_{target_label}"
+            diagnostics[f"param_importance_{suffix}"] = _save_optuna_figure(
+                importance_fig, base_path
+            )
+
+        try:
+            history_fig = optuna_visualisation.plot_optimization_history(
+                study, target=target_fn, target_name=display_name
+            )
+        except Exception as error:
+            print(f"Skipping optimisation history for {display_name}: {error}")
+        else:
+            base_path = output_dir / f"optimization_history_{suffix}_{target_label}"
+            diagnostics[f"optimization_history_{suffix}"] = _save_optuna_figure(
+                history_fig, base_path
+            )
+
+    try:
+        pareto_fig = optuna_visualisation.plot_pareto_front(
+            study, target_names=[spec[2] for spec in objective_specs]
+        )
+    except Exception as error:
+        print(f"Skipping Pareto front plot: {error}")
+    else:
+        base_path = output_dir / f"pareto_front_{target_label}"
+        diagnostics["pareto_front"] = _save_optuna_figure(pareto_fig, base_path)
+
+    return diagnostics
+
+
 def run_optuna_search(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -141,7 +220,9 @@ def run_optuna_search(
     timeout: Optional[int],
     study_name: Optional[str] = None,
     storage: Optional[str] = None,
-) -> tuple["optuna.study.Study", Dict[str, object]]:
+    target_label: str,
+    diagnostics_dir: Path,
+) -> tuple["optuna.study.Study", Dict[str, object], Mapping[str, Path]]:
     """Perform Optuna hyperparameter optimisation for :class:`SUAVE`."""
 
     if n_trials is not None and n_trials <= 0:
@@ -260,6 +341,10 @@ def run_optuna_search(
     )
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
 
+    diagnostics = _generate_optuna_diagnostics(
+        study, target_label=target_label, output_dir=diagnostics_dir
+    )
+
     feasible_trials = [trial for trial in study.trials if trial.values is not None]
     if not feasible_trials:
         raise RuntimeError("Optuna search did not produce any completed trials")
@@ -280,8 +365,9 @@ def run_optuna_search(
         "tstr_metrics": best_trial.user_attrs.get("tstr_metrics", {}),
         "trtr_metrics": best_trial.user_attrs.get("trtr_metrics", {}),
         "tstr_trtr_delta_auc": best_trial.user_attrs.get("tstr_trtr_delta_auc"),
+        "diagnostic_paths": {name: str(path) for name, path in diagnostics.items()},
     }
-    return study, best_attributes
+    return study, best_attributes, diagnostics
 
 
 # %% [markdown]
@@ -317,7 +403,7 @@ study_name = (
     else None
 )
 
-study, optuna_best_info = run_optuna_search(
+study, optuna_best_info, optuna_diagnostics = run_optuna_search(
     X_train_model,
     y_train_model,
     X_validation,
@@ -329,6 +415,8 @@ study, optuna_best_info = run_optuna_search(
     timeout=analysis_config["optuna_timeout"],
     study_name=study_name,
     storage=analysis_config["optuna_storage"],
+    target_label=TARGET_LABEL,
+    diagnostics_dir=OPTUNA_DIR / "figures",
 )
 
 trial_rows: list[dict[str, object]] = []
@@ -347,6 +435,15 @@ optuna_trials_df = pd.DataFrame(trial_rows)
 optuna_trials_path = OPTUNA_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
 if not optuna_trials_df.empty:
     optuna_trials_df.to_csv(optuna_trials_path, index=False)
+    top_trials = (
+        optuna_trials_df.sort_values("validation_roauc", ascending=False)
+        .head(10)
+        .reset_index(drop=True)
+    )
+    render_dataframe(
+        top_trials,
+        title="Top Optuna trials by validation ROAUC",
+    )
 else:
     optuna_trials_path.write_text("trial_number,value")
 
@@ -431,6 +528,13 @@ summary_lines = [
     f"- SUAVE model: {model_path.relative_to(OUTPUT_DIR)}",
     f"- Isotonic calibrator: {calibrator_path.relative_to(OUTPUT_DIR)}",
 ]
+
+if optuna_diagnostics:
+    summary_lines.append("Optuna diagnostics:")
+    for name, figure_path in sorted(optuna_diagnostics.items()):
+        summary_lines.append(
+            f"- {name.replace('_', ' ').title()}: {figure_path.relative_to(OUTPUT_DIR)}"
+        )
 
 summary_path = OPTUNA_DIR / f"optimisation_summary_{TARGET_LABEL}.md"
 summary_path.write_text("\n".join(summary_lines))
