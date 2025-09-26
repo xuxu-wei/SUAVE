@@ -285,17 +285,17 @@ PATH_GRAPH_NODE_COLORS: Dict[str, str] = {
 }
 PATH_GRAPH_NODE_COLORS["in_hospital_mortality"] = PATH_GRAPH_GROUP_COLORS["Outcome"]
 
-schema = define_schema(train_df, FEATURE_COLUMNS, mode="interactive")
+schema = define_schema(train_df, FEATURE_COLUMNS, mode="info")
 
 # Manual schema corrections ensure columns with ambiguous types are treated
 # appropriately during modelling.
-schema.update(
-    {
-        "BMI": {"type": "real"},
-        "Respiratory_Support": {"type": "ordinal", "n_classes": 5},
-        "LYM%": {"type": "real"},
-    }
-)
+# schema.update(
+#     {
+#         "BMI": {"type": "pos"},
+#         "Respiratory_Support": {"type": "ordinal", "n_classes": 5},
+#         "LYM%": {"type": "pos"},
+#     }
+# )
 
 schema_df = schema_to_dataframe(schema).sort_values("Column").reset_index(drop=True)
 render_dataframe(schema_df, title="Schema overview", floatfmt=None)
