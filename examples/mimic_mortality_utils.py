@@ -161,39 +161,24 @@ PATH_GRAPH_GROUP_COLORS: Dict[str, str] = {
 
 
 PATH_GRAPH_NODE_DEFINITIONS: Dict[str, Dict[str, str]] = {
-    "age": {"group": "Demographics & Vitals", "label": "Age (years)"},
-    "sex": {"group": "Demographics & Vitals", "label": "Male sex (indicator)"},
-    "BMI": {
-        "group": "Demographics & Vitals",
-        "label": r"Body mass index (kg/m$^2$)",
-    },
-    "temperature": {"group": "Demographics & Vitals", "label": "Temperature (°C)"},
-    "heart_rate": {
-        "group": "Demographics & Vitals",
-        "label": "Heart rate (beats/min)",
-    },
-    "respir_rate": {
-        "group": "Demographics & Vitals",
-        "label": "Respiratory rate (breaths/min)",
-    },
+    "age": {"group": "Demographics & Vitals", "label": "Age"},
+    "sex": {"group": "Demographics & Vitals", "label": "Male sex"},
+    "BMI": {"group": "Demographics & Vitals", "label": r"BMI",},
+    "temperature": {"group": "Demographics & Vitals", "label": "Temperature"},
+    "heart_rate": {"group": "Demographics & Vitals","label": "Heart rate",},
+    "respir_rate": {"group": "Demographics & Vitals","label": "Respiratory rate",},
     "SBP": {"group": "Hemodynamics & Perfusion", "label": "SBP"},
     "DBP": {"group": "Hemodynamics & Perfusion", "label": "DBP"},
     "MAP": {"group": "Hemodynamics & Perfusion", "label": "MAP"},
-    "Lac": {
-        "group": "Hemodynamics & Perfusion",
-        "label": "Serum lactate (mmol/L)",
-    },
+    "Lac": {"group": "Hemodynamics & Perfusion","label": "Serum lactate",},
     "SOFA_cns": {"group": "Organ Support & Neurology", "label": "SOFA CNS"},
     "CRRT": {"group": "Organ Support & Neurology", "label": "CRRT"},
-    "Respiratory_Support": {
-        "group": "Organ Support & Neurology",
-        "label": "Respiratory support level",
-    },
-    "WBC": {"group": "Hematology", "label": "WBC"},
-    "Hb": {"group": "Hematology", "label": "Hb"},
-    "NE%": {"group": "Hematology", "label": "NE%"},
-    "LYM%": {"group": "Hematology", "label": "LYM%"},
-    "PLT": {"group": "Hematology", "label": "PLT"},
+    "Respiratory_Support": {"group": "Organ Support & Neurology","label": "Respiratory support",},
+    "WBC": {"group": "Hematology and Immunology", "label": "WBC"},
+    "Hb": {"group": "Hematology and Immunology", "label": "Hb"},
+    "NE%": {"group": "Hematology and Immunology", "label": "NE%"},
+    "LYM%": {"group": "Hematology and Immunology", "label": "LYM%"},
+    "PLT": {"group": "Hematology and Immunology", "label": "PLT"},
     "ALT": {"group": "Hepatic Function", "label": "ALT"},
     "AST": {"group": "Hepatic Function", "label": "AST"},
     "STB": {"group": "Hepatic Function", "label": "TBil"},
@@ -205,18 +190,12 @@ PATH_GRAPH_NODE_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "HCO3-": {"group": "Metabolic & Electrolytes", "label": r"$\mathrm{HCO}_{3}^{-}$"},
     "Fg": {"group": "Coagulation", "label": "Fibrinogen"},
     "PT": {"group": "Coagulation", "label": "PT"},
-    "APTT": {"group": "Coagulation", "label": "aPTT"},
-    "PH": {"group": "Arterial Blood Gas", "label": "Arterial pH"},
-    "PaO2": {"group": "Arterial Blood Gas", "label": r"$\mathrm{PaO}_{2}$ (mmHg)"},
-    "PaO2/FiO2": {
-        "group": "Arterial Blood Gas",
-        "label": r"$\mathrm{PaO}_{2}/\mathrm{FiO}_{2}$ ratio",
-    },
-    "PaCO2": {"group": "Arterial Blood Gas", "label": r"$\mathrm{PaCO}_{2}$ (mmHg)"},
-    "in_hospital_mortality": {
-        "group": "Outcome",
-        "label": "In-hospital mortality",
-    },
+    "APTT": {"group": "Coagulation", "label": "APTT"},
+    "PH": {"group": "Respiratory and Blood Gas", "label": "pH"},
+    "PaO2": {"group": "Respiratory and Blood Gas", "label": r"$\mathrm{PaO}_{2}$"},
+    "PaO2/FiO2": {"group": "Respiratory and Blood Gas","label": r"$\mathrm{PaO}_{2}/\mathrm{FiO}_{2}$ ratio",},
+    "PaCO2": {"group": "Respiratory and Blood Gas", "label": r"$\mathrm{PaCO}_{2}$"},
+    "in_hospital_mortality": {"group": "Outcome","label": "In-hospital mortality",},
 }
 
 
