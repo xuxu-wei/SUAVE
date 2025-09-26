@@ -1085,6 +1085,8 @@ overall_fig, _overall_axes, overall_corr, overall_pvals = plot_feature_latent_co
     variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
     title=f"Latent correlations ({TARGET_LABEL}) – all variables",
     output_path=latent_correlation_base,
+    include_corr_heatmap=True,
+    include_pvalue_heatmap=True,
 )
 plt.close(overall_fig)
 overall_corr.to_csv(overall_corr_path)
@@ -1132,6 +1134,8 @@ for group_name, candidate_columns in VAR_GROUP_DICT.items():
             f"{group_name.replace('_', ' ').title()}"
         ),
         output_path=group_base,
+        include_corr_heatmap=True,
+        include_pvalue_heatmap=True,
     )
     plt.close(fig)
     corr_path = group_base.with_name(f"{group_base.name}_correlations.csv")

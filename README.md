@@ -207,10 +207,11 @@ from suave.plots import plot_feature_latent_correlation
 fig, axes, corr, pvals = plot_feature_latent_correlation(model, train_X, targets=train_y)
 ```
 
-The helper returns a three-panel Matplotlib figure (correlation heatmap,
-p-value heatmap, and bubble chart) plus the underlying correlation and
-p-value `DataFrame`s. Supplying ``output_path`` saves the figure (for
-example, ``outputs/latent_correlations.png``).
+The helper returns a bubble chart plus the underlying correlation and
+p-value `DataFrame`s. Set ``include_corr_heatmap=True`` and/or
+``include_pvalue_heatmap=True`` to add coefficient and p-value heatmaps
+ahead of the bubble chart. Supplying ``output_path`` saves the figure
+(for example, ``outputs/latent_correlations.png``).
 
 ### Sampling
 

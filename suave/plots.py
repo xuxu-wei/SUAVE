@@ -730,6 +730,8 @@ def plot_feature_latent_correlation(
     latent_indices: Sequence[int] | None = None,
     method: str = "spearman",
     p_adjust: str | None = "fdr_bh",
+    include_corr_heatmap: bool = False,
+    include_pvalue_heatmap: bool = False,
     title: str | None = None,
     output_path: str | Path | None = None,
     output_formats: Sequence[str] | str = ("png",),
@@ -771,8 +773,15 @@ def plot_feature_latent_correlation(
     p_adjust : {"fdr_bh", "bonferroni", "holm", None}, default "fdr_bh"
         Multiplicity correction applied to the correlation p-values. ``None``
         disables any adjustment.
+    include_corr_heatmap : bool, default False
+        When ``True`` the function prepends a correlation coefficient heatmap to
+        the returned figure.
+    include_pvalue_heatmap : bool, default False
+        When ``True`` the function adds a p-value heatmap before the bubble
+        chart. Both flags can be combined to recreate the original
+        three-panel layout.
     title : str, optional
-        Figure title displayed above the three-panel layout.
+        Figure title displayed above the selected panel layout.
     output_path : str or pathlib.Path, optional
         File path used to persist the resulting figure. When supplied the
         directory is created automatically.
@@ -793,7 +802,8 @@ def plot_feature_latent_correlation(
     tuple
         ``(figure, axes, correlations, p_values)`` containing the Matplotlib
         figure, the array of axes for further customisation and the numeric
-        correlation/p-value matrices.
+        correlation/p-value matrices. The bubble chart axis is always the last
+        entry in ``axes``.
 
     Examples
     --------
@@ -806,6 +816,14 @@ def plot_feature_latent_correlation(
     >>> fig, axes, corr, pvals = plot_feature_latent_correlation(DummyModel(), frame)
     >>> corr.shape
     (2, 2)
+    >>> fig, axes, corr, pvals = plot_feature_latent_correlation(
+    ...     DummyModel(),
+    ...     frame,
+    ...     include_corr_heatmap=True,
+    ...     include_pvalue_heatmap=True,
+    ... )
+    >>> len(axes)
+    3
 
     See Also
     --------
@@ -956,54 +974,70 @@ def plot_feature_latent_correlation(
             )
         pval_df = _adjust_p_values(pval_df, method=method_lower)
 
+    panel_order: list[str] = []
+    if include_corr_heatmap:
+        panel_order.append("corr")
+    if include_pvalue_heatmap:
+        panel_order.append("pval")
+    panel_order.append("bubble")
+
+    n_panels = len(panel_order)
+    base_width = max(12.0, 3.5 * n_latents)
+    width = max(4.0 * n_panels, base_width * (n_panels / 3))
+    fig, axes = plt.subplots(
+        1,
+        n_panels,
+        figsize=(width, max(5.0, 1.2 * n_features)),
+        constrained_layout=True,
+    )
+    if isinstance(axes, Axes):
+        axes_array = np.array([axes], dtype=object)
+    else:
+        axes_array = np.asarray(axes, dtype=object)
+
     heatmap_cmap = create_centered_colormap(
         "RdBu_r", vmin=-1.0, vmax=1.0, midpoint=0.0
     )
     pvalue_cmap = "magma_r"
-
-    fig, axes = plt.subplots(
-        1,
-        3,
-        figsize=(max(12.0, 3.5 * n_latents), max(5.0, 1.2 * n_features)),
-        constrained_layout=True,
-    )
-    if not isinstance(axes, np.ndarray):
-        axes = np.array([axes])
-
-    plot_matrix_heatmap(
-        corr_df,
-        ax=axes[0],
-        cmap=heatmap_cmap,
-        annotate=False,
-        colorbar_label=f"{method.title()} correlation",
-        vmin=-1.0,
-        vmax=1.0,
-    )
-    axes[0].set_title("Correlation coefficients")
-
     pval_values = pval_df.to_numpy(dtype=float)
     vmax_p = float(np.nanmax(pval_values)) if np.isfinite(pval_values).any() else 1.0
-    plot_matrix_heatmap(
-        pval_df,
-        ax=axes[1],
-        cmap=pvalue_cmap,
-        annotate=False,
-        colorbar_label="Adjusted p-value" if p_adjust else "P-value",
-        vmin=0.0,
-        vmax=min(1.0, vmax_p),
-    )
-    axes[1].set_title("P-values")
 
-    plot_bubble_matrix(
-        corr_df.abs(),
-        color_matrix=pval_df,
-        text_matrix=corr_df,
-        ax=axes[2],
-        cmap=pvalue_cmap,
-        colorbar_label="Adjusted p-value" if p_adjust else "P-value",
-        size_label=f"|{method.title()}|",
-    )
-    axes[2].set_title("Correlation vs. significance")
+    for axis, panel in zip(axes_array, panel_order):
+        if panel == "corr":
+            plot_matrix_heatmap(
+                corr_df,
+                ax=axis,
+                cmap=heatmap_cmap,
+                annotate=False,
+                colorbar_label=f"{method.title()} correlation",
+                vmin=-1.0,
+                vmax=1.0,
+            )
+            axis.set_title("Correlation coefficients")
+        elif panel == "pval":
+            plot_matrix_heatmap(
+                pval_df,
+                ax=axis,
+                cmap=pvalue_cmap,
+                annotate=False,
+                colorbar_label="Adjusted p-value" if p_adjust else "P-value",
+                vmin=0.0,
+                vmax=min(1.0, vmax_p),
+            )
+            axis.set_title("P-values")
+        else:
+            plot_bubble_matrix(
+                corr_df.abs(),
+                color_matrix=pval_df,
+                text_matrix=corr_df,
+                ax=axis,
+                cmap=pvalue_cmap,
+                colorbar_label="Adjusted p-value" if p_adjust else "P-value",
+                size_label=f"|{method.title()}|",
+            )
+            axis.set_title("Correlation vs. significance")
+
+    axes = axes_array
 
     if title:
         fig.suptitle(title)

@@ -74,6 +74,8 @@ def test_plot_feature_latent_correlation_outputs(tmp_path):
         title="Example",
         output_path=output_base,
         output_formats=["png", "pdf"],
+        include_corr_heatmap=True,
+        include_pvalue_heatmap=True,
     )
 
     assert corr.loc["x", "z0"] == pytest.approx(1.0)
@@ -108,6 +110,23 @@ def test_plot_feature_latent_correlation_guardrail_truncates():
     assert "Latent dimensionality exceeds" in str(captured[0].message)
     assert corr.shape == (50, 50)
     assert pvals.shape == (50, 50)
+    assert len(axes) == 1
+
+    plt.close(fig)
+
+
+def test_plot_feature_latent_correlation_default_single_panel():
+    class DummyModel:
+        def encode(self, frame: pd.DataFrame) -> np.ndarray:
+            return np.column_stack([frame["x"], frame["y"]])
+
+    X = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
+
+    fig, axes, corr, pvals = plot_feature_latent_correlation(DummyModel(), X)
+
+    assert corr.shape[1] == 2
+    assert pvals.shape == corr.shape
+    assert len(axes) == 1
 
     plt.close(fig)
 

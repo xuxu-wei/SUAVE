@@ -83,4 +83,4 @@
 2. 使用 `dataframe_to_markdown`、`render_dataframe` 与 `write_results_to_excel_unique` 汇总评估结果，最终通过 `build_prediction_dataframe` 与 `evaluate_predictions` 生成 `evaluation_summary_{label}.md` 技术报告草稿。
 3. 在归档目录保留所有原始数据引用、模型权重（`.pt`/`.joblib`）、插补缓存、图表、Markdown 报告及运行日志，以支持第三方审计与论文附录撰写。
 4. 在潜空间解释章节调用 `suave.plots.plot_feature_latent_correlation` 计算潜空间与临床特征（含目标标签）的 Spearman 相关性，依托
-   statsmodels 进行 FDR/Bonferroni/Holm 校正，并按 VAR_GROUP_DICT 分组导出热图与相关系数/`p` 值 CSV 至 `11_visualizations/`，量化隐空间与关键临床变量的线性关联。
+   statsmodels 进行 FDR/Bonferroni/Holm 校正，并按 VAR_GROUP_DICT 分组导出热图与相关系数/`p` 值 CSV 至 `11_visualizations/`，量化隐空间与关键临床变量的线性关联。若需保留相关性/`p` 值热图，请设置 `include_corr_heatmap=True` 与 `include_pvalue_heatmap=True`。
