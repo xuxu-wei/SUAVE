@@ -114,16 +114,14 @@ FEATURE_COLUMNS = [
     for column in train_df.columns
     if column not in TARGET_COLUMNS + BENCHMARK_COLUMNS
 ]
-schema = define_schema(train_df, FEATURE_COLUMNS, mode="info")
-# schema.update(
-#     {
-#         "BMI": {"type": "real"},
-#         "Respiratory_Support": {"type": "ordinal", "n_classes": 5},
-#         "LYM%": {"type": "real"},
-#     }
-# )
+schema = define_schema(train_df, FEATURE_COLUMNS, mode="interactive")
+schema.update(
+    {
+        "age": {"type": "real"},
+    }
+)
 
-schema_df = schema_to_dataframe(schema).sort_values("Column").reset_index(drop=True)
+schema_df = schema_to_dataframe(schema).reset_index(drop=True)
 render_dataframe(schema_df, title="Schema overview", floatfmt=None)
 
 
