@@ -181,6 +181,17 @@ components = model.encode(test_X, return_components=True)
 
 后者会额外返回混合分量分配及对应的后验统计量。
 
+### 潜变量-特征相关分析
+
+```python
+from suave.plots import plot_feature_latent_correlation
+
+fig, axes, corr, pvals = plot_feature_latent_correlation(model, train_X, targets=train_y)
+```
+
+该函数默认生成相关性热图、P 值热图与气泡图三联图，并返回对应的相关系数 / P 值
+`DataFrame`。若额外传入 ``output_path``，图像会写入磁盘（例如 ``outputs/latent_correlations.png``）。
+
 ### 数据采样
 
 ```python

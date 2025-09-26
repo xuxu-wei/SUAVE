@@ -199,6 +199,19 @@ components = model.encode(test_X, return_components=True)
 
 The second form exposes mixture assignments and component-specific statistics for downstream analysis.
 
+### Latent-feature correlations
+
+```python
+from suave.plots import plot_feature_latent_correlation
+
+fig, axes, corr, pvals = plot_feature_latent_correlation(model, train_X, targets=train_y)
+```
+
+The helper returns a three-panel Matplotlib figure (correlation heatmap,
+p-value heatmap, and bubble chart) plus the underlying correlation and
+p-value `DataFrame`s. Supplying ``output_path`` saves the figure (for
+example, ``outputs/latent_correlations.png``).
+
 ### Sampling
 
 ```python
