@@ -419,6 +419,18 @@ study, optuna_best_info, optuna_diagnostics = run_optuna_search(
     diagnostics_dir=OPTUNA_DIR / "figures",
 )
 
+best_trial_values = optuna_best_info.get("values", (float("nan"), float("nan")))
+print(
+    "\nBest Optuna trial:"
+    f" #{optuna_best_info.get('trial_number', 'N/A')}"
+    f" | Validation ROAUC: {best_trial_values[0]:.4f}"
+    f" | TSTR/TRTR ΔAUC: {best_trial_values[1]:.4f}"
+)
+if optuna_best_info.get("params"):
+    print("Selected hyperparameters:")
+    for key, value in sorted(optuna_best_info["params"].items()):
+        print(f"  - {key}: {value}")
+
 trial_rows: list[dict[str, object]] = []
 for trial in study.trials:
     values = trial.values or (float("nan"), float("nan"))
