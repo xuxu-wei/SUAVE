@@ -181,6 +181,18 @@ components = model.encode(test_X, return_components=True)
 
 后者会额外返回混合分量分配及对应的后验统计量。
 
+### 潜变量-特征相关分析
+
+```python
+from suave.plots import plot_feature_latent_correlation_bubble
+
+fig, ax = plot_feature_latent_correlation_bubble(model, train_X, targets=train_y)
+```
+
+气泡大小代表 Spearman 相关系数的绝对值，颜色表示（经校正的）P
+值；指定 ``output_path`` 时会将图像写入磁盘（如
+``outputs/latent_correlations.png``）。
+
 ### 数据采样
 
 ```python

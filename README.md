@@ -199,6 +199,19 @@ components = model.encode(test_X, return_components=True)
 
 The second form exposes mixture assignments and component-specific statistics for downstream analysis.
 
+### Latent-feature correlations
+
+```python
+from suave.plots import plot_feature_latent_correlation_bubble
+
+fig, ax = plot_feature_latent_correlation_bubble(model, train_X, targets=train_y)
+```
+
+The helper draws a bubble chart sized by the absolute Spearman
+correlation and coloured by the (adjusted) `p`-value, saving the figure
+when ``output_path`` is provided (for example,
+``outputs/latent_correlations.png``).
+
 ### Sampling
 
 ```python

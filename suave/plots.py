@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import itertools
 import math
+import warnings
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
+from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize, TwoSlopeNorm
 from matplotlib.lines import Line2D
 import numpy as np
+import pandas as pd
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
 
 
 def _in_notebook() -> bool:
@@ -348,3 +354,895 @@ def plot_reliability_curve(
     fig.savefig(output_path)
     plt.close(fig)
     return output_path
+
+
+def plot_matrix_heatmap(
+    matrix: pd.DataFrame | np.ndarray,
+    *,
+    ax: Axes | None = None,
+    cmap: str = "RdBu_r",
+    annotate: bool = False,
+    value_format: str = ".2f",
+    colorbar: bool = True,
+    colorbar_label: str | None = None,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    log_scale: bool = False,
+) -> Axes:
+    """Draw a heatmap for ``matrix`` with optional annotations.
+
+    Parameters
+    ----------
+    matrix : pandas.DataFrame or numpy.ndarray
+        Two-dimensional matrix whose values are rendered as colours.
+        ``pandas.DataFrame`` inputs expose their index and columns as axis
+        labels. ``numpy.ndarray`` inputs default to integer labels.
+    ax : matplotlib.axes.Axes, optional
+        Axis on which to render the heatmap. When omitted a new axis is
+        created via :func:`matplotlib.pyplot.subplots`.
+    cmap : str, default "RdBu_r"
+        Name of the Matplotlib colormap used to convert values into colours.
+    annotate : bool, default False
+        When ``True`` the numeric value of each cell is written at the centre
+        of the corresponding square.
+    value_format : str, default ".2f"
+        Format string applied when :paramref:`annotate` is ``True``.
+    colorbar : bool, default True
+        Whether to attach a colorbar to the provided axis.
+    colorbar_label : str, optional
+        Text displayed beneath the colorbar when :paramref:`colorbar` is
+        enabled.
+    vmin, vmax : float, optional
+        Explicit colour scale bounds. When omitted the limits are inferred
+        from the observed data.
+    log_scale : bool, default False
+        If ``True`` the colour scale is logarithmic using
+        :class:`matplotlib.colors.LogNorm`.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        Axis containing the rendered heatmap. The returned axis is always
+        valid regardless of whether :paramref:`ax` was provided.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from suave.plots import plot_matrix_heatmap
+    >>> values = np.array([[1.0, -0.5], [0.25, 0.75]])
+    >>> ax = plot_matrix_heatmap(values)
+    >>> ax.figure is not None
+    True
+    """
+
+    if not isinstance(matrix, pd.DataFrame):
+        matrix = pd.DataFrame(matrix)
+
+    if matrix.ndim != 2:
+        raise ValueError("matrix must be two-dimensional")
+
+    if ax is None:
+        _, ax = plt.subplots(
+            figsize=(max(4.0, matrix.shape[1] * 0.6), max(3.0, matrix.shape[0] * 0.6))
+        )
+
+    norm = LogNorm(vmin=vmin, vmax=vmax) if log_scale else None
+    image = ax.imshow(
+        matrix.to_numpy(dtype=float),
+        aspect="auto",
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        norm=norm,
+    )
+
+    ax.set_xticks(np.arange(matrix.shape[1]))
+    ax.set_xticklabels(matrix.columns.astype(str), rotation=45, ha="right")
+    ax.tick_params(bottom=False, top=True, labelbottom=False, labeltop=True)
+    ax.set_yticks(np.arange(matrix.shape[0]))
+    ax.set_yticklabels(matrix.index.astype(str))
+
+    if annotate:
+        array = matrix.to_numpy(dtype=float)
+        for row_index, col_index in itertools.product(
+            range(array.shape[0]), range(array.shape[1])
+        ):
+            value = array[row_index, col_index]
+            if not np.isfinite(value):
+                continue
+            ax.text(
+                col_index,
+                row_index,
+                format(value, value_format),
+                ha="center",
+                va="center",
+                fontsize=9,
+            )
+
+    if colorbar:
+        cbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        if colorbar_label:
+            cbar.set_label(colorbar_label)
+
+    return ax
+
+
+def plot_bubble_matrix(
+    size_matrix: pd.DataFrame | np.ndarray,
+    *,
+    color_matrix: pd.DataFrame | np.ndarray | None = None,
+    text_matrix: pd.DataFrame | np.ndarray | None = None,
+    ax: Axes | None = None,
+    cmap: str = "viridis",
+    colorbar_label: str | None = None,
+    size_scale: tuple[float, float] = (30.0, 600.0),
+    text_format: str = ".2f",
+    size_label: str = "|value|",
+) -> Axes:
+    """Render a bubble chart representing two matrices simultaneously.
+
+    Parameters
+    ----------
+    size_matrix : pandas.DataFrame or numpy.ndarray
+        Matrix whose absolute values determine each bubble's diameter.
+        ``pandas.DataFrame`` inputs expose their index and columns as axis
+        labels. ``numpy.ndarray`` inputs default to integer labels.
+    color_matrix : pandas.DataFrame or numpy.ndarray, optional
+        Matrix used to colour the bubbles. When omitted ``size_matrix`` is
+        reused. Shapes must match ``size_matrix``.
+    text_matrix : pandas.DataFrame or numpy.ndarray, optional
+        Matrix whose values are written at the centre of each bubble. When
+        omitted no text annotations are drawn.
+    ax : matplotlib.axes.Axes, optional
+        Axis on which to draw the chart. When ``None`` a new axis is created.
+    cmap : str, default "viridis"
+        Name of the Matplotlib colormap used to colour the bubbles.
+    colorbar_label : str, optional
+        Text displayed next to the colour legend.
+    size_scale : tuple of float, default (30.0, 600.0)
+        Minimum and maximum area allocated to the bubbles. Values are passed
+        directly to the ``s`` argument of :meth:`matplotlib.axes.Axes.scatter`.
+    text_format : str, default ".2f"
+        Format string applied to :paramref:`text_matrix` values.
+    size_label : str, default "|value|"
+        Legend title describing the meaning of the bubble sizes.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        Axis containing the rendered bubble chart.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from suave.plots import plot_bubble_matrix
+    >>> values = np.array([[0.1, 0.8], [0.4, 0.6]])
+    >>> ax = plot_bubble_matrix(values, text_matrix=values)
+    >>> len(ax.collections) > 0
+    True
+    """
+
+    if not isinstance(size_matrix, pd.DataFrame):
+        size_matrix = pd.DataFrame(size_matrix)
+
+    if size_matrix.ndim != 2:
+        raise ValueError("size_matrix must be two-dimensional")
+
+    if color_matrix is None:
+        color_matrix = size_matrix
+    elif not isinstance(color_matrix, pd.DataFrame):
+        color_matrix = pd.DataFrame(
+            color_matrix, index=size_matrix.index, columns=size_matrix.columns
+        )
+    else:
+        color_matrix = color_matrix.reindex(
+            index=size_matrix.index, columns=size_matrix.columns
+        )
+
+    if text_matrix is not None:
+        if not isinstance(text_matrix, pd.DataFrame):
+            text_matrix = pd.DataFrame(
+                text_matrix, index=size_matrix.index, columns=size_matrix.columns
+            )
+        else:
+            text_matrix = text_matrix.reindex(
+                index=size_matrix.index, columns=size_matrix.columns
+            )
+
+    if ax is None:
+        _, ax = plt.subplots(
+            figsize=(max(4.0, size_matrix.shape[1] * 0.8), max(3.0, size_matrix.shape[0] * 0.8))
+        )
+
+    columns = size_matrix.columns.astype(str)
+    rows = size_matrix.index.astype(str)
+    x_positions = np.arange(len(columns))
+    y_positions = np.arange(len(rows))
+    grid_x, grid_y = np.meshgrid(x_positions, y_positions)
+
+    raw_sizes = np.abs(size_matrix.to_numpy(dtype=float)).flatten()
+    scaled_sizes = np.zeros_like(raw_sizes)
+    finite_mask = np.isfinite(raw_sizes)
+    size_min = float(np.nanmin(raw_sizes)) if finite_mask.any() else 0.0
+    size_max = float(np.nanmax(raw_sizes)) if finite_mask.any() else 0.0
+
+    def _scale(values: np.ndarray) -> np.ndarray:
+        minimum, maximum = size_scale
+        if size_max <= size_min:
+            return np.full_like(values, maximum)
+        normalised = (values - size_min) / (size_max - size_min)
+        return normalised * (maximum - minimum) + minimum
+
+    if finite_mask.any():
+        scaled_sizes[finite_mask] = _scale(raw_sizes[finite_mask])
+
+    color_values = color_matrix.to_numpy(dtype=float)
+    flat_colors = color_values.flatten()
+    color_mask = np.isfinite(flat_colors)
+    if color_mask.any():
+        vmin = float(np.nanmin(flat_colors))
+        vmax = float(np.nanmax(flat_colors))
+        if np.isclose(vmin, vmax):
+            norm = None
+        else:
+            norm = Normalize(vmin=vmin, vmax=vmax)
+    else:
+        norm = None
+
+    scatter = ax.scatter(
+        grid_x.flatten(),
+        grid_y.flatten(),
+        s=scaled_sizes,
+        c=flat_colors,
+        cmap=cmap,
+        norm=norm,
+    )
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(columns, rotation=45, ha="right")
+    ax.tick_params(bottom=False, top=True, labelbottom=False, labeltop=True)
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(rows)
+    ax.set_xlim(-0.5, len(columns) - 0.5)
+    ax.set_ylim(len(rows) - 0.5, -0.5)
+    ax.set_aspect("equal")
+
+    if text_matrix is not None:
+        values = text_matrix.to_numpy(dtype=float)
+        colormap = plt.get_cmap(cmap)
+        if norm is None:
+            rgba = colormap(0.5)
+            luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+            colour = "white" if luminance < 0.5 else "black"
+            for row_index, col_index in itertools.product(
+                range(values.shape[0]), range(values.shape[1])
+            ):
+                value = values[row_index, col_index]
+                if not np.isfinite(value):
+                    continue
+                ax.text(
+                    col_index,
+                    row_index,
+                    format(value, text_format),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color=colour,
+                )
+        else:
+            face_colours = colormap(norm(color_values))
+            luminance = (
+                0.299 * face_colours[..., 0]
+                + 0.587 * face_colours[..., 1]
+                + 0.114 * face_colours[..., 2]
+            )
+            text_colours = np.where(luminance < 0.5, "white", "black")
+            for row_index, col_index in itertools.product(
+                range(values.shape[0]), range(values.shape[1])
+            ):
+                value = values[row_index, col_index]
+                if not np.isfinite(value):
+                    continue
+                ax.text(
+                    col_index,
+                    row_index,
+                    format(value, text_format),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color=text_colours[row_index, col_index],
+                )
+
+    cbar = ax.figure.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
+    if colorbar_label:
+        cbar.set_label(colorbar_label)
+
+    legend_values = np.linspace(size_min, size_max, num=3)
+    legend_sizes = _scale(legend_values)
+    handles = [
+        plt.Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="none",
+            markerfacecolor="gray",
+            markersize=math.sqrt(size / math.pi) if size > 0 else 0.0,
+        )
+        for size in legend_sizes
+    ]
+    labels = [f"{value:.2f}" for value in legend_values]
+    ax.legend(handles, labels, title=size_label, loc="upper right", frameon=False)
+
+    return ax
+
+
+def create_centered_colormap(
+    cmap_name: str = "RdYlBu_r",
+    *,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+    midpoint: float = 0.0,
+) -> LinearSegmentedColormap:
+    """Return a colormap centred around ``midpoint``.
+
+    Parameters
+    ----------
+    cmap_name : str, default "RdYlBu_r"
+        Name of the base Matplotlib colormap to transform.
+    vmin, vmax : float, default -1.0 and 1.0
+        Bounds of the numeric range the colormap will cover.
+    midpoint : float, default 0.0
+        Value that should be mapped to the central colour of ``cmap_name``.
+
+    Returns
+    -------
+    matplotlib.colors.LinearSegmentedColormap
+        Customised colormap spanning the requested numeric range.
+
+    Examples
+    --------
+    >>> from suave.plots import create_centered_colormap
+    >>> cmap = create_centered_colormap("coolwarm", vmin=-2, vmax=2, midpoint=0)
+    >>> isinstance(cmap, LinearSegmentedColormap)
+    True
+    """
+
+    if vmax <= vmin:
+        raise ValueError("vmax must be greater than vmin")
+
+    if midpoint <= vmin or midpoint >= vmax:
+        return plt.get_cmap(cmap_name)
+
+    base = plt.get_cmap(cmap_name)
+    normaliser = TwoSlopeNorm(vmin=vmin, vcenter=midpoint, vmax=vmax)
+    sample_values = np.linspace(vmin, vmax, 256)
+    colours = base(normaliser(sample_values))
+    return LinearSegmentedColormap.from_list(f"{cmap_name}_centred", colours)
+
+
+def compute_feature_latent_correlation(
+    model,
+    X: pd.DataFrame,
+    *,
+    targets: pd.Series | pd.DataFrame | np.ndarray | Mapping[str, Sequence[object]] | None = None,
+    target_name: str = "target",
+    variables: Sequence[str] | None = None,
+    latent_indices: Sequence[int] | None = None,
+    method: str = "spearman",
+    p_adjust: str | None = "fdr_bh",
+    max_dimension: int = 50,
+    latents: np.ndarray | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compute correlations between clinical features and latent codes.
+
+    The helper encodes ``X`` with :meth:`suave.model.SUAVE.encode` to obtain the
+    posterior mean of the latent representation. The expectation of the latent
+    posterior is therefore used as the summary statistic when measuring
+    correlation. Users requiring Monte Carlo summaries can supply their own
+    ``latents`` array drawn from repeated calls to :meth:`~suave.model.SUAVE.sample`
+    or custom sampling logic.
+
+    Parameters
+    ----------
+    model : suave.model.SUAVE or compatible object
+        Fitted estimator providing an :meth:`encode` method returning latent
+        representations of ``X``.
+    X : pandas.DataFrame
+        Feature matrix aligned with the schema used during training.
+    targets : pandas.Series, pandas.DataFrame, numpy.ndarray or mapping, optional
+        Targets or predictions added as extra rows in the correlation matrix.
+        When a one-dimensional structure is supplied its column label defaults
+        to ``target_name``.
+    target_name : str, default "target"
+        Name assigned to :paramref:`targets` when it is a one-dimensional
+        sequence without an explicit label.
+    variables : sequence of str, optional
+        Subset of feature/target columns to include. ``None`` keeps every
+        column from ``X`` and :paramref:`targets`.
+    latent_indices : sequence of int, optional
+        Indices of the latent dimensions to analyse. ``None`` uses every
+        dimension returned by :meth:`encode`.
+    method : {"spearman", "pearson", "kendall"}, default "spearman"
+        Correlation coefficient applied pairwise between features and latent
+        variables.
+    p_adjust : {"fdr_bh", "bonferroni", "holm", None}, default "fdr_bh"
+        Multiplicity correction applied to the correlation p-values. ``None``
+        disables any adjustment.
+    max_dimension : int, default 50
+        Guard rail applied when :paramref:`variables` and
+        :paramref:`latent_indices` are left unspecified. Larger matrices are
+        truncated to ``max_dimension`` in both directions with a warning.
+    latents : numpy.ndarray, optional
+        Pre-computed latent representations. When omitted ``model.encode`` is
+        invoked which returns the posterior means of the latent distribution.
+    correlations, p_values : pandas.DataFrame, optional
+        Pre-computed correlation and p-value matrices. When both are supplied
+        the function skips recomputing statistics from :paramref:`model` and
+        :paramref:`X` (which can therefore be left as ``None``), enabling reuse
+        across multiple visualisations.
+
+    Returns
+    -------
+    tuple of pandas.DataFrame
+        Pair of ``(correlations, p_values)`` matrices indexed by the selected
+        clinical variables and latent dimensions.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> class DummyModel:
+    ...     def encode(self, frame):
+    ...         return np.column_stack([frame["x"], frame["y"]])
+    >>> frame = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
+    >>> corr, pvals = compute_feature_latent_correlation(DummyModel(), frame)
+    >>> corr.loc["x", "z0"]
+    1.0
+
+    See Also
+    --------
+    plot_feature_latent_correlation_bubble : Visualise correlation magnitude and
+        significance as a bubble chart.
+    plot_feature_latent_correlation_heatmap : Render correlation or p-value
+        heatmaps using the computed matrices.
+    """
+
+    if latents is None:
+        if not hasattr(model, "encode"):
+            raise AttributeError(
+                "model must define an 'encode' method or latents must be provided"
+            )
+        latents = model.encode(X)
+    latent_array = np.asarray(latents, dtype=float)
+    if latent_array.ndim != 2:
+        raise ValueError("latents must be a two-dimensional array")
+    if latent_array.shape[0] != len(X):
+        raise ValueError("Number of latent rows must match len(X)")
+
+    if latent_indices is None:
+        latent_labels = [f"z{i}" for i in range(latent_array.shape[1])]
+        if latent_array.shape[1] > max_dimension:
+            warnings.warn(
+                "Latent dimensionality exceeds max_dimension; only the first "
+                f"{max_dimension} dimensions will be displayed.",
+                UserWarning,
+                stacklevel=2,
+            )
+            latent_array = latent_array[:, :max_dimension]
+            latent_labels = latent_labels[:max_dimension]
+    else:
+        latent_indices = [int(index) for index in latent_indices]
+        if any(index < 0 or index >= latent_array.shape[1] for index in latent_indices):
+            raise IndexError("latent_indices must reference valid latent dimensions")
+        latent_array = latent_array[:, latent_indices]
+        latent_labels = [f"z{i}" for i in latent_indices]
+
+    feature_frame = X.copy()
+
+    if targets is not None:
+        target_frame: pd.DataFrame
+        if isinstance(targets, pd.Series):
+            name = targets.name or target_name
+            target_frame = targets.to_frame(name=name)
+        elif isinstance(targets, pd.DataFrame):
+            target_frame = targets.copy()
+        elif isinstance(targets, np.ndarray):
+            if targets.ndim == 1:
+                target_frame = pd.DataFrame({target_name: targets})
+            elif targets.ndim == 2:
+                columns = [f"{target_name}_{idx}" for idx in range(targets.shape[1])]
+                target_frame = pd.DataFrame(targets, columns=columns)
+            else:
+                raise ValueError("targets array must be one- or two-dimensional")
+        elif isinstance(targets, Mapping):
+            target_frame = pd.DataFrame(targets)
+        else:
+            target_frame = pd.DataFrame({target_name: list(targets)})
+
+        target_frame = target_frame.copy()
+        if len(target_frame) != len(feature_frame):
+            raise ValueError("targets must align with X by row")
+        target_frame = target_frame.reset_index(drop=True)
+        target_frame.index = feature_frame.index
+        feature_frame = pd.concat([feature_frame, target_frame], axis=1)
+
+    if variables is None:
+        selected_columns = list(feature_frame.columns)
+        if len(selected_columns) > max_dimension:
+            warnings.warn(
+                "Number of variables exceeds max_dimension; only the first "
+                f"{max_dimension} variables will be displayed.",
+                UserWarning,
+                stacklevel=2,
+            )
+            selected_columns = selected_columns[:max_dimension]
+    else:
+        selected_columns = []
+        for column in variables:
+            if column not in feature_frame.columns:
+                raise KeyError(f"Column '{column}' is not present in the supplied data")
+            if column not in selected_columns:
+                selected_columns.append(column)
+    feature_frame = feature_frame.loc[:, selected_columns]
+
+    numeric_frame = pd.DataFrame(index=feature_frame.index)
+    for column in feature_frame.columns:
+        series = feature_frame[column]
+        numeric_series = pd.to_numeric(series, errors="coerce")
+        if numeric_series.isna().all():
+            try:
+                codes, _ = pd.factorize(series, na_sentinel=-1)
+            except TypeError:  # pandas >= 2.1 uses use_na_sentinel instead
+                codes, _ = pd.factorize(series, use_na_sentinel=True)
+            numeric_series = pd.Series(codes.astype(float), index=series.index)
+            numeric_series.replace(-1, np.nan, inplace=True)
+        numeric_frame[column] = numeric_series.astype(float)
+
+    feature_array = numeric_frame.to_numpy(dtype=float)
+    if feature_array.shape[0] != latent_array.shape[0]:
+        raise ValueError("Features and latents must share the same number of rows")
+
+    n_features = feature_array.shape[1]
+    n_latents = latent_array.shape[1]
+
+    if method not in {"spearman", "pearson", "kendall"}:
+        raise ValueError("method must be one of {'spearman', 'pearson', 'kendall'}")
+
+    if n_features == 0 or n_latents == 0:
+        raise ValueError("At least one feature and one latent dimension are required")
+
+    if method == "spearman":
+        corr_matrix, p_matrix = stats.spearmanr(
+            feature_array, latent_array, axis=0, nan_policy="omit"
+        )
+        corr_matrix = np.asarray(corr_matrix)[:n_features, n_features : n_features + n_latents]
+        p_matrix = np.asarray(p_matrix)[:n_features, n_features : n_features + n_latents]
+    else:
+        corr_matrix = np.full((n_features, n_latents), np.nan, dtype=float)
+        p_matrix = np.full_like(corr_matrix, np.nan)
+        for feat_index in range(n_features):
+            feature_values = feature_array[:, feat_index]
+            for latent_index in range(n_latents):
+                latent_values = latent_array[:, latent_index]
+                mask = np.isfinite(feature_values) & np.isfinite(latent_values)
+                if mask.sum() < 3:
+                    continue
+                if method == "pearson":
+                    corr, p_value = stats.pearsonr(
+                        feature_values[mask], latent_values[mask]
+                    )
+                else:
+                    corr, p_value = stats.kendalltau(
+                        feature_values[mask], latent_values[mask]
+                    )
+                corr_matrix[feat_index, latent_index] = corr
+                p_matrix[feat_index, latent_index] = p_value
+
+    corr_df = pd.DataFrame(corr_matrix, index=selected_columns, columns=latent_labels)
+    pval_df = pd.DataFrame(p_matrix, index=selected_columns, columns=latent_labels)
+
+    if p_adjust is not None:
+        method_lower = p_adjust.lower()
+        if method_lower not in {"fdr_bh", "bonferroni", "holm"}:
+            raise ValueError(
+                "p_adjust must be one of {'fdr_bh', 'bonferroni', 'holm', None}"
+            )
+        pval_df = _adjust_p_values(pval_df, method=method_lower)
+
+    return corr_df, pval_df
+
+
+def plot_feature_latent_correlation_bubble(
+    model,
+    X: pd.DataFrame,
+    *,
+    targets: pd.Series | pd.DataFrame | np.ndarray | Mapping[str, Sequence[object]] | None = None,
+    target_name: str = "target",
+    variables: Sequence[str] | None = None,
+    latent_indices: Sequence[int] | None = None,
+    method: str = "spearman",
+    p_adjust: str | None = "fdr_bh",
+    title: str | None = None,
+    output_path: str | Path | None = None,
+    output_formats: Sequence[str] | str = ("png",),
+    max_dimension: int = 50,
+    latents: np.ndarray | None = None,
+    correlations: pd.DataFrame | None = None,
+    p_values: pd.DataFrame | None = None,
+) -> tuple[plt.Figure, Axes]:
+    """Draw a bubble chart summarising feature/latent correlations.
+
+    Each bubble encodes the absolute correlation magnitude as its size and the
+    (optionally adjusted) p-value as its colour. The underlying correlations are
+    derived from :func:`compute_feature_latent_correlation`, which uses
+    :meth:`suave.model.SUAVE.encode` to obtain posterior means unless custom
+    latent samples are supplied.
+
+    Parameters
+    ----------
+    model : suave.model.SUAVE or compatible object
+        Fitted estimator providing an :meth:`encode` method returning latent
+        representations of ``X``.
+    X : pandas.DataFrame
+        Feature matrix aligned with the schema used during training.
+    targets : pandas.Series, pandas.DataFrame, numpy.ndarray or mapping, optional
+        Targets or predictions appended as extra rows in the correlation matrix.
+    target_name : str, default "target"
+        Name assigned to :paramref:`targets` when it is a one-dimensional
+        sequence without an explicit label.
+    variables : sequence of str, optional
+        Subset of feature/target columns to include. ``None`` keeps every
+        column from ``X`` and :paramref:`targets`.
+    latent_indices : sequence of int, optional
+        Indices of the latent dimensions to analyse. ``None`` uses every
+        dimension returned by :meth:`encode`.
+    method : {"spearman", "pearson", "kendall"}, default "spearman"
+        Correlation coefficient applied pairwise between features and latent
+        variables.
+    p_adjust : {"fdr_bh", "bonferroni", "holm", None}, default "fdr_bh"
+        Multiplicity correction applied to the correlation p-values. ``None``
+        disables any adjustment.
+    title : str, optional
+        Axis title displayed above the bubble chart. Defaults to a descriptive
+        label derived from :paramref:`method` and :paramref:`p_adjust`.
+    output_path : str or pathlib.Path, optional
+        File path used to persist the resulting figure. When supplied the
+        directory is created automatically.
+    output_formats : sequence of str or str, default ("png",)
+        File formats written when :paramref:`output_path` is provided. A single
+        string is treated as a singleton list. Extensions must be supported by
+        :meth:`matplotlib.figure.Figure.savefig`.
+    max_dimension : int, default 50
+        Guard rail applied when :paramref:`variables` and
+        :paramref:`latent_indices` are left unspecified. Larger matrices are
+        truncated to ``max_dimension`` in both directions with a warning.
+    latents : numpy.ndarray, optional
+        Pre-computed latent representations. When omitted ``model.encode`` is
+        invoked which returns the posterior means of the latent distribution.
+
+    Returns
+    -------
+    tuple
+        Pair ``(figure, axis)`` exposing the Matplotlib handles for further
+        customisation.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> class DummyModel:
+    ...     def encode(self, frame):
+    ...         return np.column_stack([frame["x"], frame["y"]])
+    >>> frame = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
+    >>> fig, ax = plot_feature_latent_correlation_bubble(DummyModel(), frame)
+    >>> ax.get_title()
+    'Spearman correlation vs. adjusted p-values'
+
+    See Also
+    --------
+    compute_feature_latent_correlation : Return the correlation and p-value
+        matrices without rendering a figure.
+    plot_feature_latent_correlation_heatmap : Render either the correlation or
+        p-value heatmap.
+    plot_bubble_matrix : Low-level bubble chart helper used for rendering.
+    """
+
+    if correlations is None and p_values is None:
+        corr_df, pval_df = compute_feature_latent_correlation(
+            model,
+            X,
+            targets=targets,
+            target_name=target_name,
+            variables=variables,
+            latent_indices=latent_indices,
+            method=method,
+            p_adjust=p_adjust,
+            max_dimension=max_dimension,
+            latents=latents,
+        )
+    elif correlations is not None and p_values is not None:
+        corr_df = correlations.copy()
+        pval_df = p_values.copy()
+    else:
+        raise ValueError(
+            "correlations and p_values must either both be provided or both be omitted"
+        )
+
+    n_features, n_latents = corr_df.shape
+    fig, ax = plt.subplots(
+        1,
+        1,
+        figsize=(max(6.0, 1.4 * n_latents), max(5.0, 0.35 * n_features)),
+        constrained_layout=True,
+    )
+
+    colorbar_label = "Adjusted p-values" if p_adjust else "P-values"
+    plot_bubble_matrix(
+        corr_df.abs(),
+        color_matrix=pval_df,
+        text_matrix=corr_df,
+        ax=ax,
+        cmap="magma_r",
+        colorbar_label=colorbar_label,
+        size_label=f"|{method.title()}|",
+    )
+
+    default_title = f"{method.title()} correlation vs. {colorbar_label.lower()}"
+    ax.set_title(title or default_title)
+
+    if output_path is not None:
+        formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)
+        if not formats:
+            formats = ["png"]
+        base_path = Path(output_path)
+        if base_path.suffix:
+            base_stem = base_path.with_suffix("")
+        else:
+            base_stem = base_path
+        base_stem.parent.mkdir(parents=True, exist_ok=True)
+        for fmt in formats:
+            fig.savefig(base_stem.with_suffix(f".{fmt}"), dpi=300, bbox_inches="tight")
+
+    return fig, ax
+
+
+def plot_feature_latent_correlation_heatmap(
+    model,
+    X: pd.DataFrame,
+    *,
+    targets: pd.Series | pd.DataFrame | np.ndarray | Mapping[str, Sequence[object]] | None = None,
+    target_name: str = "target",
+    variables: Sequence[str] | None = None,
+    latent_indices: Sequence[int] | None = None,
+    method: str = "spearman",
+    p_adjust: str | None = "fdr_bh",
+    value: str = "correlation",
+    title: str | None = None,
+    output_path: str | Path | None = None,
+    output_formats: Sequence[str] | str = ("png",),
+    max_dimension: int = 50,
+    latents: np.ndarray | None = None,
+    correlations: pd.DataFrame | None = None,
+    p_values: pd.DataFrame | None = None,
+) -> tuple[plt.Figure, Axes]:
+    """Plot either the correlation or p-value heatmap for feature/latent pairs.
+
+    Parameters mirror :func:`compute_feature_latent_correlation`. Set
+    :paramref:`value` to ``"correlation"`` (default) or ``"pvalue"`` to choose
+    the matrix rendered in the heatmap. Providing both :paramref:`correlations`
+    and :paramref:`p_values` allows reusing pre-computed matrices without
+    calling :func:`compute_feature_latent_correlation` again.
+
+    Returns
+    -------
+    tuple
+        Pair ``(figure, axis)`` exposing the Matplotlib handles for further
+        customisation.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> class DummyModel:
+    ...     def encode(self, frame):
+    ...         return np.column_stack([frame["x"], frame["y"]])
+    >>> frame = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
+    >>> fig, ax = plot_feature_latent_correlation_heatmap(DummyModel(), frame)
+    >>> ax.get_title()
+    'Spearman correlation coefficients'
+
+    See Also
+    --------
+    compute_feature_latent_correlation : Return the correlation and p-value
+        matrices for custom processing.
+    plot_feature_latent_correlation_bubble : Bubble-chart overview of correlation
+        magnitude and statistical significance.
+    plot_matrix_heatmap : Low-level heatmap rendering utility.
+    """
+
+    if correlations is None and p_values is None:
+        corr_df, pval_df = compute_feature_latent_correlation(
+            model,
+            X,
+            targets=targets,
+            target_name=target_name,
+            variables=variables,
+            latent_indices=latent_indices,
+            method=method,
+            p_adjust=p_adjust,
+            max_dimension=max_dimension,
+            latents=latents,
+        )
+    elif correlations is not None and p_values is not None:
+        corr_df = correlations.copy()
+        pval_df = p_values.copy()
+    else:
+        raise ValueError(
+            "correlations and p_values must either both be provided or both be omitted"
+        )
+
+    value_lower = value.lower()
+    if value_lower not in {"correlation", "pvalue"}:
+        raise ValueError("value must be either 'correlation' or 'pvalue'")
+
+    matrix = corr_df if value_lower == "correlation" else pval_df
+    fig, ax = plt.subplots(
+        1,
+        1,
+        figsize=(max(6.0, 1.2 * matrix.shape[1]), max(5.0, 0.35 * matrix.shape[0])),
+        constrained_layout=True,
+    )
+
+    if value_lower == "correlation":
+        cmap = create_centered_colormap("RdBu_r", vmin=-1.0, vmax=1.0, midpoint=0.0)
+        colorbar_label = f"{method.title()} correlation"
+        vmin, vmax = -1.0, 1.0
+        default_title = f"{method.title()} correlation coefficients"
+    else:
+        cmap = "magma_r"
+        colorbar_label = "Adjusted p-values" if p_adjust else "P-values"
+        matrix_values = matrix.to_numpy(dtype=float)
+        vmax_value = float(np.nanmax(matrix_values)) if np.isfinite(matrix_values).any() else 1.0
+        vmin, vmax = 0.0, min(1.0, vmax_value)
+        default_title = colorbar_label
+
+    plot_matrix_heatmap(
+        matrix,
+        ax=ax,
+        cmap=cmap,
+        annotate=False,
+        colorbar_label=colorbar_label,
+        vmin=vmin,
+        vmax=vmax,
+    )
+    ax.set_title(title or default_title)
+
+    if output_path is not None:
+        formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)
+        if not formats:
+            formats = ["png"]
+        base_path = Path(output_path)
+        if base_path.suffix:
+            base_stem = base_path.with_suffix("")
+        else:
+            base_stem = base_path
+        base_stem.parent.mkdir(parents=True, exist_ok=True)
+        for fmt in formats:
+            fig.savefig(base_stem.with_suffix(f".{fmt}"), dpi=300, bbox_inches="tight")
+
+    return fig, ax
+
+
+def _adjust_p_values(p_values: pd.DataFrame, *, method: str) -> pd.DataFrame:
+    matrix = p_values.to_numpy(dtype=float)
+    adjusted = np.full_like(matrix, np.nan)
+    mask = np.isfinite(matrix)
+    values = matrix[mask]
+    if values.size == 0:
+        return p_values
+
+    # ``multipletests`` preserves the order of the supplied p-values so we can
+    # simply reshape the corrected results back into the original matrix.
+    _, corrected, _, _ = multipletests(values, method=method)
+    adjusted[mask] = corrected
+    return pd.DataFrame(adjusted, index=p_values.index, columns=p_values.columns)
