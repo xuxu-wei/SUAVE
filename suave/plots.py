@@ -10,12 +10,39 @@ from typing import Iterable, Mapping, Sequence
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
-from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize, TwoSlopeNorm
+from matplotlib.colors import (
+    Colormap,
+    LinearSegmentedColormap,
+    LogNorm,
+    Normalize,
+    TwoSlopeNorm,
+    is_color_like,
+)
 from matplotlib.lines import Line2D
+from matplotlib.patches import FancyArrowPatch
 import numpy as np
 import pandas as pd
 from scipy import stats
 from statsmodels.stats.multitest import multipletests
+
+
+_ISSUE_ACTIONS = {"ignore", "warn", "error"}
+
+
+def _handle_data_issue(action: str, message: str) -> None:
+    """Dispatch *message* according to the configured issue *action*."""
+
+    if action not in _ISSUE_ACTIONS:
+        raise ValueError(
+            "issue action must be one of {'ignore', 'warn', 'error'}, "
+            f"got {action!r}"
+        )
+    if action == "ignore":
+        return
+    if action == "warn":
+        warnings.warn(message, UserWarning, stacklevel=3)
+        return
+    raise ValueError(message)
 
 
 def _in_notebook() -> bool:
@@ -805,6 +832,8 @@ def compute_feature_latent_correlation(
         significance as a bubble chart.
     plot_feature_latent_correlation_heatmap : Render correlation or p-value
         heatmaps using the computed matrices.
+    plot_multilayer_path_graph : Draw layered directed graphs connecting features,
+        latent representations and outcomes.
     """
 
     if latents is None:
@@ -1045,6 +1074,8 @@ def plot_feature_latent_correlation_bubble(
     plot_feature_latent_correlation_heatmap : Render either the correlation or
         p-value heatmap.
     plot_bubble_matrix : Low-level bubble chart helper used for rendering.
+    plot_multilayer_path_graph : Visualise layered connections between features,
+        latent representations and outcomes.
     """
 
     if correlations is None and p_values is None:
@@ -1158,6 +1189,8 @@ def plot_feature_latent_correlation_heatmap(
     plot_feature_latent_correlation_bubble : Bubble-chart overview of correlation
         magnitude and statistical significance.
     plot_matrix_heatmap : Low-level heatmap rendering utility.
+    plot_multilayer_path_graph : Layered path diagram connecting features,
+        latent variables and outcomes.
     """
 
     if correlations is None and p_values is None:
@@ -1246,3 +1279,520 @@ def _adjust_p_values(p_values: pd.DataFrame, *, method: str) -> pd.DataFrame:
     _, corrected, _, _ = multipletests(values, method=method)
     adjusted[mask] = corrected
     return pd.DataFrame(adjusted, index=p_values.index, columns=p_values.columns)
+
+
+def plot_multilayer_path_graph(
+    edges: pd.DataFrame,
+    nodes: pd.DataFrame,
+    *,
+    layer_spacing: float = 2.6,
+    node_spacing: float = 1.4,
+    node_size: float = 600.0,
+    edge_cmap: str | Colormap = "coolwarm",
+    edge_color_normalization: str = "minmax",
+    edge_label_position: str = "center",
+    edge_label_offset: float = 0.1,
+    node_outline_color: str = "white",
+    node_outline_width: float = 1.2,
+    ax: Axes | None = None,
+    figure_kwargs: Mapping[str, float] | None = None,
+    duplicate_edge_action: str = "warn",
+    self_loop_action: str = "warn",
+    isolated_node_action: str = "warn",
+    group_color_mapping: Mapping[str, str] | None = None,
+    layer_color_mapping: Mapping[int, str] | None = None,
+    default_layer_cmap: str = "tab10",
+    edge_width_range: tuple[float, float] = (1.4, 6.0),
+    colorbar_title: str = "Edge colour",
+    edge_size_legend_title: str | None = "Edge weight",
+    edge_size_legend_values: Sequence[float] | None = None,
+    colorbar_kwargs: Mapping[str, float] | None = None,
+) -> tuple[plt.Figure, Axes]:
+    """Render a layered path diagram from tidy edge and node tables.
+
+    The function organises nodes into vertical layers and draws directed edges
+    using smooth curves whose colour, width and transparency are derived from
+    the supplied edge attributes. Node colours follow the priority order
+    ``node colour column > group colours > layer colours > automatic palette``.
+
+    Parameters
+    ----------
+    edges : pandas.DataFrame
+        Adjacency information with at least the ``source`` and ``target``
+        columns. Optional columns include ``weight_edge_size`` (controls edge
+        width), ``weight_edge_color`` (drives the colour map), ``alpha``
+        (transparency) and ``label`` (text placed along the edge).
+    nodes : pandas.DataFrame
+        Table describing node attributes. Must contain an ``id`` column used as
+        the unique key, alongside a required integer ``layer`` column. Optional
+        columns include ``label`` (rendered text), ``color`` (explicit node
+        colour) and ``group`` (used for the legend).
+    layer_spacing : float, default 2.6
+        Horizontal distance between consecutive layers.
+    node_spacing : float, default 1.4
+        Vertical spacing between nodes within the same layer.
+    node_size : float, default 600.0
+        Area passed to :func:`matplotlib.axes.Axes.scatter` when drawing nodes.
+    edge_cmap : str or matplotlib.colors.Colormap, default ``"coolwarm"``
+        Colour map applied to ``weight_edge_color``.
+    edge_color_normalization : {"minmax", "symmetric"}, default ``"minmax"``
+        Strategy for normalising edge colours. ``"symmetric"`` centres the
+        colour bar at zero using :class:`~matplotlib.colors.TwoSlopeNorm`.
+    edge_label_position : {"source", "center", "target"}, default ``"center"``
+        Location along each edge where labels are rendered.
+    edge_label_offset : float, default 0.1
+        Distance applied orthogonally to the edge direction when placing labels.
+    node_outline_color : str, default ``"white"``
+        Outline colour applied to all nodes for contrast.
+    node_outline_width : float, default 1.2
+        Line width of the node outline stroke.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes used for drawing. When omitted, a new figure and axes are
+        created.
+    figure_kwargs : Mapping[str, float], optional
+        Additional keyword arguments passed to :func:`matplotlib.pyplot.subplots`
+        when ``ax`` is ``None``.
+    duplicate_edge_action, self_loop_action, isolated_node_action : {"ignore", "warn", "error"}, default ``"warn"``
+        Behaviour when encountering duplicate edges (same ``source`` and
+        ``target``), self-loops or isolated nodes. The actions emit a warning,
+        ignore the issue or raise a :class:`ValueError`.
+    group_color_mapping : Mapping[str, str], optional
+        Custom colours used for the node ``group`` column.
+    layer_color_mapping : Mapping[int, str], optional
+        Override colours for specific layers. Applies when nodes do not define
+        an explicit ``color`` and no ``group_color_mapping`` is provided.
+    default_layer_cmap : str, default ``"tab10"``
+        Name of the Matplotlib colour map used when a layer colour needs to be
+        assigned automatically.
+    edge_width_range : tuple of float, default (1.4, 6.0)
+        Range of line widths (in points) mapped from ``weight_edge_size``.
+    colorbar_title : str, default ``"Edge colour"``
+        Title displayed above the colour bar.
+    edge_size_legend_title : str or None, default ``"Edge weight"``
+        Title for the legend describing edge widths. Set to ``None`` to omit the
+        legend entirely.
+    edge_size_legend_values : sequence of float, optional
+        Specific weight values illustrated in the edge-width legend. When not
+        supplied, three representative values (minimum, median and maximum) are
+        chosen automatically.
+    colorbar_kwargs : Mapping[str, float], optional
+        Additional keyword arguments forwarded to :func:`matplotlib.figure.Figure.colorbar`.
+
+    Returns
+    -------
+    matplotlib.figure.Figure, matplotlib.axes.Axes
+        Figure and axes containing the rendered diagram.
+
+    Raises
+    ------
+    ValueError
+        If required columns are missing, node identifiers are duplicated or the
+        configured actions request an error for the detected data issues.
+
+    Warns
+    -----
+    UserWarning
+        Emitted when duplicates, self-loops or isolated nodes are found and the
+        corresponding action is ``"warn"``. A warning is also raised if
+        ``weight_edge_color`` is unavailable and ``weight_edge_size`` is reused
+        for colouring.
+
+    See Also
+    --------
+    compute_feature_latent_correlation : Compute correlations between features
+        and latent codes without plotting.
+    plot_feature_latent_correlation_bubble : Bubble-chart view of latent-feature correlations.
+    plot_feature_latent_correlation_heatmap : Heatmap of latent-feature correlations or p-values.
+
+    Examples
+    --------
+    Build a three-layer graph from tidy tables::
+
+        >>> import matplotlib.pyplot as plt
+        >>> edges = pd.DataFrame(
+        ...     {
+        ...         "source": ["Age", "SOFA", "Phenotype A", "Phenotype B"],
+        ...         "target": ["SOFA", "Phenotype A", "Mortality", "Mortality"],
+        ...         "weight_edge_size": [0.4, 0.9, 1.2, 0.6],
+        ...         "weight_edge_color": [0.1, 0.6, 0.3, -0.2],
+        ...         "label": ["$\\beta=0.1$", "", "p<0.01", "p=0.05"],
+        ...     }
+        ... )
+        >>> nodes = pd.DataFrame(
+        ...     {
+        ...         "id": ["Age", "SOFA", "Phenotype A", "Phenotype B", "Mortality"],
+        ...         "label": ["Age", "SOFA", "Phenotype A", "Phenotype B", "28-day"],
+        ...         "layer": [0, 1, 2, 2, 3],
+        ...         "group": ["Clinical", "Clinical", "Latent", "Latent", "Outcome"],
+        ...     }
+        ... )
+        >>> fig, ax = plot_multilayer_path_graph(edges, nodes)
+        >>> plt.close(fig)
+
+    Notes
+    -----
+    The colour priority is ``node['color']`` > ``group_color_mapping[group]`` >
+    ``layer_color_mapping[layer]`` > automatically generated layer colours.
+    """
+
+    if not isinstance(edges, pd.DataFrame) or not isinstance(nodes, pd.DataFrame):
+        raise TypeError("edges and nodes must both be pandas.DataFrame instances")
+
+    if {"source", "target"} - set(edges.columns):
+        missing = {"source", "target"} - set(edges.columns)
+        raise ValueError(f"edges DataFrame is missing required columns: {sorted(missing)}")
+    if "layer" not in nodes.columns or "id" not in nodes.columns:
+        raise ValueError("nodes DataFrame must include 'id' and 'layer' columns")
+
+    edges_proc = edges.copy()
+    nodes_proc = nodes.copy()
+
+    # Deduplicate edges using the mean for numeric attributes and first value otherwise.
+    duplicates_mask = edges_proc.duplicated(subset=["source", "target"], keep=False)
+    if duplicates_mask.any():
+        duplicate_count = int(duplicates_mask.sum())
+        _handle_data_issue(
+            duplicate_edge_action,
+            f"found {duplicate_count} duplicate edge rows; values will be aggregated",
+        )
+        aggregations: dict[str, str] = {}
+        for column in edges_proc.columns:
+            if column in {"source", "target"}:
+                continue
+            if pd.api.types.is_numeric_dtype(edges_proc[column]):
+                aggregations[column] = "mean"
+            else:
+                aggregations[column] = "first"
+        edges_proc = (
+            edges_proc.groupby(["source", "target"], as_index=False).agg(aggregations)
+            if aggregations
+            else edges_proc.drop_duplicates(subset=["source", "target"])
+        )
+
+    # Remove self-loops after notifying the user.
+    self_loop_mask = edges_proc["source"] == edges_proc["target"]
+    if self_loop_mask.any():
+        loop_count = int(self_loop_mask.sum())
+        _handle_data_issue(
+            self_loop_action,
+            f"removed {loop_count} self-loop edge(s); please verify the adjacency table",
+        )
+        edges_proc = edges_proc.loc[~self_loop_mask].reset_index(drop=True)
+
+    if edges_proc.empty:
+        raise ValueError("no edges remain after preprocessing; unable to build the diagram")
+
+    # Validate nodes.
+    if nodes_proc["id"].duplicated().any():
+        duplicated_ids = nodes_proc.loc[nodes_proc["id"].duplicated(), "id"].tolist()
+        raise ValueError(f"node identifiers must be unique; duplicates: {duplicated_ids}")
+
+    try:
+        nodes_proc["layer"] = nodes_proc["layer"].astype(int)
+    except ValueError as err:  # pragma: no cover - defensive
+        raise ValueError("node 'layer' column must contain integers") from err
+
+    node_lookup = nodes_proc.set_index("id", drop=False)
+    missing_nodes = (
+        (set(edges_proc["source"]) | set(edges_proc["target"]))
+        - set(node_lookup.index)
+    )
+    if missing_nodes:
+        raise ValueError(f"edges reference unknown node identifiers: {sorted(missing_nodes)}")
+
+    connected_nodes = set(edges_proc["source"]) | set(edges_proc["target"])
+    isolated_nodes = [node for node in node_lookup.index if node not in connected_nodes]
+    if isolated_nodes:
+        _handle_data_issue(
+            isolated_node_action,
+            f"found {len(isolated_nodes)} isolated node(s): {isolated_nodes}",
+        )
+
+    label_column = "label" if "label" in nodes_proc.columns else None
+    if label_column:
+        node_labels = nodes_proc[label_column].fillna(nodes_proc["id"])
+    else:
+        node_labels = nodes_proc["id"]
+    node_labels.index = nodes_proc["id"].tolist()
+
+    if isinstance(edge_cmap, str):
+        cmap = plt.get_cmap(edge_cmap)
+    else:
+        cmap = edge_cmap
+
+    if edge_color_normalization not in {"minmax", "symmetric"}:
+        raise ValueError(
+            "edge_color_normalization must be either 'minmax' or 'symmetric'"
+        )
+
+    size_series = pd.to_numeric(edges_proc.get("weight_edge_size"), errors="coerce")
+    if size_series.isna().all():
+        raise ValueError(
+            "edges DataFrame must include a numeric 'weight_edge_size' column to control widths"
+        )
+    # Replace missing sizes with the column median to maintain continuity.
+    if size_series.isna().any():
+        median_size = float(size_series.median(skipna=True))
+        size_series = size_series.fillna(median_size)
+
+    if "weight_edge_color" in edges_proc.columns:
+        color_series = pd.to_numeric(edges_proc["weight_edge_color"], errors="coerce")
+    else:
+        color_series = pd.Series(np.nan, index=edges_proc.index, dtype=float)
+    if color_series.isna().all():
+        _handle_data_issue(
+            "warn",
+            "weight_edge_color not provided; falling back to weight_edge_size for colouring",
+        )
+        color_series = size_series.copy()
+
+    if "alpha" in edges_proc.columns:
+        alpha_series = pd.to_numeric(edges_proc["alpha"], errors="coerce")
+    else:
+        alpha_series = pd.Series(np.nan, index=edges_proc.index, dtype=float)
+    if alpha_series.isna().all():
+        abs_size = size_series.abs()
+        min_abs = float(abs_size.min())
+        max_abs = float(abs_size.max())
+        if max_abs - min_abs < 1e-12:
+            alpha_values = np.full_like(abs_size.to_numpy(dtype=float), 0.8)
+        else:
+            norm = Normalize(vmin=min_abs, vmax=max_abs)
+            alpha_values = 0.3 + 0.7 * norm(abs_size.to_numpy(dtype=float))
+    else:
+        alpha_values = np.clip(alpha_series.fillna(alpha_series.median()).to_numpy(dtype=float), 0.0, 1.0)
+
+    color_values = color_series.to_numpy(dtype=float)
+    finite_colors = color_values[np.isfinite(color_values)]
+    if finite_colors.size == 0:
+        finite_colors = np.array([0.0])
+    color_min = float(np.nanmin(finite_colors))
+    color_max = float(np.nanmax(finite_colors))
+    if edge_color_normalization == "minmax":
+        if abs(color_max - color_min) < 1e-12:
+            color_min -= 1.0
+            color_max += 1.0
+        norm = Normalize(vmin=color_min, vmax=color_max)
+    else:
+        limit = max(abs(color_min), abs(color_max))
+        if limit < 1e-12:
+            limit = 1.0
+        norm = TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit)
+
+    abs_sizes = size_series.abs().to_numpy(dtype=float)
+    min_width, max_width = edge_width_range
+    min_size = float(abs_sizes.min())
+    max_size = float(abs_sizes.max())
+    if max_size - min_size < 1e-12:
+        widths = np.full_like(abs_sizes, (min_width + max_width) / 2.0)
+    else:
+        widths = np.interp(abs_sizes, [min_size, max_size], [min_width, max_width])
+
+    # Resolve node colours according to the priority rules.
+    layer_values = np.sort(nodes_proc["layer"].unique())
+    if layer_color_mapping is not None:
+        layer_palette = dict(layer_color_mapping)
+    else:
+        cmap_layers = plt.get_cmap(default_layer_cmap)
+        layer_palette = {
+            layer: cmap_layers(idx / max(len(layer_values), 1))
+            for idx, layer in enumerate(layer_values)
+        }
+
+    group_palette = dict(group_color_mapping) if group_color_mapping else {}
+
+    resolved_colors: dict[str, str] = {}
+    legend_groups: dict[str, str] = {}
+    for node_id, node_row in node_lookup.iterrows():
+        explicit_color = node_row.get("color")
+        if is_color_like(explicit_color):
+            resolved_color = explicit_color
+        else:
+            group_value = node_row.get("group")
+            if group_value in group_palette and is_color_like(group_palette[group_value]):
+                resolved_color = group_palette[group_value]
+            else:
+                layer_color = layer_palette.get(node_row["layer"])
+                if layer_color is None or not is_color_like(layer_color):
+                    # Fall back to a neutral grey.
+                    resolved_color = "#6c757d"
+                else:
+                    resolved_color = layer_color
+            if explicit_color not in (None, "") and not is_color_like(explicit_color):
+                warnings.warn(
+                    f"node {node_id!r} specifies colour {explicit_color!r} which is not recognised;"
+                    " falling back to group/layer colours",
+                    UserWarning,
+                    stacklevel=3,
+                )
+
+        resolved_colors[node_id] = resolved_color
+
+        group_value = node_row.get("group")
+        if isinstance(group_value, str) and group_value not in legend_groups:
+            if group_value in group_palette and is_color_like(group_palette[group_value]):
+                legend_groups[group_value] = group_palette[group_value]
+            else:
+                legend_groups[group_value] = resolved_color
+
+    # Compute node positions per layer.
+    positions: dict[str, tuple[float, float]] = {}
+    for layer_index, layer in enumerate(layer_values):
+        layer_nodes = nodes_proc[nodes_proc["layer"] == layer].copy()
+        layer_nodes.sort_values(by=["layer", "id"], inplace=True)
+        count = len(layer_nodes)
+        if count == 0:
+            continue
+        mid = (count - 1) / 2.0
+        x_coord = layer_index * layer_spacing
+        for order, (_, node_row) in enumerate(layer_nodes.iterrows()):
+            y_coord = (mid - order) * node_spacing
+            positions[node_row["id"]] = (x_coord, y_coord)
+
+    if ax is None:
+        width = max(6.0, layer_spacing * max(len(layer_values) - 1, 1) + 3.0)
+        height = max(4.0, node_spacing * max(nodes_proc.groupby("layer").size().max(), 1) + 2.5)
+        fig_kwargs = {"figsize": (width, height)}
+        if figure_kwargs:
+            fig_kwargs.update(figure_kwargs)
+        fig, ax = plt.subplots(1, 1, **fig_kwargs)
+    else:
+        fig = ax.figure
+
+    scatter = ax.scatter(
+        [positions[node_id][0] for node_id in node_lookup.index],
+        [positions[node_id][1] for node_id in node_lookup.index],
+        s=node_size,
+        c=[resolved_colors[node_id] for node_id in node_lookup.index],
+        edgecolor=node_outline_color,
+        linewidth=node_outline_width,
+        zorder=3,
+    )
+
+    # Annotate node labels.
+    for node_id, (x_coord, y_coord) in positions.items():
+        ax.text(
+            x_coord,
+            y_coord - (node_spacing * 0.15),
+            str(node_labels.loc[node_id]),
+            ha="center",
+            va="top",
+            fontsize=11,
+            zorder=4,
+        )
+
+    label_position = edge_label_position.lower()
+    if label_position not in {"source", "center", "target"}:
+        raise ValueError("edge_label_position must be one of {'source', 'center', 'target'}")
+    position_fraction = {"source": 0.2, "center": 0.5, "target": 0.8}[label_position]
+
+    for index, edge_row in edges_proc.iterrows():
+        start = positions[edge_row["source"]]
+        end = positions[edge_row["target"]]
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        distance = float(np.hypot(dx, dy))
+        if distance == 0.0:
+            continue  # Already filtered self-loops; safeguard for degenerate positions.
+
+        curvature = 0.2 * np.sign(dx) if dx != 0 else 0.3 * np.sign(dy or 1.0)
+        patch = FancyArrowPatch(
+            start,
+            end,
+            connectionstyle=f"arc3,rad={curvature}",
+            arrowstyle="-|>",
+            mutation_scale=12,
+            linewidth=widths[index],
+            color=cmap(norm(color_values[index])),
+            alpha=float(alpha_values[index]),
+            zorder=2,
+        )
+        ax.add_patch(patch)
+
+        label_value = edge_row.get("label")
+        if isinstance(label_value, str) and label_value:
+            t = position_fraction
+            label_x = start[0] + t * dx
+            label_y = start[1] + t * dy
+            if distance > 0:
+                offset_scale = edge_label_offset
+                nx, ny = -dy / distance, dx / distance
+                label_x += offset_scale * nx
+                label_y += offset_scale * ny
+            ax.text(
+                label_x,
+                label_y,
+                label_value,
+                ha="center",
+                va="center",
+                fontsize=10,
+                zorder=5,
+            )
+
+    ax.set_axis_off()
+    ax.set_xlim(
+        min(x for x, _ in positions.values()) - layer_spacing * 0.5,
+        max(x for x, _ in positions.values()) + layer_spacing * 0.8,
+    )
+    y_values = [pos[1] for pos in positions.values()]
+    ax.set_ylim(min(y_values) - node_spacing, max(y_values) + node_spacing)
+
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cb_kwargs = {"orientation": "horizontal", "fraction": 0.05, "pad": 0.12}
+    if colorbar_kwargs:
+        cb_kwargs.update(colorbar_kwargs)
+    colorbar = fig.colorbar(sm, ax=ax, **cb_kwargs)
+    colorbar.set_label(colorbar_title, fontsize=11)
+
+    # Build group legend using the resolved colours.
+    group_handles: list[Line2D] = []
+    for group_name, color in legend_groups.items():
+        handle = Line2D([0], [0], marker="o", color="none", markerfacecolor=color, label=group_name, markersize=10)
+        group_handles.append(handle)
+
+    if group_handles:
+        group_legend = ax.legend(
+            handles=group_handles,
+            title="Groups",
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0.0,
+        )
+        ax.add_artist(group_legend)
+
+    if edge_size_legend_title is not None:
+        weight_values = size_series.to_numpy(dtype=float)
+        if edge_size_legend_values is None:
+            unique_values = np.unique(np.round(weight_values, 6))
+            if unique_values.size <= 3:
+                legend_values = unique_values
+            else:
+                legend_values = np.array(
+                    [np.min(weight_values), np.median(weight_values), np.max(weight_values)]
+                )
+        else:
+            legend_values = np.asarray(edge_size_legend_values, dtype=float)
+
+        legend_handles = []
+        for value in legend_values:
+            if max_size - min_size < 1e-12:
+                lw = (min_width + max_width) / 2.0
+            else:
+                lw = np.interp(abs(value), [min_size, max_size], [min_width, max_width])
+            legend_handles.append(
+                Line2D([0], [0], color="#6c757d", linewidth=lw, label=f"{value:.2g}")
+            )
+
+        if legend_handles:
+            edge_legend = ax.legend(
+                handles=legend_handles,
+                title=edge_size_legend_title,
+                loc="lower left",
+                bbox_to_anchor=(1.02, 0.0),
+                borderaxespad=0.0,
+            )
+            ax.add_artist(edge_legend)
+
+    fig.tight_layout()
+    return fig, ax

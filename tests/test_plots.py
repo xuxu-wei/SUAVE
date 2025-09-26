@@ -1,6 +1,8 @@
 import warnings
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgba
+from matplotlib.patches import FancyArrowPatch
 import numpy as np
 import pandas as pd
 import pytest
@@ -13,6 +15,7 @@ from suave.plots import (
     plot_feature_latent_correlation_bubble,
     plot_feature_latent_correlation_heatmap,
     plot_matrix_heatmap,
+    plot_multilayer_path_graph,
     _adjust_p_values,
 )
 
@@ -188,6 +191,81 @@ def test_plot_feature_latent_correlation_requires_pair():
     with pytest.raises(ValueError):
         plot_feature_latent_correlation_heatmap(
             DummyModel(), X, correlations=None, p_values=pvals
+        )
+
+
+def test_plot_multilayer_path_graph_warns_and_renders():
+    edges = pd.DataFrame(
+        {
+            "source": ["a", "a", "b"],
+            "target": ["b", "b", "c"],
+            "weight_edge_size": [0.2, 0.4, 1.2],
+            "label": ["beta", "beta", "sig"],
+        }
+    )
+    nodes = pd.DataFrame(
+        {
+            "id": ["a", "b", "c", "d"],
+            "label": ["A", "B", "C", "D"],
+            "layer": [0, 1, 2, 0],
+            "group": ["g1", "g2", "g3", "g1"],
+            "color": ["#ff0000", None, None, None],
+        }
+    )
+
+    with pytest.warns(UserWarning) as captured:
+        fig, ax = plot_multilayer_path_graph(
+            edges,
+            nodes,
+            duplicate_edge_action="warn",
+            isolated_node_action="warn",
+            layer_color_mapping={0: "#aaaaaa", 1: "#bbbbbb", 2: "#cccccc"},
+            group_color_mapping={"g1": "#00ffff", "g2": "#004488"},
+            edge_size_legend_values=[0.2, 1.2],
+        )
+
+    messages = {str(record.message) for record in captured}
+    assert any("duplicate edge" in message for message in messages)
+    assert any("isolated node" in message for message in messages)
+    assert any("weight_edge_color" in message for message in messages)
+
+    arrow_patches = [patch for patch in ax.patches if isinstance(patch, FancyArrowPatch)]
+    assert len(arrow_patches) == 2
+
+    scatter = ax.collections[0]
+    facecolors = scatter.get_facecolors()
+    expected = [
+        to_rgba("#ff0000"),
+        to_rgba("#004488"),
+        to_rgba("#cccccc"),
+        to_rgba("#00ffff"),
+    ]
+    np.testing.assert_allclose(facecolors, expected, atol=1e-6)
+
+    plt.close(fig)
+
+
+def test_plot_multilayer_path_graph_raises_on_isolated_error():
+    edges = pd.DataFrame(
+        {
+            "source": ["x"],
+            "target": ["y"],
+            "weight_edge_size": [1.0],
+            "weight_edge_color": [0.5],
+        }
+    )
+    nodes = pd.DataFrame(
+        {
+            "id": ["x", "y", "z"],
+            "layer": [0, 1, 2],
+        }
+    )
+
+    with pytest.raises(ValueError):
+        plot_multilayer_path_graph(
+            edges,
+            nodes,
+            isolated_node_action="error",
         )
 
 
