@@ -755,14 +755,15 @@ def choose_preferred_pareto_trial(
     if constrained:
         return max(constrained, key=lambda trial: _objective_values(trial)[0])
 
-    eligible = [
-        trial
-        for trial in trials
-        if np.isfinite(_objective_values(trial)[0])
-        and _objective_values(trial)[0] > min_validation_roauc
-    ]
+    eligible: List[Tuple[float, "optuna.trial.FrozenTrial"]] = []
+    for trial in trials:
+        primary, _ = _objective_values(trial)
+        if np.isfinite(primary) and primary > min_validation_roauc:
+            # Track each eligible trial alongside its validation ROC-AUC so we can
+            # deterministically recover the strongest performer.
+            eligible.append((primary, trial))
     if eligible:
-        return eligible[0]
+        return max(eligible, key=lambda item: item[0])[1]
 
     return max(trials, key=lambda trial: _objective_values(trial)[0])
 
