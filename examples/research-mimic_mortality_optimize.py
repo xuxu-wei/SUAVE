@@ -237,7 +237,7 @@ def run_optuna_search(
         trial.suggest_categorical(
             "head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys())
         )
-        trial.suggest_float("beta", 0.5, 4.0)
+        trial.suggest_float("beta", 0.5, 6.0)
         trial.suggest_categorical("use_classification_loss_weight", [True, False])
         if trial.params.get("use_classification_loss_weight"):
             trial.suggest_float("classification_loss_weight", 1.0, 1000.0, log=True)
