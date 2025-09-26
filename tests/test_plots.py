@@ -14,10 +14,13 @@ from suave.plots import (
     plot_bubble_matrix,
     plot_feature_latent_correlation_bubble,
     plot_feature_latent_correlation_heatmap,
+    plot_feature_latent_outcome_path_graph,
     plot_matrix_heatmap,
     plot_multilayer_path_graph,
+    plot_multilayer_path_graph_from_graph,
     _adjust_p_values,
 )
+from suave.types import Schema
 
 
 def test_training_plot_monitor_flips_reconstruction_sign():
@@ -267,6 +270,81 @@ def test_plot_multilayer_path_graph_raises_on_isolated_error():
             nodes,
             isolated_node_action="error",
         )
+
+
+
+def test_plot_feature_latent_outcome_path_graph_labels_and_edges():
+    class DemoModel:
+        def __init__(self) -> None:
+            self.schema = Schema({"age": {"type": "real"}, "sofa": {"type": "real"}})
+
+        def encode(self, frame: pd.DataFrame) -> np.ndarray:
+            return np.column_stack([frame["age"], frame["sofa"]])
+
+    X = pd.DataFrame({"sofa": [4.0, 5.0, 6.0, 7.0], "age": [60, 70, 80, 90]})
+    y = pd.Series([0, 1, 1, 0], name="mortality")
+
+    fig, ax = plot_feature_latent_outcome_path_graph(
+        DemoModel(),
+        X,
+        y=y,
+        significance_level=0.99,
+        edge_label_top_k=2,
+    )
+
+    arrow_count = sum(isinstance(patch, FancyArrowPatch) for patch in ax.patches)
+    assert arrow_count == 6
+
+    rho_labels = [text.get_text() for text in ax.texts if text.get_text().startswith("$\\rho=")]
+    assert len(rho_labels) == 2
+    assert "$z_{0}$" in {text.get_text() for text in ax.texts}
+
+    plt.close(fig)
+
+
+def test_plot_feature_latent_outcome_path_graph_warns_without_model_schema():
+    X = pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]})
+    y = pd.Series([1, 0, 1, 0], name="outcome")
+    latents = np.column_stack([X["x"], X["x"]])
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        fig, ax = plot_feature_latent_outcome_path_graph(
+            None,
+            X,
+            y=y,
+            latents=latents,
+            significance_level=0.5,
+            edge_label_top_k=None,
+        )
+
+    assert any("model is None" in str(w.message) for w in captured)
+    plt.close(fig)
+
+
+def test_plot_multilayer_path_graph_from_graph_roundtrip():
+    nx = pytest.importorskip("networkx")
+
+    graph = nx.DiGraph()
+    graph.add_node("f", layer=0, label="F", group="Feature")
+    graph.add_node("z0", layer=1, label="$z_0$", group="Latent")
+    graph.add_node("y", layer=2, label="Y", group="Outcome")
+    graph.add_edge("f", "z0", weight_edge_size=0.4, weight_edge_color=0.4)
+    graph.add_edge("z0", "y", weight_edge_size=0.5, weight_edge_color=0.5)
+
+    fig, ax = plot_multilayer_path_graph_from_graph(graph)
+    arrow_count = sum(isinstance(patch, FancyArrowPatch) for patch in ax.patches)
+    assert arrow_count == 2
+
+    bad_graph = nx.DiGraph()
+    bad_graph.add_node("a", layer=0)
+    bad_graph.add_node("b", layer=1)
+    bad_graph.add_edge("a", "b")
+    with pytest.raises(ValueError):
+        plot_multilayer_path_graph_from_graph(bad_graph)
+
+    plt.close(fig)
+
 
 
 

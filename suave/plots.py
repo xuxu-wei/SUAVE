@@ -434,6 +434,7 @@ def plot_matrix_heatmap(
 
     Examples
     --------
+    >>> import matplotlib.pyplot as plt
     >>> import numpy as np
     >>> from suave.plots import plot_matrix_heatmap
     >>> values = np.array([[1.0, -0.5], [0.25, 0.75]])
@@ -832,6 +833,8 @@ def compute_feature_latent_correlation(
         significance as a bubble chart.
     plot_feature_latent_correlation_heatmap : Render correlation or p-value
         heatmaps using the computed matrices.
+    plot_feature_latent_outcome_path_graph : Construct a layered path graph from
+        feature/latent/outcome correlations.
     plot_multilayer_path_graph : Draw layered directed graphs connecting features,
         latent representations and outcomes.
     """
@@ -1073,6 +1076,8 @@ def plot_feature_latent_correlation_bubble(
         matrices without rendering a figure.
     plot_feature_latent_correlation_heatmap : Render either the correlation or
         p-value heatmap.
+    plot_feature_latent_outcome_path_graph : Construct a layered path diagram
+        from correlations computed on the same data.
     plot_bubble_matrix : Low-level bubble chart helper used for rendering.
     plot_multilayer_path_graph : Visualise layered connections between features,
         latent representations and outcomes.
@@ -1188,6 +1193,8 @@ def plot_feature_latent_correlation_heatmap(
         matrices for custom processing.
     plot_feature_latent_correlation_bubble : Bubble-chart overview of correlation
         magnitude and statistical significance.
+    plot_feature_latent_outcome_path_graph : Construct a layered path graph from
+        the same correlation inputs.
     plot_matrix_heatmap : Low-level heatmap rendering utility.
     plot_multilayer_path_graph : Layered path diagram connecting features,
         latent variables and outcomes.
@@ -1403,6 +1410,10 @@ def plot_multilayer_path_graph(
         and latent codes without plotting.
     plot_feature_latent_correlation_bubble : Bubble-chart view of latent-feature correlations.
     plot_feature_latent_correlation_heatmap : Heatmap of latent-feature correlations or p-values.
+    plot_feature_latent_outcome_path_graph : Build a layered path graph directly
+        from model correlations and outcomes.
+    plot_multilayer_path_graph_from_graph : Render layered diagrams from
+        :class:`networkx.DiGraph` objects.
 
     Examples
     --------
@@ -1796,3 +1807,527 @@ def plot_multilayer_path_graph(
 
     fig.tight_layout()
     return fig, ax
+
+
+def plot_feature_latent_outcome_path_graph(
+    model,
+    X: pd.DataFrame,
+    *,
+    y: pd.Series
+    | pd.DataFrame
+    | np.ndarray
+    | Mapping[str, Sequence[object]]
+    | None = None,
+    target_name: str = "target",
+    latents: np.ndarray | None = None,
+    method: str = "spearman",
+    p_adjust: str | None = "fdr_bh",
+    significance_level: float = 0.05,
+    significant_alpha: float = 0.7,
+    insignificant_alpha: float = 0.0,
+    edge_label_top_k: int | None = 5,
+    edge_label_format: str = r"$\rho={value:.2f}$",
+    node_label_mapping: Mapping[str, str] | None = None,
+    node_color_mapping: Mapping[str, str] | None = None,
+    node_group_mapping: Mapping[str, str] | None = None,
+    group_color_mapping: Mapping[str, str] | None = None,
+    layer_color_mapping: Mapping[int, str] | None = None,
+    default_layer_cmap: str = "tab10",
+    edge_width_range: tuple[float, float] = (1.4, 6.0),
+    colorbar_title: str = "Spearman correlation",
+    edge_size_legend_title: str | None = "Correlation magnitude",
+    edge_size_legend_values: Sequence[float] | None = None,
+    colorbar_kwargs: Mapping[str, float] | None = None,
+    edge_cmap: str | Colormap = "coolwarm",
+    **path_kwargs,
+) -> tuple[plt.Figure, Axes]:
+    """Render a feature → latent → outcome path graph from correlations.
+
+    The helper aligns ``X`` to the model schema when available, encodes latent
+    representations (or uses the supplied :paramref:`latents`), and computes
+    feature/latent/outcome correlations using Spearman's coefficient by
+    default. Edges are weighted and coloured by the correlation strength while
+    their transparency reflects statistical significance after multiple-testing
+    correction.
+
+    Parameters
+    ----------
+    model : suave.model.SUAVE or compatible object, optional
+        Fitted estimator exposing a :meth:`encode` method and an optional
+        ``schema`` attribute. When ``None`` the caller must provide
+        :paramref:`latents` and a warning reminds users to align ``X`` with the
+        model schema used for training.
+    X : pandas.DataFrame
+        Feature matrix to analyse. When ``model.schema`` is defined the columns
+        are reordered to match the schema feature order after verifying that no
+        training features are missing.
+    y : pandas.Series, pandas.DataFrame, numpy.ndarray or mapping, optional
+        Outcome(s) correlated against the latent dimensions. Accepts the same
+        structures as :func:`compute_feature_latent_correlation`.
+    target_name : str, default "target"
+        Label applied to one-dimensional :paramref:`y` inputs lacking a name.
+    latents : numpy.ndarray, optional
+        Pre-computed latent representations. When omitted the function calls
+        ``model.encode``. ``model`` must not be ``None`` if latents are not
+        supplied.
+    method : {"spearman", "pearson", "kendall"}, default "spearman"
+        Correlation coefficient forwarded to
+        :func:`compute_feature_latent_correlation`.
+    p_adjust : {"fdr_bh", "bonferroni", "holm", None}, default "fdr_bh"
+        Multiplicity correction applied to the correlation p-values.
+    significance_level : float, default 0.05
+        Threshold applied to the (adjusted) p-values. Edges with p-values above
+        the threshold use :paramref:`insignificant_alpha` while significant
+        edges use :paramref:`significant_alpha`.
+    significant_alpha : float, default 0.7
+        Transparency assigned to statistically significant edges.
+    insignificant_alpha : float, default 0.0
+        Transparency assigned to non-significant edges.
+    edge_label_top_k : int, optional
+        Number of statistically significant edges (ranked by absolute
+        correlation) annotated with :paramref:`edge_label_format`. ``None`` or
+        values less than or equal to zero disable labelling.
+    edge_label_format : str, default ``"$\\rho={value:.2f}$"``
+        Template used when labelling the strongest edges. Available fields are
+        ``value`` (signed correlation), ``abs_value`` (absolute correlation),
+        ``source`` and ``target``, plus ``p_value`` when available.
+    node_label_mapping, node_color_mapping, node_group_mapping : mapping, optional
+        Dictionaries keyed by node identifier that override the automatic
+        labels, colours or group assignments for specific nodes. Labels default
+        to the node identifier for features/outcomes and ``$z_{k}$`` for latent
+        variables. Groups default to ``"Feature"``, ``"Latent"`` and
+        ``"Outcome"`` respectively.
+    group_color_mapping : mapping, optional
+        Colour dictionary passed to :func:`plot_multilayer_path_graph` that maps
+        group names to colours. Overrides layer colours when present.
+    layer_color_mapping : mapping, optional
+        Optional override for per-layer colours used when explicit node colours
+        or group colours are unavailable.
+    default_layer_cmap : str, default "tab10"
+        Matplotlib colormap name sampled for automatic layer colours.
+    edge_width_range : tuple of float, default (1.4, 6.0)
+        Range of edge widths forwarded to :func:`plot_multilayer_path_graph`.
+    colorbar_title : str, default "Spearman correlation"
+        Title shown above the correlation colour bar.
+    edge_size_legend_title : str or None, default "Correlation magnitude"
+        Legend title describing the mapping between edge width and correlation
+        magnitude. Set to ``None`` to suppress the legend.
+    edge_size_legend_values : sequence of float, optional
+        Explicit correlation values highlighted in the edge-width legend.
+    colorbar_kwargs : mapping, optional
+        Extra keyword arguments for :meth:`matplotlib.figure.Figure.colorbar`.
+    edge_cmap : str or matplotlib.colors.Colormap, default ``"coolwarm"``
+        Colormap applied to correlation values.
+    **path_kwargs
+        Additional keyword arguments forwarded to
+        :func:`plot_multilayer_path_graph` (for example ``layer_spacing`` or
+        ``edge_label_position``).
+
+    Returns
+    -------
+    matplotlib.figure.Figure, matplotlib.axes.Axes
+        Figure and axes populated with the path diagram.
+
+    Warns
+    -----
+    UserWarning
+        Raised when ``model`` lacks a schema or is ``None`` and no automatic
+        alignment is possible.
+
+    See Also
+    --------
+    compute_feature_latent_correlation : Return the correlation and p-value
+        matrices used to build the diagram.
+    plot_feature_latent_correlation_bubble : Bubble-chart overview of the same
+        statistics.
+    plot_feature_latent_correlation_heatmap : Heatmap representation of the
+        correlation or significance matrices.
+    plot_multilayer_path_graph : Lower-level renderer accepting explicit edge
+        and node tables.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> class DemoModel:
+    ...     def __init__(self):
+    ...         from suave.types import Schema
+    ...         self.schema = Schema({"age": {"type": "real"}, "sofa": {"type": "real"}})
+    ...     def encode(self, frame):
+    ...         return np.column_stack([frame["age"], frame["sofa"]])
+    >>> frame = pd.DataFrame({"age": [60, 70, 80], "sofa": [4, 6, 8]})
+    >>> outcomes = pd.Series([0, 1, 1], name="mortality")
+    >>> fig, ax = plot_feature_latent_outcome_path_graph(DemoModel(), frame, y=outcomes)
+    >>> plt.close(fig)
+    """
+
+    if not isinstance(X, pd.DataFrame):
+        raise TypeError("X must be a pandas.DataFrame")
+
+    schema = getattr(model, "schema", None) if model is not None else None
+    if schema is not None:
+        schema.require_columns(X.columns)
+        missing_in_X = [column for column in schema.feature_names if column not in X.columns]
+        if missing_in_X:
+            raise ValueError(
+                "X is missing columns required by the model schema: " f"{missing_in_X}"
+            )
+        feature_ids = [column for column in schema.feature_names if column in X.columns]
+        X_aligned = X.loc[:, feature_ids].copy()
+    else:
+        if model is None:
+            warnings.warn(
+                "model is None; ensure X columns follow the training schema order used for latents",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            warnings.warn(
+                "model does not expose a schema; ensure X columns align with the training schema",
+                UserWarning,
+                stacklevel=2,
+            )
+        feature_ids = list(X.columns)
+        X_aligned = X.copy()
+
+    if not feature_ids:
+        raise ValueError("X must contain at least one feature column")
+
+    def _normalise_targets(
+        targets_input: pd.Series
+        | pd.DataFrame
+        | np.ndarray
+        | Mapping[str, Sequence[object]]
+        | None,
+    ) -> tuple[pd.DataFrame | None, list[str]]:
+        if targets_input is None:
+            return None, []
+        if isinstance(targets_input, pd.Series):
+            name = targets_input.name or target_name
+            frame = targets_input.to_frame(name=name)
+        elif isinstance(targets_input, pd.DataFrame):
+            frame = targets_input.copy()
+        elif isinstance(targets_input, np.ndarray):
+            if targets_input.ndim == 1:
+                frame = pd.DataFrame({target_name: targets_input})
+            elif targets_input.ndim == 2:
+                columns = [f"{target_name}_{idx}" for idx in range(targets_input.shape[1])]
+                frame = pd.DataFrame(targets_input, columns=columns)
+            else:
+                raise ValueError("y array must be one- or two-dimensional")
+        elif isinstance(targets_input, Mapping):
+            frame = pd.DataFrame(targets_input)
+        else:
+            frame = pd.DataFrame({target_name: list(targets_input)})
+
+        frame = frame.copy()
+        if len(frame) != len(X_aligned):
+            raise ValueError("y must align with X by row")
+        frame = frame.reset_index(drop=True)
+        frame.index = X_aligned.index
+        return frame, list(frame.columns)
+
+    targets_frame, target_ids = _normalise_targets(y)
+
+    if latents is None:
+        if model is None or not hasattr(model, "encode"):
+            raise AttributeError(
+                "model must define an 'encode' method or latents must be provided"
+            )
+        latents_matrix = model.encode(X_aligned)
+    else:
+        latents_matrix = latents
+
+    latent_array = np.asarray(latents_matrix, dtype=float)
+    if latent_array.ndim != 2:
+        raise ValueError("latents must be a two-dimensional array")
+    if latent_array.shape[0] != len(X_aligned):
+        raise ValueError("latents must have the same number of rows as X")
+
+    max_dimension = max(len(feature_ids) + len(target_ids), latent_array.shape[1])
+
+    corr_df, pval_df = compute_feature_latent_correlation(
+        model,
+        X_aligned,
+        targets=targets_frame,
+        target_name=target_name,
+        method=method,
+        p_adjust=p_adjust,
+        max_dimension=max_dimension,
+        latents=latent_array,
+    )
+
+    latent_ids = list(corr_df.columns)
+    if not latent_ids:
+        raise ValueError("No latent dimensions available to build the path graph")
+
+    target_ids = [name for name in target_ids if name in corr_df.index]
+
+    if significance_level <= 0 or significance_level >= 1:
+        raise ValueError("significance_level must lie in (0, 1)")
+    if not (0.0 <= significant_alpha <= 1.0 and 0.0 <= insignificant_alpha <= 1.0):
+        raise ValueError("alpha values must lie between 0 and 1")
+
+    node_label_mapping = dict(node_label_mapping or {})
+    node_color_mapping = dict(node_color_mapping or {})
+    node_group_mapping = dict(node_group_mapping or {})
+
+    def _resolve_label(node_id: str, default: str) -> str:
+        return node_label_mapping.get(node_id, default or node_id)
+
+    def _resolve_group(node_id: str, default: str) -> str:
+        return node_group_mapping.get(node_id, default)
+
+    def _resolve_color(node_id: str) -> str | None:
+        return node_color_mapping.get(node_id)
+
+    nodes_records: list[dict[str, object]] = []
+    for feature_id in feature_ids:
+        record: dict[str, object] = {
+            "id": feature_id,
+            "layer": 0,
+            "label": _resolve_label(feature_id, feature_id),
+            "group": _resolve_group(feature_id, "Feature"),
+        }
+        color = _resolve_color(feature_id)
+        if color is not None:
+            record["color"] = color
+        nodes_records.append(record)
+
+    for index, latent_id in enumerate(latent_ids):
+        record = {
+            "id": latent_id,
+            "layer": 1,
+            "label": _resolve_label(latent_id, f"$z_{{{index}}}$"),
+            "group": _resolve_group(latent_id, "Latent"),
+        }
+        color = _resolve_color(latent_id)
+        if color is not None:
+            record["color"] = color
+        nodes_records.append(record)
+
+    for target_id in target_ids:
+        record = {
+            "id": target_id,
+            "layer": 2,
+            "label": _resolve_label(target_id, target_id),
+            "group": _resolve_group(target_id, "Outcome"),
+        }
+        color = _resolve_color(target_id)
+        if color is not None:
+            record["color"] = color
+        nodes_records.append(record)
+
+    nodes_df = pd.DataFrame(nodes_records)
+
+    def _edge_alpha(p_value: float) -> float:
+        if not np.isfinite(p_value):
+            return insignificant_alpha
+        return significant_alpha if p_value <= significance_level else insignificant_alpha
+
+    edge_records: list[dict[str, object]] = []
+
+    for feature_id in feature_ids:
+        for latent_id in latent_ids:
+            corr_value = float(corr_df.loc[feature_id, latent_id])
+            if not np.isfinite(corr_value):
+                continue
+            p_value = float(pval_df.loc[feature_id, latent_id])
+            edge_records.append(
+                {
+                    "source": feature_id,
+                    "target": latent_id,
+                    "weight_edge_size": corr_value,
+                    "weight_edge_color": corr_value,
+                    "alpha": _edge_alpha(p_value),
+                    "p_value": p_value if np.isfinite(p_value) else float("nan"),
+                }
+            )
+
+    for target_id in target_ids:
+        for latent_id in latent_ids:
+            corr_value = float(corr_df.loc[target_id, latent_id])
+            if not np.isfinite(corr_value):
+                continue
+            p_value = float(pval_df.loc[target_id, latent_id])
+            edge_records.append(
+                {
+                    "source": latent_id,
+                    "target": target_id,
+                    "weight_edge_size": corr_value,
+                    "weight_edge_color": corr_value,
+                    "alpha": _edge_alpha(p_value),
+                    "p_value": p_value if np.isfinite(p_value) else float("nan"),
+                }
+            )
+
+    if not edge_records:
+        raise ValueError("No finite correlations available to build the path graph")
+
+    edges_df = pd.DataFrame(edge_records)
+
+    if edge_label_top_k is not None and edge_label_top_k > 0:
+        significant_edges = edges_df[edges_df["alpha"] > insignificant_alpha]
+        if not significant_edges.empty:
+            ranked = (
+                significant_edges["weight_edge_size"].abs().sort_values(ascending=False).index
+            )
+            for index in ranked[: int(edge_label_top_k)]:
+                value = float(edges_df.loc[index, "weight_edge_size"])
+                p_value = edges_df.loc[index, "p_value"]
+                edges_df.loc[index, "label"] = edge_label_format.format(
+                    value=value,
+                    abs_value=abs(value),
+                    source=edges_df.loc[index, "source"],
+                    target=edges_df.loc[index, "target"],
+                    p_value=p_value,
+                )
+
+    call_kwargs = dict(path_kwargs)
+    call_kwargs.setdefault("edge_color_normalization", "symmetric")
+    call_kwargs.setdefault("edge_cmap", edge_cmap)
+    call_kwargs.setdefault("edge_width_range", edge_width_range)
+    call_kwargs.setdefault("colorbar_title", colorbar_title)
+    call_kwargs.setdefault("edge_size_legend_title", edge_size_legend_title)
+    call_kwargs.setdefault("edge_size_legend_values", edge_size_legend_values)
+    call_kwargs.setdefault("colorbar_kwargs", colorbar_kwargs)
+    if group_color_mapping is not None:
+        call_kwargs.setdefault("group_color_mapping", group_color_mapping)
+    if layer_color_mapping is not None:
+        call_kwargs.setdefault("layer_color_mapping", layer_color_mapping)
+    call_kwargs.setdefault("default_layer_cmap", default_layer_cmap)
+
+    return plot_multilayer_path_graph(edges_df, nodes_df, **call_kwargs)
+
+
+def plot_multilayer_path_graph_from_graph(
+    graph,
+    *,
+    edge_size_attr: str = "weight_edge_size",
+    edge_color_attr: str | None = "weight_edge_color",
+    edge_alpha_attr: str | None = "alpha",
+    edge_label_attr: str | None = "label",
+    node_layer_attr: str = "layer",
+    node_label_attr: str = "label",
+    node_color_attr: str = "color",
+    node_group_attr: str = "group",
+    **path_kwargs,
+) -> tuple[plt.Figure, Axes]:
+    """Render a layered path graph directly from a NetworkX directed graph.
+
+    Parameters
+    ----------
+    graph : networkx.DiGraph or compatible directed graph
+        Graph whose nodes declare the ``layer`` attribute and optional ``label``,
+        ``color`` and ``group`` metadata. Edges must provide
+        :paramref:`edge_size_attr` and may include colour, alpha and label
+        attributes.
+    edge_size_attr : str, default "weight_edge_size"
+        Name of the edge attribute controlling the edge width (and by default
+        the colour scale).
+    edge_color_attr : str or None, default "weight_edge_color"
+        Edge attribute mapped to colours. ``None`` omits the column, causing the
+        width attribute to be reused for colouring.
+    edge_alpha_attr : str or None, default "alpha"
+        Edge attribute supplying transparency values.
+    edge_label_attr : str or None, default "label"
+        Edge attribute rendered as text along the edge when present.
+    node_layer_attr : str, default "layer"
+        Node attribute indicating the layer index (integer required).
+    node_label_attr : str, default "label"
+        Node attribute supplying the rendered text label.
+    node_color_attr : str, default "color"
+        Node attribute specifying an explicit colour.
+    node_group_attr : str, default "group"
+        Node attribute used to populate the legend grouping.
+    **path_kwargs
+        Additional keyword arguments forwarded to
+        :func:`plot_multilayer_path_graph`.
+
+    Returns
+    -------
+    matplotlib.figure.Figure, matplotlib.axes.Axes
+        Matplotlib handles for the rendered diagram.
+
+    Raises
+    ------
+    ImportError
+        If :mod:`networkx` is not installed.
+    TypeError
+        If ``graph`` is not a directed NetworkX graph.
+    ValueError
+        If required attributes are missing from nodes or edges.
+
+    See Also
+    --------
+    plot_multilayer_path_graph : Low-level renderer accepting tabular inputs.
+    plot_feature_latent_outcome_path_graph : Automatically build graphs from
+        feature/latent/outcome correlations.
+
+    Examples
+    --------
+    >>> import networkx as nx
+    >>> G = nx.DiGraph()
+    >>> G.add_node("x", layer=0, label="X", group="Feature")
+    >>> G.add_node("z0", layer=1, label="$z_0$", group="Latent")
+    >>> G.add_node("y", layer=2, label="Y", group="Outcome")
+    >>> G.add_edge("x", "z0", weight_edge_size=0.6, weight_edge_color=0.6)
+    >>> G.add_edge("z0", "y", weight_edge_size=0.6, weight_edge_color=0.6)
+    >>> fig, ax = plot_multilayer_path_graph_from_graph(G)
+    >>> plt.close(fig)
+    """
+
+    try:  # pragma: no cover - optional dependency guard
+        import networkx as nx
+    except ImportError as exc:  # pragma: no cover - executed only without networkx
+        raise ImportError(
+            "plot_multilayer_path_graph_from_graph requires the 'networkx' package"
+        ) from exc
+
+    if not nx.is_directed(graph):
+        raise TypeError("graph must be a directed NetworkX graph")
+
+    nodes_records: list[dict[str, object]] = []
+    for node_id, data in graph.nodes(data=True):
+        if node_layer_attr not in data:
+            raise ValueError(
+                f"node {node_id!r} is missing required '{node_layer_attr}' attribute"
+            )
+        record: dict[str, object] = {"id": node_id, "layer": data[node_layer_attr]}
+        if node_label_attr in data:
+            record["label"] = data[node_label_attr]
+        if node_color_attr in data:
+            record["color"] = data[node_color_attr]
+        if node_group_attr in data:
+            record["group"] = data[node_group_attr]
+        nodes_records.append(record)
+
+    if not nodes_records:
+        raise ValueError("graph must contain at least one node")
+
+    edges_records: list[dict[str, object]] = []
+    for source, target, data in graph.edges(data=True):
+        if edge_size_attr not in data:
+            raise ValueError(
+                f"edge ({source!r}, {target!r}) is missing '{edge_size_attr}' attribute"
+            )
+        record = {
+            "source": source,
+            "target": target,
+            "weight_edge_size": data[edge_size_attr],
+        }
+        if edge_color_attr and edge_color_attr in data:
+            record["weight_edge_color"] = data[edge_color_attr]
+        if edge_alpha_attr and edge_alpha_attr in data:
+            record["alpha"] = data[edge_alpha_attr]
+        if edge_label_attr and edge_label_attr in data:
+            record["label"] = data[edge_label_attr]
+        edges_records.append(record)
+
+    if not edges_records:
+        raise ValueError("graph must contain at least one edge")
+
+    nodes_df = pd.DataFrame(nodes_records)
+    edges_df = pd.DataFrame(edges_records)
+
+    return plot_multilayer_path_graph(edges_df, nodes_df, **path_kwargs)
