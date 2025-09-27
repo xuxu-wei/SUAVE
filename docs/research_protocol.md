@@ -77,7 +77,7 @@
 
 1. 借助 `load_or_create_iteratively_imputed_features` 对各评估集执行迭代插补，并将结果保存为 `02_feature_engineering/` 目录下的 `iterative_imputed_{dataset}_{label}.csv`。首次运行会以训练集为参考拟合插补器；后续运行若检测到缓存与原始特征形状匹配，则直接读取 CSV 而无需重新训练。`08_baseline_models/` 仅存放模型权重与指标，不重复缓存这些迭代插补特征。
 2. 构建 Logistic Regression（带标准化）、Random Forest 与 GBDT `Pipeline`，通过 `evaluate_transfer_baselines` 统一训练并评估；所有基线共享 `compute_binary_metrics` 统计 AUC、ACC、SPE、SEN 与 Brier，并写入 `baseline_models_{label}.csv`。`mimic_mortality_utils.make_logistic_pipeline`、`make_random_forest_pipeline` 与 `make_gradient_boosting_pipeline` 均保持 scikit-learn 默认超参数，仅在需要时设置 `random_state`，确保与 C2ST/TSTR/TRTR 下游模型一致。上述流水线会在内部再执行一次迭代插补（同样采用 `max_iter=100`、`tol=1e-2`），从而保证独立运行时也具备缺失值鲁棒性。
-3. 脚本在 `08_baseline_models/` 下缓存拟合后的 `baseline_estimators_{label}.joblib`，二次运行时默认复用；若需强制重新训练，可在执行前设置 `FORCE_UPDATE_BENCHMARK_MODEL=1`（默认为 `0`）。相关布尔参数统一通过 `mimic_mortality_utils.read_bool_env_flag` 解析，以便批量实验脚本复用。SUAVE 主模型及其校准器始终使用 `prepare_features` 产出的原始特征（即未经过该迭代插补管线），保持与生成器训练阶段的输入一致。
+3. 脚本在 `08_baseline_models/` 下缓存拟合后的 `baseline_estimators_{label}.joblib`，二次运行时默认复用；若需强制重新训练，可在执行前将脚本顶部的 `FORCE_UPDATE_BENCHMARK_MODEL` 设为 `True`，或在 `analysis_config.py` / `mimic_mortality_utils.py` 中调整 `FORCE_UPDATE_FLAG_DEFAULTS`。交互式运行默认保留缓存，命令行批处理则按照该字典的设定决定是否覆盖。SUAVE 主模型及其校准器始终使用 `prepare_features` 产出的原始特征（即未经过该迭代插补管线），保持与生成器训练阶段的输入一致。
 4. 在临床基准方面，保留传统 ICU 评分（如数据集中现成的 SOFA 及相关器官支持指标）作为零参数对照：当 `mimic_mortality_utils.py` 中登记了此类 `baseline_probability_map` 项时，同样纳入基线汇总并在 `Notes` 中标记“临床评分”。`CLINICAL_SCORE_BENCHMARK_STRATEGY` 默认设为 `"imputed"`，针对每个评分独立地使用建模特征驱动的 `IterativeImputer` 进行缺失填补，确保不在评分之间泄露信息；若调至 `"observed"`，则在评估阶段跳过缺失评分的样本，维持原始分布。
 5. 输出的指标 CSV 与 Markdown 表格需包含训练/验证/测试/eICU 全量指标，若外部验证缺失标签需在脚注注明处理策略。
 
@@ -125,9 +125,9 @@
 1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR synthesis`、`TSTR synthesis-balance`、`TSTR synthesis-augment`、`TSTR synthesis-5x` 与 `TSTR synthesis-5x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
 2. 通过 `make_baseline_model_factories` 注册 `Logistic regression`、`Random forest` 与 `GBDT` 三类下游分类器，对每个训练方案分别拟合并在 `evaluate_transfer_baselines` 中统计 `accuracy` 与 `roc_auc`（含置信区间）。
 3. 若需将 SUAVE 纳入迁移评估，可在运行脚本前设置 `INCLUDE_SUAVE_TRANSFER=1`，前提是 Optuna 已产出可用的最优超参；默认行为仅评估传统基线模型，以避免在 TSTR/TRTR 分析阶段重复拟合 SUAVE。
-4. `evaluate_transfer_baselines` 的结果会缓存在 `09_tstr_trtr_transfer/tstr_trtr_results_{label}.joblib`；若需跳过缓存直接重训，可设置 `FORCE_UPDATE_TSTR_MODEL=1` 或 `FORCE_UPDATE_TRTR_MODEL=1`（默认均为 `1`，即始终更新）。缓存中还包含训练/模型顺序元数据，复用时需保持与现有目录结构兼容。
-5. 运行结束后会额外导出 bootstrap 抽样记录，并统一写入 `09_tstr_trtr_transfer/TSTR_TRTR_eval.xlsx`：`summary` 工作表包含下游模型的汇总 AUC/accuracy 与置信区间，`plot_data` 存储绘图所需的长表结构，`bootstrap_overall` 与 `bootstrap_per_class` 分别保留整体与分层自助采样结果。
-6. `plot_transfer_metric_bars` 负责绘制 TSTR/TRTR 方案在 `accuracy`、`roc_auc` 等指标上的分组柱状图（含置信区间），展示不同生成数据训练集对下游分类器的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
+4. `build_tstr_training_sets` 会在 `09_tstr_trtr_transfer/training_sets/` 生成 TSV + JSON manifest（`manifest_{label}.json`），复用 SUAVE 采样得到的各类训练集；`evaluate_transfer_baselines` 则分别缓存 `tstr_results_{label}.joblib` 与 `trtr_results_{label}.joblib`，避免重复训练下游基线。脚本模式下默认强制重算（`FORCE_UPDATE_SYNTHETIC_DATA=1`、`FORCE_UPDATE_TSTR_MODEL=1`、`FORCE_UPDATE_TRTR_MODEL=1`），交互模式默认复用缓存（上述变量默认为 `0`）。如需刷新单独阶段，可将 `FORCE_UPDATE_SYNTHETIC_DATA` 置为 `1` 以重建 TSV 并自动失效旧的 TSTR/TRTR 结果，或分别设置 `FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL` 以重新拟合下游模型。
+5. 运行结束后会额外导出 bootstrap 抽样记录，并统一写入 `09_tstr_trtr_transfer/TSTR_TRTR_eval.xlsx`：`summary` 汇总各模型在所有训练方案下的 AUC/accuracy 与置信区间，`metrics` 保留长表结构以便绘图，`bootstrap` 存放逐次抽样的原始指标，`tstr_summary`/`trtr_summary` 按需拆分合成与真实训练集的结果，`bootstrap_overall` 与 `bootstrap_per_class` 则保留整体与分层自助采样明细。
+6. `plot_transfer_metric_boxes` 会针对每个评估数据集绘制箱线图：横轴按模型分组，箱体颜色区分训练数据来源，当仅评估单个模型时横轴改为数据集标签。箱线图基于 bootstrap 样本的分布，更直观地展示生成数据对下游性能的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
 
 
 ### 10. 合成数据 - 分布漂移分析
@@ -135,12 +135,12 @@
 **目的**：量化生成数据与真实数据之间的分布差异，定位潜在的失真特征。
 **结果解读**：GBDT C2ST AUC 作为主要指标，若接近 0.5 表示难以区分；全局/逐列统计的 `p` 值指导进一步修正。
 **输入**：复用 `09_tstr_trtr_transfer/` 中的训练数据拆分、`make_baseline_model_factories` 输出的下游模型以及 `suave.evaluate` 中的分布漂移函数。
-**输出**：在 `10_distribution_shift/` 保存 `C2ST-distribution_shift.xlsx` 与 `metrics_distribution_shift.xlsx`，并在 `11_privacy_assessment/` 记录隐私攻击结果。
+**输出**：在 `10_distribution_shift/` 保存 `c2st_metrics.xlsx` 与 `distribution_metrics.xlsx`，并在 `11_privacy_assessment/` 记录隐私攻击结果。
 
-1. 分布漂移的主要结局指标采用 `classifier_two_sample_test`：以 `TRTR (real)` 与 `TSTR synthesis` 作为两类样本，复用 `make_baseline_model_factories` 中的 Logistic、Random Forest 与 GBDT pipeline（保持默认超参）。其中 **GBDT ROC-AUC** 为首要指标，逻辑回归与随机森林的 ROC-AUC 作为敏感性补充。
+1. 分布漂移的主要结局指标采用 `classifier_two_sample_test`：以 `TRTR (real)` 与 `TSTR synthesis` 作为两类样本，复用 `make_baseline_model_factories` 中的 Logistic、Random Forest 与 GBDT pipeline（保持默认超参）。其中 **GBDT ROC-AUC** 为首要指标，逻辑回归与随机森林的 ROC-AUC 作为敏感性补充。分析过程中会显示针对模型/特征的进度条，便于追踪耗时步骤。
 2. 次要结局指标包括全局 `rbf_mmd` 与 `energy_distance`，均基于置换检验给出 `p` 值，用于量化生成数据与真实分布之间的整体偏移程度。
 3. `rbf_mmd`、`energy_distance` 与 `mutual_information_feature` 继续按特征逐列计算，定位非单调差异或潜在信息泄露风险的列，并与 C2ST 结果交叉验证。
-4. 分布相似性相关的所有产物分布在两个工作簿中：`10_distribution_shift/C2ST-distribution_shift.xlsx` 汇总 C2ST 主指标（GBDT）与次要模型（Logistic、Random forest）的置信区间；`10_distribution_shift/metrics_distribution_shift.xlsx` 保存全局/逐列的 MMD、能量距离与互信息；配套的分布漂移可视化图表需在同一目录以 PNG/SVG/PDF/JPG 四种格式保存，纳入附录及复现包。
+4. 分布相似性相关的所有产物分布在两个工作簿中：`10_distribution_shift/c2st_metrics.xlsx` 汇总所有模型的 C2ST ROC-AUC、置信区间、bootstrap 次数以及真实/合成样本量；`10_distribution_shift/distribution_metrics.xlsx` 的 `overall` 工作表报告全局 MMD、能量距离与互信息（附解释列），`per_feature` 工作表逐列列出 `rbf_mmd`、能量距离、互信息与对应解读。每个工作表尾部额外空一行，并写入指标判读提示（p 值阈值与特征级启发式），与 `analysis_utils._interpret_global_shift` / `_interpret_feature_shift` 中的逻辑保持一致。配套的分布漂移可视化图表需在同一目录以 PNG/SVG/PDF/JPG 四种格式保存，纳入附录及复现包。脚本模式默认重算 C2ST 和漂移统计（`FORCE_UPDATE_C2ST_MODEL=1`、`FORCE_UPDATE_DISTRIBUTION_SHIFT=1`），交互模式默认复用缓存（上述变量默认为 `0`）；如需刷新结果，可显式设置相应环境变量。
 5. 在生成数据性能分析后运行 `simple_membership_inference`，补充隐私攻击基线并记录攻击 AUC/阈值，结果导出至 `11_privacy_assessment/membership_inference.xlsx`。
 
 

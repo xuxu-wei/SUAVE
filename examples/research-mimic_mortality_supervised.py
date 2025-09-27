@@ -37,6 +37,7 @@ import matplotlib.pyplot as plt
 import joblib
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
@@ -62,6 +63,8 @@ from mimic_mortality_utils import (  # noqa: E402
     PARETO_MAX_ABS_DELTA_AUC,
     PARETO_MIN_VALIDATION_ROAUC,
     DATA_DIR,
+    DISTRIBUTION_SHIFT_OVERALL_NOTE,
+    DISTRIBUTION_SHIFT_PER_FEATURE_NOTE,
     VAR_GROUP_DICT,
     PATH_GRAPH_GROUP_COLORS,
     PATH_GRAPH_NODE_COLORS,
@@ -88,7 +91,6 @@ from mimic_mortality_utils import (  # noqa: E402
     FORCE_UPDATE_FLAG_DEFAULTS,
     make_baseline_model_factories,
     make_study_name,
-    read_bool_env_flag,
     resolve_model_loading_plan,
     confirm_model_loading_plan_selection,
     resolve_suave_fit_kwargs,
@@ -96,12 +98,18 @@ from mimic_mortality_utils import (  # noqa: E402
     plot_benchmark_curves,
     plot_calibration_curves,
     plot_latent_space,
-    plot_transfer_metric_bars,
+    plot_transfer_metric_boxes,
+    load_tstr_training_sets_from_tsv,
+    save_tstr_training_sets_to_tsv,
+    collect_transfer_bootstrap_records,
     prepare_features,
     render_dataframe,
     schema_to_dataframe,
     to_numeric_frame,
+    load_model_manifest,
     record_model_manifest,
+    _interpret_feature_shift,
+    _interpret_global_shift,
 )
 from cls_eval import evaluate_predictions, write_results_to_excel_unique  # noqa: E402
 
@@ -134,28 +142,44 @@ TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
 
-FORCE_UPDATE_BENCHMARK_MODEL = read_bool_env_flag(
-    "FORCE_UPDATE_BENCHMARK_MODEL",
-    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_BENCHMARK_MODEL"],
-)
-FORCE_UPDATE_TSTR_MODEL = read_bool_env_flag(
-    "FORCE_UPDATE_TSTR_MODEL",
-    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_TSTR_MODEL"],
-)
-FORCE_UPDATE_TRTR_MODEL = read_bool_env_flag(
-    "FORCE_UPDATE_TRTR_MODEL",
-    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_TRTR_MODEL"],
-)
-FORCE_UPDATE_SUAVE = read_bool_env_flag(
-    "FORCE_UPDATE_SUAVE",
-    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_SUAVE"],
-)
-INCLUDE_SUAVE_TRANSFER = read_bool_env_flag("INCLUDE_SUAVE_TRANSFER", False)
-
 IS_INTERACTIVE = is_interactive_session()
 CLI_REQUESTED_TRIAL_ID: Optional[int] = None
 if not IS_INTERACTIVE:
     CLI_REQUESTED_TRIAL_ID = parse_script_arguments(sys.argv[1:])
+
+
+if IS_INTERACTIVE:
+    FORCE_UPDATE_BENCHMARK_MODEL = False
+    FORCE_UPDATE_TSTR_MODEL = False
+    FORCE_UPDATE_TRTR_MODEL = False
+    FORCE_UPDATE_SYNTHETIC_DATA = False
+    FORCE_UPDATE_C2ST_MODEL = False
+    FORCE_UPDATE_DISTRIBUTION_SHIFT = False
+    FORCE_UPDATE_SUAVE = False
+else:
+    FORCE_UPDATE_BENCHMARK_MODEL = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_BENCHMARK_MODEL", False
+    )
+    FORCE_UPDATE_TSTR_MODEL = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_TSTR_MODEL", False
+    )
+    FORCE_UPDATE_TRTR_MODEL = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_TRTR_MODEL", False
+    )
+    FORCE_UPDATE_SYNTHETIC_DATA = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_SYNTHETIC_DATA", False
+    )
+    FORCE_UPDATE_C2ST_MODEL = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_C2ST_MODEL", False
+    )
+    FORCE_UPDATE_DISTRIBUTION_SHIFT = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_DISTRIBUTION_SHIFT", False
+    )
+    FORCE_UPDATE_SUAVE = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_SUAVE", False
+    )
+
+INCLUDE_SUAVE_TRANSFER = False
 
 
 def _sanitise_path_component(value: str) -> str:
@@ -491,7 +515,7 @@ baseline_probability_map: Dict[str, Dict[str, np.ndarray]] = {
 model_abbreviation_lookup = {
     "Logistic regression": "LR",
     "KNN": "KNN",
-    "Gradient boosting": "GB",
+    "Gradient boosting": "GBDT",
     "Random forest": "RF",
     "SVM (RBF)": "SVM",
 }
@@ -763,6 +787,7 @@ if (
         storage=analysis_config.get("optuna_storage"),
     )
     print(f"Updated SUAVE model manifest at {manifest_path}.")
+    model_manifest = load_model_manifest(SUAVE_MODEL_DIR, TARGET_LABEL)
 
 
 # %% [markdown]
@@ -831,7 +856,7 @@ plot_calibration_curves(
 
 # %%
 
-benchmark_datasets = ["Train", "MIMIC test", "eICU external"]
+benchmark_datasets = ["Train", "Validation", "MIMIC test", "eICU external"]
 benchmark_curve_paths: List[Path] = []
 
 for dataset_name in benchmark_datasets:
@@ -1070,6 +1095,8 @@ for model_name, dataset_tables in model_prediction_frames.items():
             positive_label=positive_label_name,
             bootstrap_n=1000,
             random_state=RANDOM_STATE,
+            show_progress=True,
+            progress_desc=f"Bootstrap | {model_name} @ {dataset_name}",
         )
         model_results[dataset_name] = results
 
@@ -1345,11 +1372,17 @@ render_dataframe(
     floatfmt=".3f",
 )
 # %% [markdown]
-# ## TSTR/TRTR comparison
+# ## Synthetic data – TSTR/TRTR, distribution shift, and privacy
 #
-# Compare models trained on synthetic versus real data. This block mirrors the
-# published SUAVE protocol and therefore only runs for the in-hospital
-# mortality target, which is the cohort studied in the manuscript.
+# Purpose: compare downstream classifiers trained on synthetic cohorts against
+# real-data baselines while running protocol-aligned distribution shift tests
+# (C2ST, MMD, energy distance, mutual information) and membership inference
+# checks.
+# Inputs: `build_tstr_training_sets` synthesis variants, cached feature
+# matrices, and optional SUAVE parameters toggled via `INCLUDE_SUAVE_TRANSFER`.
+# Outputs: cached bootstrap summaries, Excel workbooks, bar charts, distribution
+# shift diagnostics, and privacy reports stored under the dedicated analysis
+# directories for reporting.
 
 # %%
 
@@ -1359,6 +1392,7 @@ tstr_summary_path: Optional[Path] = None
 tstr_plot_path: Optional[Path] = None
 tstr_figure_paths: List[Path] = []
 distribution_df: Optional[pd.DataFrame] = None
+distribution_overall_df: Optional[pd.DataFrame] = None
 distribution_path: Optional[Path] = None
 distribution_top: Optional[pd.DataFrame] = None
 tstr_nested_results: Optional[
@@ -1366,16 +1400,32 @@ tstr_nested_results: Optional[
 ] = None
 tstr_bootstrap_overall_records_path: Optional[Path] = None
 tstr_bootstrap_per_class_records_path: Optional[Path] = None
+membership_path = PRIVACY_ASSESSMENT_DIR / "membership_inference.xlsx"
 
-transfer_results_cache_path = (
-    TSTR_TRTR_DIR / f"tstr_trtr_results_{TARGET_LABEL}.joblib"
-)
-
-if TARGET_LABEL != "in_hospital_mortality":
-    print(
-        "Skipping TSTR/TRTR comparison because it is defined for the in-hospital "
-        "mortality task."
+training_cache_dir = TSTR_TRTR_DIR / "training_sets"
+training_cache_dir.mkdir(parents=True, exist_ok=True)
+training_sets_numeric: Optional[Dict[str, Tuple[pd.DataFrame, pd.Series]]] = None
+training_sets_raw: Optional[Dict[str, Tuple[pd.DataFrame, pd.Series]]] = None
+training_manifest_signature: Optional[str] = None
+cached_training_sets: Optional[
+    Tuple[
+        Dict[str, Tuple[pd.DataFrame, pd.Series]],
+        Dict[str, Tuple[pd.DataFrame, pd.Series]],
+        str,
+    ]
+] = None
+if not FORCE_UPDATE_SYNTHETIC_DATA:
+    cached_training_sets = load_tstr_training_sets_from_tsv(
+        training_cache_dir,
+        target_label=TARGET_LABEL,
+        feature_columns=FEATURE_COLUMNS,
     )
+
+if cached_training_sets is not None:
+    training_sets_numeric, training_sets_raw, training_manifest_signature = (
+        cached_training_sets
+    )
+    print("Loaded cached TSTR/TRTR training sets from", training_cache_dir)
 else:
     print("Generating synthetic data for TSTR/TRTR comparisons…")
     training_sets_numeric, training_sets_raw = build_tstr_training_sets(
@@ -1386,107 +1436,281 @@ else:
         random_state=RANDOM_STATE,
         return_raw=True,
     )
-    evaluation_sets_numeric: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
-        "MIMIC test": (to_numeric_frame(X_test), y_test.reset_index(drop=True)),
-    }
-    evaluation_sets_raw: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
-        "MIMIC test": (X_test.reset_index(drop=True), y_test.reset_index(drop=True)),
-    }
-    if external_features is not None and external_labels is not None:
-        evaluation_sets_numeric["eICU external"] = (
-            to_numeric_frame(external_features),
-            external_labels.reset_index(drop=True),
-        )
-        evaluation_sets_raw["eICU external"] = (
-            external_features.reset_index(drop=True),
-            external_labels.reset_index(drop=True),
-        )
-
-    model_factories = dict(make_baseline_model_factories(RANDOM_STATE))
-    if INCLUDE_SUAVE_TRANSFER and optuna_best_params:
-        suave_fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
-
-        def make_suave_transfer_estimator() -> _TSTRSuaveEstimator:
-            base_model = build_suave_model(
-                optuna_best_params,
-                schema,
-                random_state=RANDOM_STATE,
-            )
-            return _TSTRSuaveEstimator(base_model, suave_fit_kwargs)
-
-        model_factories["SUAVE (Optuna best)"] = make_suave_transfer_estimator
-    elif INCLUDE_SUAVE_TRANSFER and not optuna_best_params:
-        print(
-            "Skipping SUAVE TSTR/TRTR baseline because no Optuna parameters are available."
-        )
-
-    should_use_cached_transfer = (
-        transfer_results_cache_path.exists()
-        and not FORCE_UPDATE_TSTR_MODEL
-        and not FORCE_UPDATE_TRTR_MODEL
+    manifest_path, training_manifest_signature = save_tstr_training_sets_to_tsv(
+        training_sets_raw,
+        output_dir=training_cache_dir,
+        target_label=TARGET_LABEL,
+        feature_columns=FEATURE_COLUMNS,
+        random_state=RANDOM_STATE,
+    )
+    print("Saved TSTR/TRTR training sets to", manifest_path)
+evaluation_sets_numeric: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+    "MIMIC test": (to_numeric_frame(X_test), y_test.reset_index(drop=True)),
+}
+evaluation_sets_raw: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
+    "MIMIC test": (X_test.reset_index(drop=True), y_test.reset_index(drop=True)),
+}
+if external_features is not None and external_labels is not None:
+    evaluation_sets_numeric["eICU external"] = (
+        to_numeric_frame(external_features),
+        external_labels.reset_index(drop=True),
+    )
+    evaluation_sets_raw["eICU external"] = (
+        external_features.reset_index(drop=True),
+        external_labels.reset_index(drop=True),
     )
 
-    cached_transfer_payload: Optional[Dict[str, Any]] = None
-    if should_use_cached_transfer:
-        payload = joblib.load(transfer_results_cache_path)
-        cached_model_order = payload.get("model_order")
-        expected_model_order = list(model_factories.keys())
-        if list(cached_model_order or []) == expected_model_order:
-            cached_transfer_payload = payload
-            tstr_summary_df = cached_transfer_payload.get("summary_df")
-            tstr_plot_df = cached_transfer_payload.get("plot_df")
-            tstr_nested_results = cached_transfer_payload.get("nested_results")
-            print(
-                "Loaded cached TSTR/TRTR evaluation results from",
-                transfer_results_cache_path,
-            )
-        else:
-            print(
-                "Discarding cached TSTR/TRTR evaluation results because the model roster changed.",
-            )
-    if cached_transfer_payload is None:
+model_factories = dict(make_baseline_model_factories(RANDOM_STATE))
+if INCLUDE_SUAVE_TRANSFER and optuna_best_params:
+    suave_fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
+
+    def make_suave_transfer_estimator() -> _TSTRSuaveEstimator:
+        base_model = build_suave_model(
+            optuna_best_params,
+            schema,
+            random_state=RANDOM_STATE,
+        )
+        return _TSTRSuaveEstimator(base_model, suave_fit_kwargs)
+
+    model_factories["SUAVE (Optuna best)"] = make_suave_transfer_estimator
+elif INCLUDE_SUAVE_TRANSFER and not optuna_best_params:
+    print(
+        "Skipping SUAVE TSTR/TRTR baseline because no Optuna parameters are available."
+    )
+
+training_order = list(training_sets_numeric.keys())
+model_order = list(model_factories.keys())
+
+
+def _is_trtr_dataset(name: str) -> bool:
+    return name.upper().startswith("TRTR")
+
+
+trtr_training_sets_numeric = {
+    name: value
+    for name, value in training_sets_numeric.items()
+    if _is_trtr_dataset(name)
+}
+trtr_training_sets_raw = {
+    name: value
+    for name, value in training_sets_raw.items()
+    if _is_trtr_dataset(name)
+}
+tstr_training_sets_numeric = {
+    name: value
+    for name, value in training_sets_numeric.items()
+    if not _is_trtr_dataset(name)
+}
+tstr_training_sets_raw = {
+    name: value
+    for name, value in training_sets_raw.items()
+    if not _is_trtr_dataset(name)
+}
+
+tstr_results_cache_path = TSTR_TRTR_DIR / f"tstr_results_{TARGET_LABEL}.joblib"
+trtr_results_cache_path = TSTR_TRTR_DIR / f"trtr_results_{TARGET_LABEL}.joblib"
+
+tstr_plot_df = None
+tstr_nested_results = None
+tstr_bootstrap_df: Optional[pd.DataFrame] = None
+trtr_summary_df: Optional[pd.DataFrame] = None
+trtr_plot_df: Optional[pd.DataFrame] = None
+trtr_nested_results = None
+trtr_bootstrap_df: Optional[pd.DataFrame] = None
+
+if tstr_training_sets_numeric:
+    cached_tstr: Optional[Dict[str, Any]] = None
+    if tstr_results_cache_path.exists() and not FORCE_UPDATE_TSTR_MODEL:
+        payload = joblib.load(tstr_results_cache_path)
+        if (
+            list(payload.get("feature_columns") or []) == list(FEATURE_COLUMNS)
+            and list(payload.get("training_order") or [])
+            == list(tstr_training_sets_numeric.keys())
+            and list(payload.get("evaluation_order") or [])
+            == list(evaluation_sets_numeric.keys())
+            and list(payload.get("model_order") or []) == model_order
+            and payload.get("training_manifest_signature")
+            == training_manifest_signature
+        ):
+            cached_tstr = payload
+            print("Loaded cached TSTR evaluation results from", tstr_results_cache_path)
+    if cached_tstr is not None:
+        tstr_summary_df = cached_tstr.get("summary_df")
+        tstr_plot_df = cached_tstr.get("plot_df")
+        tstr_nested_results = cached_tstr.get("nested_results")
+        tstr_bootstrap_df = cached_tstr.get("bootstrap_df")
+    if (
+        tstr_summary_df is None
+        or tstr_plot_df is None
+        or tstr_nested_results is None
+        or tstr_bootstrap_df is None
+    ):
         (
             tstr_summary_df,
             tstr_plot_df,
             tstr_nested_results,
         ) = evaluate_transfer_baselines(
-            training_sets_numeric,
+            tstr_training_sets_numeric,
             evaluation_sets_numeric,
             model_factories=model_factories,
             bootstrap_n=1000,
             random_state=RANDOM_STATE,
-            raw_training_sets=training_sets_raw,
+            raw_training_sets=tstr_training_sets_raw,
             raw_evaluation_sets=evaluation_sets_raw,
         )
-        transfer_payload = {
-            "summary_df": tstr_summary_df,
-            "plot_df": tstr_plot_df,
-            "nested_results": tstr_nested_results,
-            "training_order": list(training_sets_numeric.keys()),
-            "model_order": list(model_factories.keys()),
-        }
-        joblib.dump(transfer_payload, transfer_results_cache_path)
-        print("Saved TSTR/TRTR evaluation results to", transfer_results_cache_path)
-    transfer_overall_df: Optional[pd.DataFrame] = None
-    transfer_per_class_df: Optional[pd.DataFrame] = None
+        tstr_bootstrap_df = collect_transfer_bootstrap_records(tstr_nested_results)
+        joblib.dump(
+            {
+                "summary_df": tstr_summary_df,
+                "plot_df": tstr_plot_df,
+                "nested_results": tstr_nested_results,
+                "bootstrap_df": tstr_bootstrap_df,
+                "training_order": list(tstr_training_sets_numeric.keys()),
+                "evaluation_order": list(evaluation_sets_numeric.keys()),
+                "model_order": model_order,
+                "feature_columns": list(FEATURE_COLUMNS),
+                "training_manifest_signature": training_manifest_signature,
+            },
+            tstr_results_cache_path,
+        )
+        print("Saved TSTR evaluation results to", tstr_results_cache_path)
+
+if trtr_training_sets_numeric:
+    cached_trtr: Optional[Dict[str, Any]] = None
+    if trtr_results_cache_path.exists() and not FORCE_UPDATE_TRTR_MODEL:
+        payload = joblib.load(trtr_results_cache_path)
+        if (
+            list(payload.get("feature_columns") or []) == list(FEATURE_COLUMNS)
+            and list(payload.get("training_order") or [])
+            == list(trtr_training_sets_numeric.keys())
+            and list(payload.get("evaluation_order") or [])
+            == list(evaluation_sets_numeric.keys())
+            and list(payload.get("model_order") or []) == model_order
+            and payload.get("training_manifest_signature")
+            == training_manifest_signature
+        ):
+            cached_trtr = payload
+            print("Loaded cached TRTR evaluation results from", trtr_results_cache_path)
+    if cached_trtr is not None:
+        trtr_summary_df = cached_trtr.get("summary_df")
+        trtr_plot_df = cached_trtr.get("plot_df")
+        trtr_nested_results = cached_trtr.get("nested_results")
+        trtr_bootstrap_df = cached_trtr.get("bootstrap_df")
+    if (
+        trtr_summary_df is None
+        or trtr_plot_df is None
+        or trtr_nested_results is None
+        or trtr_bootstrap_df is None
+    ):
+        (
+            trtr_summary_df,
+            trtr_plot_df,
+            trtr_nested_results,
+        ) = evaluate_transfer_baselines(
+            trtr_training_sets_numeric,
+            evaluation_sets_numeric,
+            model_factories=model_factories,
+            bootstrap_n=1000,
+            random_state=RANDOM_STATE,
+            raw_training_sets=trtr_training_sets_raw,
+            raw_evaluation_sets=evaluation_sets_raw,
+        )
+        trtr_bootstrap_df = collect_transfer_bootstrap_records(trtr_nested_results)
+        joblib.dump(
+            {
+                "summary_df": trtr_summary_df,
+                "plot_df": trtr_plot_df,
+                "nested_results": trtr_nested_results,
+                "bootstrap_df": trtr_bootstrap_df,
+                "training_order": list(trtr_training_sets_numeric.keys()),
+                "evaluation_order": list(evaluation_sets_numeric.keys()),
+                "model_order": model_order,
+                "feature_columns": list(FEATURE_COLUMNS),
+                "training_manifest_signature": training_manifest_signature,
+            },
+            trtr_results_cache_path,
+        )
+        print("Saved TRTR evaluation results to", trtr_results_cache_path)
+
+transfer_summary_frames: List[pd.DataFrame] = []
+transfer_plot_frames: List[pd.DataFrame] = []
+transfer_bootstrap_frames: List[pd.DataFrame] = []
+
+if tstr_summary_df is not None:
+    transfer_summary_frames.append(tstr_summary_df.copy())
+if trtr_summary_df is not None:
+    transfer_summary_frames.append(trtr_summary_df.copy())
+if tstr_plot_df is not None:
+    transfer_plot_frames.append(tstr_plot_df.copy())
+if trtr_plot_df is not None:
+    transfer_plot_frames.append(trtr_plot_df.copy())
+if tstr_bootstrap_df is not None and not tstr_bootstrap_df.empty:
+    transfer_bootstrap_frames.append(tstr_bootstrap_df.copy())
+if trtr_bootstrap_df is not None and not trtr_bootstrap_df.empty:
+    transfer_bootstrap_frames.append(trtr_bootstrap_df.copy())
+
+combined_summary_df = (
+    pd.concat(transfer_summary_frames, ignore_index=True)
+    if transfer_summary_frames
+    else pd.DataFrame()
+)
+combined_plot_df = (
+    pd.concat(transfer_plot_frames, ignore_index=True)
+    if transfer_plot_frames
+    else pd.DataFrame()
+)
+combined_bootstrap_df = (
+    pd.concat(transfer_bootstrap_frames, ignore_index=True)
+    if transfer_bootstrap_frames
+    else pd.DataFrame()
+)
+
+if not combined_summary_df.empty:
     render_dataframe(
-        tstr_summary_df,
+        combined_summary_df,
         title="TSTR/TRTR supervised evaluation",
         floatfmt=".3f",
     )
 
-    if cached_transfer_payload is not None:
-        training_order = cached_transfer_payload.get(
-            "training_order", list(training_sets_numeric.keys())
-        )
-        model_order = list(model_factories.keys())
-    else:
-        training_order = list(training_sets_numeric.keys())
-        model_order = list(model_factories.keys())
+transfer_overall_records: List[pd.DataFrame] = []
+transfer_per_class_records: List[pd.DataFrame] = []
+for nested in (tstr_nested_results, trtr_nested_results):
+    if not nested:
+        continue
+    for training_name, model_map in nested.items():
+        for model_name, evaluation_map in model_map.items():
+            for evaluation_name, result_map in evaluation_map.items():
+                overall_records = result_map.get("bootstrap_overall_records")
+                if overall_records is not None and not overall_records.empty:
+                    overall_copy = overall_records.copy()
+                    overall_copy.insert(0, "evaluation_dataset", evaluation_name)
+                    overall_copy.insert(0, "model", model_name)
+                    overall_copy.insert(0, "training_dataset", training_name)
+                    transfer_overall_records.append(overall_copy)
+                per_class_records = result_map.get("bootstrap_per_class_records")
+                if per_class_records is not None and not per_class_records.empty:
+                    per_class_copy = per_class_records.copy()
+                    per_class_copy.insert(0, "evaluation_dataset", evaluation_name)
+                    per_class_copy.insert(0, "model", model_name)
+                    per_class_copy.insert(0, "training_dataset", training_name)
+                    transfer_per_class_records.append(per_class_copy)
+
+transfer_overall_df = (
+    pd.concat(transfer_overall_records, ignore_index=True)
+    if transfer_overall_records
+    else None
+)
+transfer_per_class_df = (
+    pd.concat(transfer_per_class_records, ignore_index=True)
+    if transfer_per_class_records
+    else None
+)
+
+if not combined_bootstrap_df.empty:
     for evaluation_name in evaluation_sets_numeric.keys():
         for metric_name in ("accuracy", "roc_auc"):
-            figure_path = plot_transfer_metric_bars(
-                tstr_plot_df,
+            figure_path = plot_transfer_metric_boxes(
+                combined_bootstrap_df,
                 metric=metric_name,
                 evaluation_dataset=evaluation_name,
                 training_order=training_order,
@@ -1497,51 +1721,61 @@ else:
             if figure_path is not None:
                 tstr_figure_paths.append(figure_path)
 
-    real_features_numeric = training_sets_numeric["TRTR (real)"][0]
-    synthesis_features_numeric = training_sets_numeric["TSTR synthesis"][0]
+tstr_excel_path = TSTR_TRTR_DIR / "TSTR_TRTR_eval.xlsx"
+with pd.ExcelWriter(tstr_excel_path) as writer:
+    if not combined_summary_df.empty:
+        combined_summary_df.to_excel(writer, sheet_name="summary", index=False)
+    if not combined_plot_df.empty:
+        combined_plot_df.to_excel(writer, sheet_name="metrics", index=False)
+    if not combined_bootstrap_df.empty:
+        combined_bootstrap_df.to_excel(writer, sheet_name="bootstrap", index=False)
+    if tstr_summary_df is not None and not tstr_summary_df.empty:
+        tstr_summary_df.to_excel(writer, sheet_name="tstr_summary", index=False)
+    if trtr_summary_df is not None and not trtr_summary_df.empty:
+        trtr_summary_df.to_excel(writer, sheet_name="trtr_summary", index=False)
+    if transfer_overall_df is not None:
+        transfer_overall_df.to_excel(
+            writer, sheet_name="bootstrap_overall", index=False
+        )
+    if transfer_per_class_df is not None:
+        transfer_per_class_df.to_excel(
+            writer, sheet_name="bootstrap_per_class", index=False
+        )
+print("Saved TSTR/TRTR evaluation workbook to", tstr_excel_path)
 
-    if tstr_nested_results is not None:
-        transfer_overall_records: List[pd.DataFrame] = []
-        transfer_per_class_records: List[pd.DataFrame] = []
-        for training_name, model_map in tstr_nested_results.items():
-            for model_name, evaluation_map in model_map.items():
-                for evaluation_name, result_map in evaluation_map.items():
-                    overall_records = result_map.get("bootstrap_overall_records")
-                    if overall_records is not None and not overall_records.empty:
-                        overall_copy = overall_records.copy()
-                        overall_copy.insert(0, "evaluation_dataset", evaluation_name)
-                        overall_copy.insert(0, "model", model_name)
-                        overall_copy.insert(0, "training_dataset", training_name)
-                        transfer_overall_records.append(overall_copy)
-                    per_class_records = result_map.get("bootstrap_per_class_records")
-                    if per_class_records is not None and not per_class_records.empty:
-                        per_class_copy = per_class_records.copy()
-                        per_class_copy.insert(0, "evaluation_dataset", evaluation_name)
-                        per_class_copy.insert(0, "model", model_name)
-                        per_class_copy.insert(0, "training_dataset", training_name)
-                        transfer_per_class_records.append(per_class_copy)
-        if transfer_overall_records:
-            transfer_overall_df = pd.concat(transfer_overall_records, ignore_index=True)
-        if transfer_per_class_records:
-            transfer_per_class_df = pd.concat(
-                transfer_per_class_records, ignore_index=True
-            )
+real_features_numeric = training_sets_numeric.get(
+    "TRTR (real)", (pd.DataFrame(), pd.Series(dtype=float))
+)[0]
+synthesis_features_numeric = training_sets_numeric.get(
+    "TSTR synthesis", (pd.DataFrame(), pd.Series(dtype=float))
+)[0]
 
-    tstr_excel_path = TSTR_TRTR_DIR / "TSTR_TRTR_eval.xlsx"
-    with pd.ExcelWriter(tstr_excel_path) as writer:
-        tstr_summary_df.to_excel(writer, sheet_name="summary", index=False)
-        tstr_plot_df.to_excel(writer, sheet_name="plot_data", index=False)
-        if transfer_overall_df is not None:
-            transfer_overall_df.to_excel(
-                writer, sheet_name="bootstrap_overall", index=False
-            )
-        if transfer_per_class_df is not None:
-            transfer_per_class_df.to_excel(
-                writer, sheet_name="bootstrap_per_class", index=False
-            )
-    print("Saved TSTR/TRTR evaluation workbook to", tstr_excel_path)
-
-    c2st_model_factories = make_baseline_model_factories(RANDOM_STATE)
+c2st_model_factories = make_baseline_model_factories(RANDOM_STATE)
+c2st_cache_path = (
+    DISTRIBUTION_SHIFT_DIR / f"c2st_metrics_{TARGET_LABEL}.joblib"
+)
+c2st_metrics: Optional[Dict[str, float]] = None
+c2st_results_df: Optional[pd.DataFrame] = None
+expected_c2st_models = list(c2st_model_factories.keys())
+if (
+    c2st_cache_path.exists()
+    and not FORCE_UPDATE_SYNTHETIC_DATA
+    and not FORCE_UPDATE_C2ST_MODEL
+):
+    cached_c2st = joblib.load(c2st_cache_path)
+    if (
+        list(cached_c2st.get("feature_columns") or [])
+        == list(FEATURE_COLUMNS)
+        and list(cached_c2st.get("model_order") or []) == expected_c2st_models
+    ):
+        c2st_metrics = cached_c2st.get("metrics")
+        c2st_results_df = cached_c2st.get("results_df")
+        print("Loaded cached C2ST metrics from", c2st_cache_path)
+    else:
+        print(
+            "Discarding cached C2ST metrics because the configuration changed."
+        )
+if c2st_metrics is None:
     c2st_metrics = classifier_two_sample_test(
         real_features_numeric.to_numpy(),
         synthesis_features_numeric.to_numpy(),
@@ -1549,70 +1783,92 @@ else:
         random_state=RANDOM_STATE,
         n_bootstrap=1000,
     )
-    c2st_primary = pd.DataFrame(
-        [
-            {
-                "target": TARGET_LABEL,
-                "gbdt_auc": c2st_metrics.get("gbdt_auc", float("nan")),
-                "gbdt_auc_ci_low": c2st_metrics.get("gbdt_auc_ci_low", float("nan")),
-                "gbdt_auc_ci_high": c2st_metrics.get("gbdt_auc_ci_high", float("nan")),
-                "gbdt_bootstrap_samples": c2st_metrics.get(
-                    "gbdt_bootstrap_samples", float("nan")
-                ),
-                "n_real_samples": c2st_metrics.get("n_real_samples", float("nan")),
-                "n_synthetic_samples": c2st_metrics.get(
-                    "n_synthetic_samples", float("nan")
-                ),
-                "n_features": c2st_metrics.get("n_features", float("nan")),
-                "cv_splits": c2st_metrics.get("cv_splits", float("nan")),
-            }
-        ]
-    )
-    secondary_rows: List[Dict[str, object]] = []
-    for model_name in c2st_model_factories:
-        if model_name == "GBDT":
-            continue
+    rows: List[Dict[str, object]] = []
+    n_real = c2st_metrics.get("n_real_samples", float("nan"))
+    n_synth = c2st_metrics.get("n_synthetic_samples", float("nan"))
+    for model_name in expected_c2st_models:
         prefix = model_name.lower().replace(" ", "_")
         auc_key = f"{prefix}_auc"
         if auc_key not in c2st_metrics:
             continue
-        secondary_rows.append(
+        rows.append(
             {
                 "target": TARGET_LABEL,
                 "model": model_name,
                 "auc": c2st_metrics.get(auc_key, float("nan")),
-                "auc_ci_low": c2st_metrics.get(f"{prefix}_auc_ci_low", float("nan")),
-                "auc_ci_high": c2st_metrics.get(f"{prefix}_auc_ci_high", float("nan")),
+                "auc_ci_low": c2st_metrics.get(
+                    f"{prefix}_auc_ci_low", float("nan")
+                ),
+                "auc_ci_high": c2st_metrics.get(
+                    f"{prefix}_auc_ci_high", float("nan")
+                ),
                 "bootstrap_samples": c2st_metrics.get(
                     f"{prefix}_bootstrap_samples", float("nan")
                 ),
+                "n_real_samples": n_real,
+                "n_synthetic_samples": n_synth,
             }
         )
-    c2st_secondary = pd.DataFrame(secondary_rows)
-    render_dataframe(
-        c2st_primary,
-        title="Classifier two-sample test (C2ST) - GBDT",
-        floatfmt=".3f",
+    c2st_results_df = pd.DataFrame(rows)
+    if not c2st_results_df.empty:
+        c2st_results_df = c2st_results_df[
+            [
+                "target",
+                "model",
+                "auc",
+                "auc_ci_low",
+                "auc_ci_high",
+                "bootstrap_samples",
+                "n_real_samples",
+                "n_synthetic_samples",
+            ]
+        ]
+    joblib.dump(
+        {
+            "feature_columns": list(FEATURE_COLUMNS),
+            "model_order": expected_c2st_models,
+            "metrics": c2st_metrics,
+            "results_df": c2st_results_df,
+        },
+        c2st_cache_path,
     )
-    if not c2st_secondary.empty:
-        render_dataframe(
-            c2st_secondary,
-            title="Classifier two-sample test (C2ST) - secondary models",
-            floatfmt=".3f",
-        )
+    print("Saved C2ST metrics to", c2st_cache_path)
+if c2st_results_df is None:
+    c2st_results_df = pd.DataFrame()
+render_dataframe(
+    c2st_results_df,
+    title="Classifier two-sample test (C2ST)",
+    floatfmt=".3f",
+)
 
-    c2st_workbook_path = DISTRIBUTION_SHIFT_DIR / "C2ST-distribution_shift.xlsx"
-    with pd.ExcelWriter(c2st_workbook_path) as writer:
-        c2st_primary.to_excel(writer, sheet_name="gbdt_primary", index=False)
-        if not c2st_secondary.empty:
-            c2st_secondary.to_excel(
-                writer, sheet_name="secondary_models", index=False
-            )
-        pd.DataFrame([{k: v for k, v in c2st_metrics.items()}]).to_excel(
-            writer, sheet_name="raw_metrics", index=False
-        )
-    print("Saved C2ST results to", c2st_workbook_path)
+c2st_workbook_path = DISTRIBUTION_SHIFT_DIR / "c2st_metrics.xlsx"
+with pd.ExcelWriter(c2st_workbook_path) as writer:
+    c2st_results_df.to_excel(writer, sheet_name="metrics", index=False)
+print("Saved C2ST results to", c2st_workbook_path)
 
+distribution_cache_path = (
+    DISTRIBUTION_SHIFT_DIR / f"distribution_metrics_{TARGET_LABEL}.joblib"
+)
+distribution_overall_df: Optional[pd.DataFrame] = None
+distribution_df: Optional[pd.DataFrame] = None
+if (
+    distribution_cache_path.exists()
+    and not FORCE_UPDATE_SYNTHETIC_DATA
+    and not FORCE_UPDATE_DISTRIBUTION_SHIFT
+):
+    cached_distribution = joblib.load(distribution_cache_path)
+    if (
+        list(cached_distribution.get("feature_columns") or [])
+        == list(FEATURE_COLUMNS)
+    ):
+        distribution_overall_df = cached_distribution.get("overall_df")
+        distribution_df = cached_distribution.get("per_feature_df")
+        print("Loaded cached distribution-shift metrics from", distribution_cache_path)
+    else:
+        print(
+            "Discarding cached distribution-shift metrics because the configuration changed."
+        )
+if distribution_overall_df is None or distribution_df is None:
     global_mmd, global_mmd_p_value = rbf_mmd(
         real_features_numeric,
         synthesis_features_numeric,
@@ -1625,26 +1881,14 @@ else:
         random_state=RANDOM_STATE,
         n_permutations=200,
     )
-    distribution_overall_df = pd.DataFrame(
-        [
-            {
-                "target": TARGET_LABEL,
-                "global_mmd": global_mmd,
-                "global_mmd_p_value": global_mmd_p_value,
-                "global_energy_distance": global_energy,
-                "global_energy_p_value": global_energy_p_value,
-                **c2st_metrics,
-            }
-        ]
+    feature_rows: List[Dict[str, object]] = []
+    feature_iterator = tqdm(
+        FEATURE_COLUMNS,
+        desc="Distribution shift | per feature",
+        leave=False,
     )
-    render_dataframe(
-        distribution_overall_df,
-        title="Distribution shift overview",
-        floatfmt=".3f",
-    )
-
-    distribution_rows: List[Dict[str, object]] = []
-    for column in FEATURE_COLUMNS:
+    for column in feature_iterator:
+        feature_iterator.set_postfix_str(column)
         real_values = real_features_numeric[column].to_numpy()
         synthetic_values = synthesis_features_numeric[column].to_numpy()
         mmd_value, mmd_p = rbf_mmd(
@@ -1659,50 +1903,134 @@ else:
             random_state=RANDOM_STATE,
             n_permutations=0,
         )
-        distribution_rows.append(
+        mi_value = mutual_information_feature(real_values, synthetic_values)
+        feature_rows.append(
             {
                 "feature": column,
-                "mmd": mmd_value,
+                "rbf_mmd": mmd_value,
                 "mmd_p_value": mmd_p,
                 "energy_distance": energy_value,
-                "mutual_information": mutual_information_feature(
-                    real_values, synthetic_values
+                "mutual_information": mi_value,
+            }
+        )
+    distribution_df = pd.DataFrame(feature_rows)
+    average_mutual_info = (
+        float(distribution_df["mutual_information"].mean())
+        if not distribution_df.empty
+        else float("nan")
+    )
+    overall_rows = [
+        {
+            "metric": "rbf_mmd",
+            "value": global_mmd,
+            "p_value": global_mmd_p_value,
+            "interpretation": _interpret_global_shift(
+                "rbf_mmd", global_mmd, global_mmd_p_value
+            ),
+        },
+        {
+            "metric": "energy_distance",
+            "value": global_energy,
+            "p_value": global_energy_p_value,
+            "interpretation": _interpret_global_shift(
+                "energy_distance", global_energy, global_energy_p_value
+            ),
+        },
+        {
+            "metric": "mutual_information",
+            "value": average_mutual_info,
+            "p_value": float("nan"),
+            "interpretation": _interpret_global_shift(
+                "mutual_information", average_mutual_info, float("nan")
+            ),
+        },
+    ]
+    distribution_overall_df = pd.DataFrame(overall_rows)
+    joblib.dump(
+        {
+            "feature_columns": list(FEATURE_COLUMNS),
+            "overall_df": distribution_overall_df,
+            "per_feature_df": distribution_df,
+        },
+        distribution_cache_path,
+    )
+    print("Saved distribution-shift metrics to", distribution_cache_path)
+
+feature_interpretation_rows: List[Dict[str, object]] = []
+if distribution_df is not None:
+    for row in distribution_df.itertuples():
+        feature_interpretation_rows.append(
+            {
+                "feature": row.feature,
+                "rbf_mmd": row.rbf_mmd,
+                "energy_distance": row.energy_distance,
+                "mutual_information": row.mutual_information,
+                "interpretation": _interpret_feature_shift(
+                    row.rbf_mmd, row.energy_distance, row.mutual_information
                 ),
             }
         )
-    distribution_df = pd.DataFrame(distribution_rows)
-    distribution_path = DISTRIBUTION_SHIFT_DIR / "metrics_distribution_shift.xlsx"
-    with pd.ExcelWriter(distribution_path) as writer:
-        distribution_overall_df.to_excel(writer, sheet_name="overall", index=False)
-        distribution_df.to_excel(writer, sheet_name="per_feature", index=False)
+distribution_feature_df = pd.DataFrame(feature_interpretation_rows)
+if distribution_overall_df is None:
+    distribution_overall_df = pd.DataFrame(
+        columns=["metric", "value", "p_value", "interpretation"]
+    )
+
+render_dataframe(
+    distribution_overall_df,
+    title="Distribution shift overview",
+    floatfmt=".3f",
+)
+distribution_path = DISTRIBUTION_SHIFT_DIR / "distribution_metrics.xlsx"
+with pd.ExcelWriter(distribution_path, engine="openpyxl") as writer:
+    distribution_overall_df.to_excel(writer, sheet_name="overall", index=False)
+    overall_sheet = writer.sheets["overall"]
+    overall_note_row = distribution_overall_df.shape[0] + 3
+    overall_sheet.cell(
+        row=overall_note_row,
+        column=1,
+        value=DISTRIBUTION_SHIFT_OVERALL_NOTE,
+    )
+
+    distribution_feature_df.to_excel(writer, sheet_name="per_feature", index=False)
+    feature_sheet = writer.sheets["per_feature"]
+    feature_note_row = distribution_feature_df.shape[0] + 3
+    feature_sheet.cell(
+        row=feature_note_row,
+        column=1,
+        value=DISTRIBUTION_SHIFT_PER_FEATURE_NOTE,
+    )
+if not distribution_feature_df.empty:
     distribution_top = (
-        distribution_df.sort_values("mutual_information", ascending=False)
+        distribution_feature_df.sort_values("mutual_information", ascending=False)
         .head(10)
         .reset_index(drop=True)
     )
-    render_dataframe(
-        distribution_top,
-        title="Top distribution shift features (mutual information)",
-        floatfmt=".3f",
-    )
+else:
+    distribution_top = distribution_feature_df
+render_dataframe(
+    distribution_top,
+    title="Top distribution shift features (mutual information)",
+    floatfmt=".3f",
+)
 
-    train_probabilities = probability_map["Train"]
-    test_probabilities = probability_map["MIMIC test"]
-    membership_metrics = simple_membership_inference(
-        train_probabilities,
-        np.asarray(y_train_model),
-        test_probabilities,
-        np.asarray(y_test),
-    )
-    membership_df = pd.DataFrame([{"target": TARGET_LABEL, **membership_metrics}])
-    membership_path = PRIVACY_ASSESSMENT_DIR / "membership_inference.xlsx"
-    with pd.ExcelWriter(membership_path) as writer:
-        membership_df.to_excel(writer, sheet_name="summary", index=False)
-    render_dataframe(
-        membership_df,
-        title="Membership inference baseline",
-        floatfmt=".3f",
-    )
+train_probabilities = probability_map["Train"]
+test_probabilities = probability_map["MIMIC test"]
+membership_metrics = simple_membership_inference(
+    train_probabilities,
+    np.asarray(y_train_model),
+    test_probabilities,
+    np.asarray(y_test),
+)
+membership_df = pd.DataFrame([{"target": TARGET_LABEL, **membership_metrics}])
+membership_path = PRIVACY_ASSESSMENT_DIR / "membership_inference.xlsx"
+with pd.ExcelWriter(membership_path) as writer:
+    membership_df.to_excel(writer, sheet_name="summary", index=False)
+render_dataframe(
+    membership_df,
+    title="Membership inference baseline",
+    floatfmt=".3f",
+)
 
 
 # %% [markdown]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 from datetime import datetime, timezone
@@ -26,7 +27,9 @@ import numpy as np
 import pandas as pd
 from IPython.display import display
 from matplotlib import pyplot as plt
+from matplotlib.patches import Patch
 from tabulate import tabulate
+from tqdm.auto import tqdm
 
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
@@ -62,6 +65,20 @@ from suave.evaluate import (  # noqa: E402
 from cls_eval import evaluate_predictions  # noqa: E402
 
 
+# Interpretation notes appended to distribution-shift workbooks so users can
+# review the heuristics applied by the helper functions below.
+DISTRIBUTION_SHIFT_OVERALL_NOTE = (
+    "Interpretation guide: rbf_mmd and energy_distance use permutation tests; "
+    "treat p < 0.05 as evidence of a significant distribution difference. "
+    "Mutual_information lacks a permutation p-value, so assess magnitudes "
+    "against domain expectations."
+)
+DISTRIBUTION_SHIFT_PER_FEATURE_NOTE = (
+    "Interpretation guide: feature-level heuristics highlight potential shifts "
+    "when rbf_mmd > 0.05, energy_distance > 0.1, or mutual_information > 0.1."
+)
+
+
 RANDOM_STATE: int = 20201021
 TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
 BENCHMARK_COLUMNS = (
@@ -71,6 +88,10 @@ BENCHMARK_COLUMNS = (
     "OASIS",
 )  # do not include in training. Only use for benchamrk validation.
 
+#: Strategy for evaluating clinical score benchmarks.
+#: ``"imputed"`` (default) applies iterative imputation before evaluation, any
+#: other value keeps observed scores and skips rows with missing values. Keep
+#: this comment in sync with ``analysis_config.py``.
 CLINICAL_SCORE_BENCHMARK_STRATEGY: str = "imputed"
 
 VALIDATION_SIZE: float = 0.2
@@ -109,14 +130,18 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
     "output_dir_name": "research_outputs_supervised",
 }
 
-#: Default environment flags that determine whether cached artefacts should be
-#: regenerated. ``FORCE_UPDATE_SUAVE`` is only consulted when Optuna artefacts
-#: are unavailable, allowing callers to refresh the locally persisted SUAVE
-#: model that otherwise acts as a fallback.
+#: Default script-mode flags that determine whether cached artefacts should be
+#: regenerated. Interactive runs always keep these set to ``False``; CLI
+#: executions adopt the values below. ``FORCE_UPDATE_SUAVE`` is only consulted
+#: when Optuna artefacts are unavailable, allowing callers to refresh the
+#: locally persisted SUAVE model that otherwise acts as a fallback.
 FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
     "FORCE_UPDATE_BENCHMARK_MODEL": False,
     "FORCE_UPDATE_TSTR_MODEL": True,
     "FORCE_UPDATE_TRTR_MODEL": True,
+    "FORCE_UPDATE_SYNTHETIC_DATA": True,
+    "FORCE_UPDATE_C2ST_MODEL": True,
+    "FORCE_UPDATE_DISTRIBUTION_SHIFT": True,
     "FORCE_UPDATE_SUAVE": False,
 }
 
@@ -134,38 +159,6 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "privacy_assessment": "11_privacy_assessment",
     "visualisations": "12_visualizations",
 }
-
-
-def read_bool_env_flag(variable: str, default: bool) -> bool:
-    """Return a boolean flag parsed from ``variable``.
-
-    Parameters
-    ----------
-    variable
-        Name of the environment variable to inspect.
-    default
-        Fallback value when the variable is undefined.
-
-    Returns
-    -------
-    bool
-        ``True`` if the variable is set to a truthy token, ``False`` otherwise.
-
-    Examples
-    --------
-    >>> import os
-    >>> os.environ["EXAMPLE_FLAG"] = "yes"
-    >>> read_bool_env_flag("EXAMPLE_FLAG", False)
-    True
-    >>> del os.environ["EXAMPLE_FLAG"]
-    >>> read_bool_env_flag("EXAMPLE_FLAG", True)
-    True
-    """
-
-    raw_value = os.getenv(variable)
-    if raw_value is None:
-        return default
-    return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 # =============================================================================
@@ -339,6 +332,8 @@ __all__ = [
     "CLINICAL_SCORE_BENCHMARK_STRATEGY",
     "VALIDATION_SIZE",
     "DATA_DIR",
+    "DISTRIBUTION_SHIFT_OVERALL_NOTE",
+    "DISTRIBUTION_SHIFT_PER_FEATURE_NOTE",
     "Schema",
     "SchemaInferencer",
     "HIDDEN_DIMENSION_OPTIONS",
@@ -378,9 +373,11 @@ __all__ = [
     "plot_benchmark_curves",
     "plot_calibration_curves",
     "plot_latent_space",
-    "plot_transfer_metric_bars",
+    "plot_transfer_metric_boxes",
     "prepare_features",
     "render_dataframe",
+    "_interpret_global_shift",
+    "_interpret_feature_shift",
     "rbf_mmd",
     "make_study_name",
     "DEFAULT_ANALYSIS_CONFIG",
@@ -399,6 +396,9 @@ __all__ = [
     "slugify_identifier",
     "to_numeric_frame",
     "build_tstr_training_sets",
+    "load_tstr_training_sets_from_tsv",
+    "save_tstr_training_sets_to_tsv",
+    "collect_transfer_bootstrap_records",
     "evaluate_transfer_baselines",
     "build_suave_model",
     "resolve_suave_fit_kwargs",
@@ -457,6 +457,44 @@ def render_dataframe(
     if floatfmt is not None:
         tabulate_kwargs["floatfmt"] = floatfmt
     print(tabulate(df, **tabulate_kwargs))
+
+
+def _interpret_global_shift(metric_name: str, value: float, p_value: float) -> str:
+    """Return a short narrative for global distribution-shift diagnostics."""
+
+    if np.isnan(value):
+        return "Metric unavailable."
+    if metric_name in {"rbf_mmd", "energy_distance"}:
+        if not np.isnan(p_value) and p_value < 0.05:
+            return "Significant distribution difference detected (p < 0.05)."
+        if not np.isnan(p_value):
+            return "No significant difference detected (p ≥ 0.05)."
+        return "Inspect magnitude relative to domain expectations."
+    if metric_name == "mutual_information":
+        return (
+            "Average feature-level mutual information; higher values indicate "
+            "stronger dependency."
+        )
+    return "Review metric in context."
+
+
+def _interpret_feature_shift(
+    mmd_value: float, energy_value: float, mi_value: float
+) -> str:
+    """Return guidance for per-feature distribution shift metrics."""
+
+    messages: List[str] = []
+    if not np.isnan(mmd_value) and mmd_value > 0.05:
+        messages.append("MMD > 0.05 suggests a noticeable shift.")
+    if not np.isnan(energy_value) and energy_value > 0.1:
+        messages.append("Energy distance > 0.1 indicates distribution divergence.")
+    if not np.isnan(mi_value) and mi_value > 0.1:
+        messages.append(
+            "Mutual information > 0.1 highlights dependency differences."
+        )
+    if not messages:
+        return "No pronounced shift detected."
+    return " ".join(messages)
 
 
 # =============================================================================
@@ -1990,6 +2028,142 @@ def build_tstr_training_sets(
     return datasets
 
 
+def save_tstr_training_sets_to_tsv(
+    raw_datasets: Mapping[str, Tuple[pd.DataFrame, pd.Series]],
+    *,
+    output_dir: Path,
+    target_label: str,
+    feature_columns: Sequence[str],
+    random_state: Optional[int] = None,
+) -> Tuple[Path, str]:
+    """Persist TSTR/TRTR training sets to TSV files with a JSON manifest.
+
+    Returns
+    -------
+    manifest_path, manifest_signature:
+        The JSON manifest path and a SHA256 signature used to validate
+        downstream caches.
+    """
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / f"manifest_{slugify_identifier(target_label)}.json"
+    manifest: Dict[str, object] = {
+        "target_label": target_label,
+        "feature_columns": list(feature_columns),
+        "datasets": [],
+    }
+    if random_state is not None:
+        manifest["random_state"] = int(random_state)
+    manifest["generated_at"] = datetime.now(timezone.utc).isoformat()
+
+    for dataset_name, (features, labels) in raw_datasets.items():
+        dataset_frame = features.loc[:, feature_columns].reset_index(drop=True).copy()
+        label_series = pd.Series(labels).reset_index(drop=True)
+        dataset_frame[target_label] = label_series.values
+        filename = f"{slugify_identifier(dataset_name)}.tsv"
+        dataset_frame.to_csv(output_dir / filename, index=False)
+        manifest["datasets"].append({
+            "name": dataset_name,
+            "filename": filename,
+        })
+
+    with manifest_path.open("w", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file, indent=2, ensure_ascii=False)
+
+    signature = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    return manifest_path, signature
+
+
+def load_tstr_training_sets_from_tsv(
+    output_dir: Path,
+    *,
+    target_label: str,
+    feature_columns: Sequence[str],
+) -> Optional[Tuple[
+    Dict[str, Tuple[pd.DataFrame, pd.Series]],
+    Dict[str, Tuple[pd.DataFrame, pd.Series]],
+    str,
+]]:
+    """Load cached TSTR/TRTR training sets from TSV files if available.
+
+    Returns
+    -------
+    datasets, raw_datasets, manifest_signature:
+        Numeric and raw training sets, along with the SHA256 signature of the
+        cached manifest. ``None`` is returned when the manifest is missing or
+        incompatible with the current configuration.
+    """
+
+    output_dir = Path(output_dir)
+    manifest_path = output_dir / f"manifest_{slugify_identifier(target_label)}.json"
+    if not manifest_path.exists():
+        return None
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+    cached_features = manifest.get("feature_columns")
+    if list(cached_features or []) != list(feature_columns):
+        return None
+
+    datasets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {}
+    raw_datasets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {}
+    for entry in manifest.get("datasets", []):
+        name = entry.get("name")
+        filename = entry.get("filename")
+        if not name or not filename:
+            continue
+        dataset_path = output_dir / str(filename)
+        if not dataset_path.exists():
+            return None
+        frame = pd.read_csv(dataset_path)
+        if target_label not in frame.columns:
+            return None
+        labels = frame[target_label].reset_index(drop=True)
+        features = frame.drop(columns=[target_label]).reset_index(drop=True)
+        raw_datasets[name] = (features, labels)
+        datasets[name] = (to_numeric_frame(features), labels.copy())
+
+    if not datasets:
+        return None
+
+    signature = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    return datasets, raw_datasets, signature
+
+
+def collect_transfer_bootstrap_records(
+    nested_results: Mapping[str, Mapping[str, Mapping[str, Mapping[str, pd.DataFrame]]]],
+    *,
+    metrics: Sequence[str] = ("accuracy", "roc_auc"),
+) -> pd.DataFrame:
+    """Flatten bootstrap metrics from transfer evaluations into long format."""
+
+    rows: List[Dict[str, object]] = []
+    for training_name, model_map in nested_results.items():
+        for model_name, evaluation_map in model_map.items():
+            for evaluation_name, result_map in evaluation_map.items():
+                bootstrap_df = result_map.get("bootstrap_overall_records")
+                if bootstrap_df is None or bootstrap_df.empty:
+                    continue
+                for metric in metrics:
+                    if metric not in bootstrap_df.columns:
+                        continue
+                    for value in bootstrap_df[metric].dropna().to_numpy():
+                        rows.append(
+                            {
+                                "training_dataset": training_name,
+                                "evaluation_dataset": evaluation_name,
+                                "model": model_name,
+                                "metric": metric,
+                                "value": float(value),
+                            }
+                        )
+    return pd.DataFrame(rows)
+
+
 def evaluate_transfer_baselines(
     training_sets: Mapping[str, Tuple[pd.DataFrame, pd.Series]],
     evaluation_sets: Mapping[str, Tuple[pd.DataFrame, pd.Series]],
@@ -2026,14 +2200,28 @@ def evaluate_transfer_baselines(
     long_rows: List[Dict[str, object]] = []
     nested_results: Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]] = {}
 
-    for training_name, (train_X_numeric, train_y_numeric) in training_sets.items():
+    training_items = list(training_sets.items())
+    training_progress = tqdm(
+        training_items,
+        desc="TSTR/TRTR | training datasets",
+        leave=False,
+    )
+    for training_name, (train_X_numeric, train_y_numeric) in training_progress:
+        training_progress.set_postfix_str(training_name)
         nested_results.setdefault(training_name, {})
         raw_training = (
             raw_training_sets.get(training_name)
             if raw_training_sets is not None
             else None
         )
-        for model_name, factory in model_factories.items():
+        model_items = list(model_factories.items())
+        model_progress = tqdm(
+            model_items,
+            desc=f"Models @ {training_name}",
+            leave=False,
+        )
+        for model_name, factory in model_progress:
+            model_progress.set_postfix_str(model_name)
             estimator = factory()
             use_raw_features = getattr(
                 estimator, "requires_schema_aligned_features", False
@@ -2057,10 +2245,17 @@ def evaluate_transfer_baselines(
             class_names = [str(value) for value in classes]
             positive_label = class_names[-1] if len(class_names) == 2 else None
 
+            evaluation_items = list(evaluation_sets.items())
+            evaluation_progress = tqdm(
+                evaluation_items,
+                desc=f"Evaluate @ {training_name} | {model_name}",
+                leave=False,
+            )
             for evaluation_name, (
                 eval_X_numeric,
                 eval_y_numeric,
-            ) in evaluation_sets.items():
+            ) in evaluation_progress:
+                evaluation_progress.set_postfix_str(evaluation_name)
                 if use_raw_features:
                     if (
                         raw_evaluation_sets is None
@@ -2093,6 +2288,11 @@ def evaluate_transfer_baselines(
                     positive_label=positive_label,
                     bootstrap_n=bootstrap_n,
                     random_state=random_state,
+                    show_progress=True,
+                    progress_desc=(
+                        f"Bootstrap | {model_name}"
+                        f" | {training_name}→{evaluation_name}"
+                    ),
                 )
                 nested_results[training_name][model_name][evaluation_name] = results
 
@@ -2248,7 +2448,17 @@ class IsotonicProbabilityCalibrator:
         return self.classes_[indices]
 
     def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple proxy
-        return getattr(self.base_estimator, name)
+        try:
+            base = object.__getattribute__(self, "base_estimator")
+        except AttributeError as exc:
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {name!r}"
+            ) from exc
+        if base is None or base is self:
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {name!r}"
+            )
+        return getattr(base, name)
 
 
 def fit_isotonic_calibrator(
@@ -2441,8 +2651,8 @@ def plot_benchmark_curves(
     return figure_path
 
 
-def plot_transfer_metric_bars(
-    metric_df: pd.DataFrame,
+def plot_transfer_metric_boxes(
+    bootstrap_df: pd.DataFrame,
     *,
     metric: str,
     evaluation_dataset: str,
@@ -2450,54 +2660,135 @@ def plot_transfer_metric_bars(
     model_order: Sequence[str],
     output_dir: Path,
     target_label: str,
+    color_map: Optional[Mapping[str, str]] = None,
 ) -> Optional[Path]:
-    """Plot grouped bar charts with error bars for TSTR/TRTR comparisons."""
+    """Plot box plots of transfer metrics grouped by model and training dataset."""
 
-    subset = metric_df[
-        (metric_df["metric"] == metric)
-        & (metric_df["evaluation_dataset"] == evaluation_dataset)
+    subset = bootstrap_df[
+        (bootstrap_df["metric"] == metric)
+        & (bootstrap_df["evaluation_dataset"] == evaluation_dataset)
     ]
     if subset.empty:
         print(
-            f"Skipping {metric} bars for {evaluation_dataset} because no data was provided."
+            f"Skipping {metric} box plot for {evaluation_dataset} because no data was provided."
         )
         return None
 
-    training_order = list(training_order)
-    model_order = list(model_order)
-    x_positions = np.arange(len(training_order), dtype=float)
-    width = 0.8 / max(len(model_order), 1)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    for idx, model_name in enumerate(model_order):
-        model_subset = (
-            subset[subset["model"] == model_name]
-            .set_index("training_dataset")
-            .reindex(training_order)
+    available_training = subset["training_dataset"].unique()
+    training_order = [name for name in training_order if name in available_training]
+    available_models = subset["model"].unique()
+    model_order = [name for name in model_order if name in available_models]
+    if not training_order or not model_order:
+        print(
+            f"Skipping {metric} box plot for {evaluation_dataset} due to missing model or dataset coverage."
         )
-        estimates = model_subset["estimate"].to_numpy()
-        lower = estimates - model_subset["ci_low"].to_numpy()
-        upper = model_subset["ci_high"].to_numpy() - estimates
-        lower = np.nan_to_num(lower, nan=0.0, posinf=0.0, neginf=0.0)
-        upper = np.nan_to_num(upper, nan=0.0, posinf=0.0, neginf=0.0)
-        offsets = (idx - (len(model_order) - 1) / 2) * width
-        ax.bar(
-            x_positions + offsets,
-            estimates,
-            width=width,
-            label=model_name,
-            yerr=np.vstack([lower, upper]),
-            capsize=4,
-            alpha=0.9,
-        )
+        return None
 
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(training_order, rotation=20, ha="right")
+    model_count = len(model_order)
+    dataset_count = len(training_order)
+    if color_map is None:
+        cmap = plt.get_cmap("tab10")
+        color_map = {
+            name: cmap(idx % cmap.N)
+            for idx, name in enumerate(training_order)
+        }
+
+    fig_width = max(6.0, model_count * 2.5)
+    fig, ax = plt.subplots(figsize=(fig_width, 6.0))
+    legend_handles: Dict[str, Patch] = {}
+
+    if model_count == 1:
+        model_name = model_order[0]
+        model_subset = subset[subset["model"] == model_name]
+        positions: List[float] = []
+        box_data: List[np.ndarray] = []
+        colors: List[str] = []
+        labels: List[str] = []
+        for idx, dataset_name in enumerate(training_order):
+            dataset_values = model_subset[
+                model_subset["training_dataset"] == dataset_name
+            ]["value"].dropna()
+            if dataset_values.empty:
+                continue
+            positions.append(float(idx))
+            box_data.append(dataset_values.to_numpy())
+            color = color_map.get(dataset_name, "#1f77b4")
+            colors.append(color)
+            labels.append(dataset_name)
+            if dataset_name not in legend_handles:
+                legend_handles[dataset_name] = Patch(
+                    facecolor=color,
+                    alpha=0.6,
+                    label=dataset_name,
+                )
+        if not box_data:
+            plt.close(fig)
+            print(
+                f"Skipping {metric} box plot for {evaluation_dataset} because no bootstrap samples were found."
+            )
+            return None
+        bp = ax.boxplot(
+            box_data,
+            positions=positions,
+            widths=0.6,
+            patch_artist=True,
+        )
+        for patch, color in zip(bp["boxes"], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(labels, rotation=20, ha="right")
+    else:
+        box_positions: List[float] = []
+        box_data: List[np.ndarray] = []
+        box_colors: List[str] = []
+        width = 0.8 / max(dataset_count, 1)
+        for model_idx, model_name in enumerate(model_order):
+            model_subset = subset[subset["model"] == model_name]
+            if model_subset.empty:
+                continue
+            for dataset_idx, dataset_name in enumerate(training_order):
+                dataset_values = model_subset[
+                    model_subset["training_dataset"] == dataset_name
+                ]["value"].dropna()
+                if dataset_values.empty:
+                    continue
+                offset = (dataset_idx - (dataset_count - 1) / 2) * width
+                position = float(model_idx) + offset
+                box_positions.append(position)
+                box_data.append(dataset_values.to_numpy())
+                color = color_map.get(dataset_name, "#1f77b4")
+                box_colors.append(color)
+                if dataset_name not in legend_handles:
+                    legend_handles[dataset_name] = Patch(
+                        facecolor=color,
+                        alpha=0.6,
+                        label=dataset_name,
+                    )
+        if not box_data:
+            plt.close(fig)
+            print(
+                f"Skipping {metric} box plot for {evaluation_dataset} because no bootstrap samples were found."
+            )
+            return None
+        bp = ax.boxplot(
+            box_data,
+            positions=box_positions,
+            widths=width,
+            patch_artist=True,
+        )
+        for patch, color in zip(bp["boxes"], box_colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+        ax.set_xticks(np.arange(len(model_order)))
+        ax.set_xticklabels(model_order, rotation=20, ha="right")
+        ax.set_xlabel("Model")
+
     ax.set_ylabel(metric.upper())
-    ax.set_ylim(0.0, 1.0)
     ax.set_title(f"{metric.upper()} – {evaluation_dataset}")
-    ax.legend()
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    if legend_handles:
+        ax.legend(handles=list(legend_handles.values()), title="Training dataset")
     fig.tight_layout()
 
     dataset_slug = slugify_identifier(evaluation_dataset)
@@ -2507,7 +2798,9 @@ def plot_transfer_metric_bars(
     )
     _save_figure_multiformat(fig, figure_path.with_suffix(""), use_tight_layout=True)
     plt.close(fig)
-    print(f"Saved {metric.upper()} bars for {evaluation_dataset} to {figure_path}")
+    print(
+        f"Saved {metric.upper()} box plot for {evaluation_dataset} to {figure_path}"
+    )
     return figure_path
 
 
