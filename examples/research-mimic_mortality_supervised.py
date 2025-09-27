@@ -83,7 +83,9 @@ from mimic_mortality_utils import (  # noqa: E402
     load_dataset,
     load_or_create_iteratively_imputed_features,
     ModelLoadingPlan,
+    FORCE_UPDATE_FLAG_DEFAULTS,
     make_baseline_model_factories,
+    read_bool_env_flag,
     resolve_model_loading_plan,
     confirm_model_loading_plan_selection,
     resolve_suave_fit_kwargs,
@@ -127,6 +129,19 @@ from suave.plots import (  # noqa: E402
 TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
+
+FORCE_UPDATE_BENCHMARK_MODEL = read_bool_env_flag(
+    "FORCE_UPDATE_BENCHMARK_MODEL",
+    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_BENCHMARK_MODEL"],
+)
+FORCE_UPDATE_TSTR_MODEL = read_bool_env_flag(
+    "FORCE_UPDATE_TSTR_MODEL",
+    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_TSTR_MODEL"],
+)
+FORCE_UPDATE_TRTR_MODEL = read_bool_env_flag(
+    "FORCE_UPDATE_TRTR_MODEL",
+    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_TRTR_MODEL"],
+)
 
 IS_INTERACTIVE = is_interactive_session()
 CLI_REQUESTED_TRIAL_ID: Optional[int] = None
@@ -340,7 +355,7 @@ else:
     for name, path in baseline_imputed_paths.items():
         print(f"  - {name}: {path}")
 
-baseline_models = {
+baseline_models: Dict[str, Pipeline] = {
     "Logistic regression": Pipeline(
         [
             ("scaler", StandardScaler()),
@@ -406,10 +421,25 @@ model_abbreviation_lookup["SUAVE"] = "SUAVE"
 train_features_imputed = baseline_imputed_features["Train"]
 train_labels = baseline_label_sets["Train"]
 
+baseline_model_cache_path = (
+    BASELINE_DIR / f"baseline_estimators_{TARGET_LABEL}.joblib"
+)
+
+if baseline_model_cache_path.exists() and not FORCE_UPDATE_BENCHMARK_MODEL:
+    baseline_models = joblib.load(baseline_model_cache_path)
+    print(
+        "Loaded cached classical baseline models from",
+        baseline_model_cache_path,
+    )
+else:
+    for estimator in baseline_models.values():
+        estimator.fit(train_features_imputed, train_labels)
+    joblib.dump(baseline_models, baseline_model_cache_path)
+    print("Saved classical baseline models to", baseline_model_cache_path)
+
 for model_name, estimator in baseline_models.items():
-    fitted_estimator = estimator.fit(train_features_imputed, train_labels)
     for dataset_name, (features, labels) in baseline_evaluation_sets.items():
-        probabilities = fitted_estimator.predict_proba(features)
+        probabilities = estimator.predict_proba(features)
         baseline_probability_map[dataset_name][model_name] = (
             extract_positive_probabilities(probabilities)
         )
@@ -526,6 +556,8 @@ if model is None and selected_model_path and selected_model_path.exists():
     else:
         print(f"Loaded SUAVE model from {selected_model_path}.")
 
+model_was_trained = False
+
 if model is None:
     if not selected_params:
         raise RuntimeError(
@@ -546,9 +578,27 @@ if model is None:
         y_train_model,
         **fit_kwargs,
     )
+    model_was_trained = True
+
+if model_was_trained:
+    model_output_path = selected_model_path or (
+        MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
+    )
+    model_output_path.parent.mkdir(parents=True, exist_ok=True)
+    model.save(model_output_path)
+    selected_model_path = model_output_path
+    if selected_trial_number is not None:
+        print(
+            f"Saved SUAVE model for Optuna trial #{selected_trial_number} to {model_output_path}."
+        )
+    else:
+        print(f"Saved SUAVE model to {model_output_path}.")
+
+calibrator_was_fitted = False
 
 if calibrator is None:
     calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
+    calibrator_was_fitted = True
     print("Fitted a new isotonic calibrator on the validation split.")
 else:
     embedded = extract_calibrator_estimator(calibrator)
@@ -557,8 +607,24 @@ else:
             "Calibrator did not contain a usable SUAVE estimator; refitting calibrator."
         )
         calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
+        calibrator_was_fitted = True
     else:
         model = embedded
+
+if calibrator_was_fitted:
+    calibrator_output_path = selected_calibrator_path or (
+        MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
+    )
+    calibrator_output_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(calibrator, calibrator_output_path)
+    selected_calibrator_path = calibrator_output_path
+    if selected_trial_number is not None:
+        print(
+            "Saved isotonic calibrator for Optuna trial "
+            f"#{selected_trial_number} to {calibrator_output_path}."
+        )
+    else:
+        print(f"Saved isotonic calibrator to {calibrator_output_path}.")
 
 
 # %% [markdown]
@@ -674,6 +740,8 @@ bootstrap_results: Dict[str, Dict[str, pd.DataFrame]] = {}
 bootstrap_overall_frames: List[pd.DataFrame] = []
 bootstrap_per_class_frames: List[pd.DataFrame] = []
 bootstrap_warnings_frames: List[pd.DataFrame] = []
+bootstrap_overall_record_frames: List[pd.DataFrame] = []
+bootstrap_per_class_record_frames: List[pd.DataFrame] = []
 
 model_classes_array = getattr(model, "_classes", None)
 if model_classes_array is None or len(model_classes_array) == 0:
@@ -719,6 +787,20 @@ for dataset_name, (features, labels) in evaluation_datasets.items():
     per_class_df.insert(0, "Target", TARGET_LABEL)
     bootstrap_per_class_frames.append(per_class_df)
 
+    overall_records_df = results.get("bootstrap_overall_records")
+    if overall_records_df is not None and not overall_records_df.empty:
+        overall_records_copy = overall_records_df.copy()
+        overall_records_copy.insert(0, "Dataset", dataset_name)
+        overall_records_copy.insert(0, "Target", TARGET_LABEL)
+        bootstrap_overall_record_frames.append(overall_records_copy)
+
+    per_class_records_df = results.get("bootstrap_per_class_records")
+    if per_class_records_df is not None and not per_class_records_df.empty:
+        per_class_records_copy = per_class_records_df.copy()
+        per_class_records_copy.insert(0, "Dataset", dataset_name)
+        per_class_records_copy.insert(0, "Target", TARGET_LABEL)
+        bootstrap_per_class_record_frames.append(per_class_records_copy)
+
     warnings_df = results.get("warnings")
     if warnings_df is not None and not warnings_df.empty:
         warnings_copy = warnings_df.copy()
@@ -733,6 +815,34 @@ bootstrap_overall_path = BOOTSTRAP_DIR / f"bootstrap_overall_{TARGET_LABEL}.csv"
 bootstrap_per_class_path = BOOTSTRAP_DIR / f"bootstrap_per_class_{TARGET_LABEL}.csv"
 bootstrap_overall_df.to_csv(bootstrap_overall_path, index=False)
 bootstrap_per_class_df.to_csv(bootstrap_per_class_path, index=False)
+
+bootstrap_overall_records_path: Optional[Path]
+if bootstrap_overall_record_frames:
+    bootstrap_overall_records_df = pd.concat(
+        bootstrap_overall_record_frames, ignore_index=True
+    )
+    bootstrap_overall_records_path = (
+        BOOTSTRAP_DIR / f"bootstrap_overall_records_{TARGET_LABEL}.csv"
+    )
+    bootstrap_overall_records_df.to_csv(
+        bootstrap_overall_records_path, index=False
+    )
+else:
+    bootstrap_overall_records_path = None
+
+bootstrap_per_class_records_path: Optional[Path]
+if bootstrap_per_class_record_frames:
+    bootstrap_per_class_records_df = pd.concat(
+        bootstrap_per_class_record_frames, ignore_index=True
+    )
+    bootstrap_per_class_records_path = (
+        BOOTSTRAP_DIR / f"bootstrap_per_class_records_{TARGET_LABEL}.csv"
+    )
+    bootstrap_per_class_records_df.to_csv(
+        bootstrap_per_class_records_path, index=False
+    )
+else:
+    bootstrap_per_class_records_path = None
 
 bootstrap_warning_path: Optional[Path]
 if bootstrap_warnings_frames:
@@ -798,6 +908,15 @@ tstr_figure_paths: List[Path] = []
 distribution_df: Optional[pd.DataFrame] = None
 distribution_path: Optional[Path] = None
 distribution_top: Optional[pd.DataFrame] = None
+tstr_nested_results: Optional[
+    Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]]
+] = None
+tstr_bootstrap_overall_records_path: Optional[Path] = None
+tstr_bootstrap_per_class_records_path: Optional[Path] = None
+
+transfer_results_cache_path = (
+    TRANSFER_DIR / f"tstr_trtr_results_{TARGET_LABEL}.joblib"
+)
 
 if TARGET_LABEL != "in_hospital_mortality":
     print(
@@ -847,19 +966,46 @@ else:
         print(
             "Skipping SUAVE TSTR/TRTR baseline because no Optuna parameters are available."
         )
-    (
-        tstr_summary_df,
-        tstr_plot_df,
-        _,
-    ) = evaluate_transfer_baselines(
-        training_sets_numeric,
-        evaluation_sets_numeric,
-        model_factories=model_factories,
-        bootstrap_n=1000,
-        random_state=RANDOM_STATE,
-        raw_training_sets=training_sets_raw,
-        raw_evaluation_sets=evaluation_sets_raw,
+
+    should_use_cached_transfer = (
+        transfer_results_cache_path.exists()
+        and not FORCE_UPDATE_TSTR_MODEL
+        and not FORCE_UPDATE_TRTR_MODEL
     )
+
+    cached_transfer_payload: Optional[Dict[str, Any]] = None
+    if should_use_cached_transfer:
+        cached_transfer_payload = joblib.load(transfer_results_cache_path)
+        tstr_summary_df = cached_transfer_payload.get("summary_df")
+        tstr_plot_df = cached_transfer_payload.get("plot_df")
+        tstr_nested_results = cached_transfer_payload.get("nested_results")
+        print(
+            "Loaded cached TSTR/TRTR evaluation results from",
+            transfer_results_cache_path,
+        )
+    else:
+        (
+            tstr_summary_df,
+            tstr_plot_df,
+            tstr_nested_results,
+        ) = evaluate_transfer_baselines(
+            training_sets_numeric,
+            evaluation_sets_numeric,
+            model_factories=model_factories,
+            bootstrap_n=1000,
+            random_state=RANDOM_STATE,
+            raw_training_sets=training_sets_raw,
+            raw_evaluation_sets=evaluation_sets_raw,
+        )
+        transfer_payload = {
+            "summary_df": tstr_summary_df,
+            "plot_df": tstr_plot_df,
+            "nested_results": tstr_nested_results,
+            "training_order": list(training_sets_numeric.keys()),
+            "model_order": list(model_factories.keys()),
+        }
+        joblib.dump(transfer_payload, transfer_results_cache_path)
+        print("Saved TSTR/TRTR evaluation results to", transfer_results_cache_path)
     tstr_summary_path = TRANSFER_DIR / f"tstr_trtr_summary_{TARGET_LABEL}.csv"
     tstr_plot_path = TRANSFER_DIR / f"tstr_trtr_plot_data_{TARGET_LABEL}.csv"
     tstr_summary_df.to_csv(tstr_summary_path, index=False)
@@ -870,8 +1016,16 @@ else:
         floatfmt=".3f",
     )
 
-    training_order = list(training_sets_numeric.keys())
-    model_order = list(model_factories.keys())
+    if cached_transfer_payload is not None:
+        training_order = cached_transfer_payload.get(
+            "training_order", list(training_sets_numeric.keys())
+        )
+        model_order = cached_transfer_payload.get(
+            "model_order", list(model_factories.keys())
+        )
+    else:
+        training_order = list(training_sets_numeric.keys())
+        model_order = list(model_factories.keys())
     for evaluation_name in evaluation_sets_numeric.keys():
         for metric_name in ("accuracy", "roc_auc"):
             figure_path = plot_transfer_metric_bars(
@@ -888,6 +1042,47 @@ else:
 
     real_features_numeric = training_sets_numeric["TRTR (real)"][0]
     synthesis_features_numeric = training_sets_numeric["TSTR synthesis"][0]
+
+    if tstr_nested_results is not None:
+        transfer_overall_records: List[pd.DataFrame] = []
+        transfer_per_class_records: List[pd.DataFrame] = []
+        for training_name, model_map in tstr_nested_results.items():
+            for model_name, evaluation_map in model_map.items():
+                for evaluation_name, result_map in evaluation_map.items():
+                    overall_records = result_map.get("bootstrap_overall_records")
+                    if overall_records is not None and not overall_records.empty:
+                        overall_copy = overall_records.copy()
+                        overall_copy.insert(0, "evaluation_dataset", evaluation_name)
+                        overall_copy.insert(0, "model", model_name)
+                        overall_copy.insert(0, "training_dataset", training_name)
+                        transfer_overall_records.append(overall_copy)
+                    per_class_records = result_map.get("bootstrap_per_class_records")
+                    if per_class_records is not None and not per_class_records.empty:
+                        per_class_copy = per_class_records.copy()
+                        per_class_copy.insert(0, "evaluation_dataset", evaluation_name)
+                        per_class_copy.insert(0, "model", model_name)
+                        per_class_copy.insert(0, "training_dataset", training_name)
+                        transfer_per_class_records.append(per_class_copy)
+        if transfer_overall_records:
+            transfer_overall_df = pd.concat(transfer_overall_records, ignore_index=True)
+            tstr_bootstrap_overall_records_path = (
+                TRANSFER_DIR
+                / f"tstr_trtr_bootstrap_overall_records_{TARGET_LABEL}.csv"
+            )
+            transfer_overall_df.to_csv(
+                tstr_bootstrap_overall_records_path, index=False
+            )
+        if transfer_per_class_records:
+            transfer_per_class_df = pd.concat(
+                transfer_per_class_records, ignore_index=True
+            )
+            tstr_bootstrap_per_class_records_path = (
+                TRANSFER_DIR
+                / f"tstr_trtr_bootstrap_per_class_records_{TARGET_LABEL}.csv"
+            )
+            transfer_per_class_df.to_csv(
+                tstr_bootstrap_per_class_records_path, index=False
+            )
 
     def make_c2st_xgboost() -> Any:
         from xgboost import XGBClassifier
@@ -1386,6 +1581,14 @@ summary_lines.append(
 summary_lines.append(
     f"- Excel workbook: {bootstrap_excel_path.relative_to(OUTPUT_DIR)}"
 )
+if bootstrap_overall_records_path is not None:
+    summary_lines.append(
+        f"- Overall bootstrap samples: {bootstrap_overall_records_path.relative_to(OUTPUT_DIR)}"
+    )
+if bootstrap_per_class_records_path is not None:
+    summary_lines.append(
+        f"- Per-class bootstrap samples: {bootstrap_per_class_records_path.relative_to(OUTPUT_DIR)}"
+    )
 if bootstrap_warning_path is not None:
     summary_lines.append(
         f"- Warnings: {bootstrap_warning_path.relative_to(OUTPUT_DIR)}"
@@ -1402,6 +1605,16 @@ if tstr_summary_df is not None and tstr_summary_path is not None:
     )
     if tstr_plot_path is not None:
         summary_lines.append(f"- Plot data: {tstr_plot_path.relative_to(OUTPUT_DIR)}")
+    if tstr_bootstrap_overall_records_path is not None:
+        summary_lines.append(
+            "- Overall bootstrap samples: "
+            f"{tstr_bootstrap_overall_records_path.relative_to(OUTPUT_DIR)}"
+        )
+    if tstr_bootstrap_per_class_records_path is not None:
+        summary_lines.append(
+            "- Per-class bootstrap samples: "
+            f"{tstr_bootstrap_per_class_records_path.relative_to(OUTPUT_DIR)}"
+        )
     for figure_path in tstr_figure_paths:
         summary_lines.append(f"- Figure: {figure_path.relative_to(OUTPUT_DIR)}")
     summary_lines.append("")

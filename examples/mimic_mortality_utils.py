@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 import json
@@ -27,7 +28,8 @@ from IPython.display import display
 from matplotlib import pyplot as plt
 from tabulate import tabulate
 
-from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.calibration import calibration_curve
+from sklearn.isotonic import IsotonicRegression
 from sklearn.decomposition import PCA
 from sklearn.metrics import (
     brier_score_loss,
@@ -105,6 +107,12 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
     "output_dir_name": "research_outputs_supervised",
 }
 
+FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
+    "FORCE_UPDATE_BENCHMARK_MODEL": False,
+    "FORCE_UPDATE_TSTR_MODEL": True,
+    "FORCE_UPDATE_TRTR_MODEL": True,
+}
+
 ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "schema": "01_schema_validation",
     "features": "02_feature_engineering",
@@ -118,6 +126,38 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "privacy": "10_privacy_assessment",
     "visualisation": "11_visualizations",
 }
+
+
+def read_bool_env_flag(variable: str, default: bool) -> bool:
+    """Return a boolean flag parsed from ``variable``.
+
+    Parameters
+    ----------
+    variable
+        Name of the environment variable to inspect.
+    default
+        Fallback value when the variable is undefined.
+
+    Returns
+    -------
+    bool
+        ``True`` if the variable is set to a truthy token, ``False`` otherwise.
+
+    Examples
+    --------
+    >>> import os
+    >>> os.environ["EXAMPLE_FLAG"] = "yes"
+    >>> read_bool_env_flag("EXAMPLE_FLAG", False)
+    True
+    >>> del os.environ["EXAMPLE_FLAG"]
+    >>> read_bool_env_flag("EXAMPLE_FLAG", True)
+    True
+    """
+
+    raw_value = os.getenv(variable)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 # =============================================================================
@@ -1973,22 +2013,57 @@ def compute_binary_metrics(
     }
 
 
+class IsotonicProbabilityCalibrator:
+    """Lightweight isotonic calibrator compatible with SUAVE classifiers."""
+
+    def __init__(
+        self,
+        base_estimator: SUAVE,
+        isotonic: IsotonicRegression,
+        classes: np.ndarray,
+    ) -> None:
+        self.base_estimator = base_estimator
+        self.estimator = base_estimator
+        self.isotonic_ = isotonic
+        self.classes_ = np.asarray(classes)
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        raw = np.asarray(self.base_estimator.predict_proba(X))
+        positive = extract_positive_probabilities(raw)
+        calibrated = np.clip(self.isotonic_.predict(positive), 0.0, 1.0)
+        return np.column_stack([1.0 - calibrated, calibrated])
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        probabilities = np.asarray(self.predict_proba(X))
+        indices = np.argmax(probabilities, axis=1)
+        return self.classes_[indices]
+
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple proxy
+        return getattr(self.base_estimator, name)
+
+
 def fit_isotonic_calibrator(
     model: SUAVE,
     features: pd.DataFrame,
     targets: pd.Series | np.ndarray,
-) -> CalibratedClassifierCV:
-    """Wrap ``model`` with an isotonic :class:`CalibratedClassifierCV`."""
+) -> IsotonicProbabilityCalibrator:
+    """Return an isotonic calibrator tailored for SUAVE probability outputs."""
 
-    calibrator = CalibratedClassifierCV(
-        # ``estimator`` supersedes the deprecated ``base_estimator`` argument
-        # and keeps compatibility with modern scikit-learn releases.
-        estimator=model,
-        method="isotonic",
-        cv="prefit",
-    )
-    calibrator.fit(features, np.asarray(targets))
-    return calibrator
+    labels = _normalize_zero_indexed_labels(targets)
+    unique = np.unique(labels)
+    if unique.size < 2:
+        raise ValueError("Isotonic calibration requires at least two classes.")
+    if unique.size > 2:
+        raise ValueError("Isotonic calibration currently supports binary tasks only.")
+
+    raw_probabilities = np.asarray(model.predict_proba(features))
+    positive = extract_positive_probabilities(raw_probabilities)
+
+    isotonic = IsotonicRegression(out_of_bounds="clip")
+    isotonic.fit(positive, labels.astype(float, copy=False))
+
+    classes = getattr(model, "classes_", np.array([0, 1]))
+    return IsotonicProbabilityCalibrator(model, isotonic, np.asarray(classes))
 
 
 def plot_calibration_curves(
