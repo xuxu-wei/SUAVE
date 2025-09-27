@@ -491,7 +491,7 @@ baseline_probability_map: Dict[str, Dict[str, np.ndarray]] = {
 model_abbreviation_lookup = {
     "Logistic regression": "LR",
     "KNN": "KNN",
-    "Gradient boosting": "GB",
+    "Gradient boosting": "GBDT",
     "Random forest": "RF",
     "SVM (RBF)": "SVM",
 }
@@ -831,7 +831,7 @@ plot_calibration_curves(
 
 # %%
 
-benchmark_datasets = ["Train", "MIMIC test", "eICU external"]
+benchmark_datasets = ["Train", "Validation", "MIMIC test", "eICU external"]
 benchmark_curve_paths: List[Path] = []
 
 for dataset_name in benchmark_datasets:
@@ -1070,6 +1070,8 @@ for model_name, dataset_tables in model_prediction_frames.items():
             positive_label=positive_label_name,
             bootstrap_n=1000,
             random_state=RANDOM_STATE,
+            show_progress=True,
+            progress_desc=f"Bootstrap | {model_name} @ {dataset_name}",
         )
         model_results[dataset_name] = results
 

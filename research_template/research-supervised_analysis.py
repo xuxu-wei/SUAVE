@@ -1063,6 +1063,8 @@ for model_name, dataset_tables in model_prediction_frames.items():
             positive_label=positive_label_name,
             bootstrap_n=1000,
             random_state=RANDOM_STATE,
+            show_progress=True,
+            progress_desc=f"Bootstrap | {model_name} @ {dataset_name}",
         )
         model_results[dataset_name] = results
 
