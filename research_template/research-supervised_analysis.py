@@ -52,8 +52,6 @@ from analysis_config import (
     CLINICAL_SCORE_BENCHMARK_STRATEGY,
     DATA_DIR,
     DATASET_FILENAMES,
-    DISTRIBUTION_SHIFT_OVERALL_NOTE,
-    DISTRIBUTION_SHIFT_PER_FEATURE_NOTE,
     FORCE_UPDATE_FLAG_DEFAULTS,
     PARETO_MAX_ABS_DELTA_AUC,
     PARETO_MIN_VALIDATION_ROAUC,
@@ -114,6 +112,8 @@ from analysis_utils import (  # noqa: E402
     to_numeric_frame,
     load_model_manifest,
     record_model_manifest,
+    DISTRIBUTION_SHIFT_OVERALL_NOTE,
+    DISTRIBUTION_SHIFT_PER_FEATURE_NOTE,
     _interpret_feature_shift,
     _interpret_global_shift,
 )
