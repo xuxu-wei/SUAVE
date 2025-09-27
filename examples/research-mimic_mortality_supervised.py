@@ -28,6 +28,7 @@ Script mode (command line execution)
 
 from __future__ import annotations
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -152,6 +153,13 @@ if not IS_INTERACTIVE:
     CLI_REQUESTED_TRIAL_ID = parse_script_arguments(sys.argv[1:])
 
 
+def _sanitise_path_component(value: str) -> str:
+    """Return a filesystem-friendly representation of ``value``."""
+
+    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", value.strip())
+    return cleaned or "model"
+
+
 # %% [markdown]
 # ## Data loading and schema definition
 #
@@ -204,6 +212,10 @@ if TARGET_LABEL not in TARGET_COLUMNS:
     raise ValueError(
         f"Target label '{TARGET_LABEL}' is not one of the configured targets: {TARGET_COLUMNS}"
     )
+
+available_benchmark_columns = [
+    column for column in BENCHMARK_COLUMNS if column in train_df.columns
+]
 
 FEATURE_COLUMNS = [
     column
@@ -311,9 +323,17 @@ class _TSTRSuaveEstimator:
 X_full = prepare_features(train_df, FEATURE_COLUMNS)
 y_full = train_df[TARGET_LABEL]
 
-X_train_model, X_validation, y_train_model, y_validation = train_test_split(
+(
+    X_train_model,
+    X_validation,
+    y_train_model,
+    y_validation,
+    benchmark_train,
+    benchmark_validation,
+) = train_test_split(
     X_full,
     y_full,
+    train_df.loc[:, available_benchmark_columns],
     test_size=VALIDATION_SIZE,
     stratify=y_full,
     random_state=RANDOM_STATE,
@@ -323,6 +343,8 @@ X_train_model = X_train_model.reset_index(drop=True)
 X_validation = X_validation.reset_index(drop=True)
 y_train_model = y_train_model.reset_index(drop=True)
 y_validation = y_validation.reset_index(drop=True)
+benchmark_train = benchmark_train.reset_index(drop=True)
+benchmark_validation = benchmark_validation.reset_index(drop=True)
 
 # Prepare holdout datasets once to reuse across later cells.
 X_test = prepare_features(test_df, FEATURE_COLUMNS)
@@ -337,6 +359,19 @@ else:
     external_features = None
     external_labels = None
 
+benchmark_frames: Dict[str, pd.DataFrame] = {
+    "Train": benchmark_train,
+    "Validation": benchmark_validation,
+    "MIMIC test": test_df.loc[:, available_benchmark_columns].reset_index(drop=True),
+}
+if external_features is not None and TARGET_LABEL in external_df.columns:
+    external_benchmark_columns = [
+        column for column in available_benchmark_columns if column in external_df.columns
+    ]
+    if external_benchmark_columns:
+        benchmark_frames["eICU external"] = (
+            external_df.loc[:, external_benchmark_columns].reset_index(drop=True)
+        )
 
 # %% [markdown]
 # ## Classical model benchmarks
@@ -349,6 +384,7 @@ else:
 
 baseline_feature_frames: Dict[str, pd.DataFrame] = {
     "Train": X_train_model,
+    "Validation": X_validation,
     "MIMIC test": X_test,
 }
 if external_features is not None:
@@ -414,6 +450,7 @@ baseline_models: Dict[str, Pipeline] = {
 
 baseline_label_sets: Dict[str, pd.Series] = {
     "Train": y_train_model,
+    "Validation": y_validation,
     "MIMIC test": y_test,
 }
 if external_labels is not None:
@@ -768,15 +805,59 @@ for dataset_name in benchmark_datasets:
 # evaluation helpers. The exported artefacts include per-dataset Excel sheets,
 # summary tables, and optional warnings when probability columns require
 # renormalisation.
-
+#
 # %%
 
-bootstrap_results: Dict[str, Dict[str, pd.DataFrame]] = {}
-bootstrap_overall_frames: List[pd.DataFrame] = []
-bootstrap_per_class_frames: List[pd.DataFrame] = []
-bootstrap_warnings_frames: List[pd.DataFrame] = []
-bootstrap_overall_record_frames: List[pd.DataFrame] = []
-bootstrap_per_class_record_frames: List[pd.DataFrame] = []
+clinical_score_models: Dict[str, LogisticRegression] = {}
+if available_benchmark_columns:
+    for column in available_benchmark_columns:
+        if column not in benchmark_train.columns:
+            continue
+        score_frame = benchmark_train[[column]]
+        if score_frame.empty:
+            continue
+        try:
+            estimator = LogisticRegression(max_iter=1000, solver="lbfgs")
+            estimator.fit(score_frame, y_train_model)
+        except ValueError as exc:
+            print(
+                f"Skipping calibration for clinical score '{column}' because "
+                f"fitting failed: {exc}"
+            )
+            continue
+        clinical_score_models[column] = estimator
+
+
+def _format_metric_with_ci(
+    value: object, low: Optional[object], high: Optional[object]
+) -> str:
+    """Format ``value`` with its confidence interval if available."""
+
+    try:
+        if pd.isna(value):
+            return "NA"
+    except TypeError:
+        if value is None:
+            return "NA"
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return "NA"
+
+    for bound in (low, high):
+        try:
+            if pd.isna(bound):
+                return f"{val:.3f}"
+        except TypeError:
+            if bound is None:
+                return f"{val:.3f}"
+    try:
+        return f"{val:.3f} ({float(low):.3f}, {float(high):.3f})"
+    except (TypeError, ValueError):
+        return f"{val:.3f}"
+
+
+model_prediction_frames: Dict[str, Dict[str, pd.DataFrame]] = {}
 
 model_classes_array = getattr(model, "_classes", None)
 if model_classes_array is None or len(model_classes_array) == 0:
@@ -784,10 +865,12 @@ if model_classes_array is None or len(model_classes_array) == 0:
 class_value_list = list(model_classes_array)
 class_name_strings = [str(value) for value in class_value_list]
 positive_label_name = class_name_strings[-1] if len(class_name_strings) == 2 else None
+
+suave_prediction_tables: Dict[str, pd.DataFrame] = {}
 for dataset_name, (features, labels) in evaluation_datasets.items():
     dataset_probabilities = probability_map[dataset_name]
     positive_probs = extract_positive_probabilities(dataset_probabilities)
-    if len(class_value_list) == 2:
+    if len(class_value_list) == 2 and positive_probs is not None:
         negative_label = class_value_list[0]
         positive_label = class_value_list[-1]
         dataset_predictions = np.where(
@@ -795,57 +878,266 @@ for dataset_name, (features, labels) in evaluation_datasets.items():
         )
     else:
         dataset_predictions = model.predict(features)
-    prediction_df = build_prediction_dataframe(
+    suave_prediction_tables[dataset_name] = build_prediction_dataframe(
         dataset_probabilities,
         labels,
         dataset_predictions,
         class_name_strings,
     )
+model_prediction_frames["SUAVE"] = suave_prediction_tables
 
-    results = evaluate_predictions(
-        prediction_df,
-        label_col="label",
-        pred_col="y_pred",
-        positive_label=positive_label_name,
-        bootstrap_n=1000,
-        random_state=RANDOM_STATE,
-    )
-    bootstrap_results[dataset_name] = results
+for baseline_name in baseline_models.keys():
+    baseline_tables: Dict[str, pd.DataFrame] = {}
+    for dataset_name, probability_lookup in baseline_probability_map.items():
+        baseline_probs = probability_lookup.get(baseline_name)
+        labels = label_map.get(dataset_name)
+        if baseline_probs is None or labels is None:
+            continue
+        baseline_prob_array = np.asarray(baseline_probs)
+        if len(class_name_strings) == 2 and baseline_prob_array.ndim == 1:
+            negative_label = class_value_list[0]
+            positive_label = class_value_list[-1]
+            probability_matrix = np.column_stack(
+                [1.0 - baseline_prob_array, baseline_prob_array]
+            )
+            predictions = np.where(
+                baseline_prob_array >= 0.5, positive_label, negative_label
+            )
+            class_names_for_baseline = class_name_strings
+        else:
+            estimator = baseline_models.get(baseline_name)
+            feature_frame = baseline_feature_frames.get(dataset_name)
+            if estimator is None or feature_frame is None:
+                continue
+            probability_matrix = estimator.predict_proba(feature_frame)
+            predictions = estimator.predict(feature_frame)
+            class_names_for_baseline = [
+                str(cls) for cls in getattr(estimator, "classes_", [])
+            ]
+        baseline_tables[dataset_name] = build_prediction_dataframe(
+            probability_matrix,
+            labels,
+            predictions,
+            class_names_for_baseline,
+        )
+    if baseline_tables:
+        model_prediction_frames[baseline_name] = baseline_tables
 
-    overall_df = results["overall"].copy()
-    overall_df.insert(0, "Dataset", dataset_name)
-    overall_df.insert(0, "Target", TARGET_LABEL)
-    bootstrap_overall_frames.append(overall_df)
-
-    per_class_df = results["per_class"].copy()
-    per_class_df.insert(0, "Dataset", dataset_name)
-    per_class_df.insert(0, "Target", TARGET_LABEL)
-    bootstrap_per_class_frames.append(per_class_df)
-
-    overall_records_df = results.get("bootstrap_overall_records")
-    if overall_records_df is not None and not overall_records_df.empty:
-        overall_records_copy = overall_records_df.copy()
-        overall_records_copy.insert(0, "Dataset", dataset_name)
-        overall_records_copy.insert(0, "Target", TARGET_LABEL)
-        bootstrap_overall_record_frames.append(overall_records_copy)
-
-    per_class_records_df = results.get("bootstrap_per_class_records")
-    if per_class_records_df is not None and not per_class_records_df.empty:
-        per_class_records_copy = per_class_records_df.copy()
-        per_class_records_copy.insert(0, "Dataset", dataset_name)
-        per_class_records_copy.insert(0, "Target", TARGET_LABEL)
-        bootstrap_per_class_record_frames.append(per_class_records_copy)
-
-    warnings_df = results.get("warnings")
-    if warnings_df is not None and not warnings_df.empty:
-        warnings_copy = warnings_df.copy()
-        warnings_copy.insert(0, "Dataset", dataset_name)
-        warnings_copy.insert(0, "Target", TARGET_LABEL)
-        bootstrap_warnings_frames.append(warnings_copy)
+for score_name, estimator in clinical_score_models.items():
+    score_tables: Dict[str, pd.DataFrame] = {}
+    estimator_class_names = [str(cls) for cls in getattr(estimator, "classes_", [])]
+    if not estimator_class_names:
+        continue
+    for dataset_name, score_frame in benchmark_frames.items():
+        if dataset_name not in label_map or score_name not in score_frame.columns:
+            continue
+        probability_matrix = estimator.predict_proba(score_frame[[score_name]])
+        predictions = estimator.predict(score_frame[[score_name]])
+        score_tables[dataset_name] = build_prediction_dataframe(
+            probability_matrix,
+            label_map[dataset_name],
+            predictions,
+            estimator_class_names,
+        )
+    if score_tables:
+        model_prediction_frames[score_name] = score_tables
 
 
-bootstrap_overall_df = pd.concat(bootstrap_overall_frames, ignore_index=True)
-bootstrap_per_class_df = pd.concat(bootstrap_per_class_frames, ignore_index=True)
+bootstrap_results: Dict[str, Dict[str, Dict[str, pd.DataFrame]]] = {}
+bootstrap_overall_frames: List[pd.DataFrame] = []
+bootstrap_per_class_frames: List[pd.DataFrame] = []
+bootstrap_warnings_frames: List[pd.DataFrame] = []
+bootstrap_overall_record_frames: List[pd.DataFrame] = []
+bootstrap_per_class_record_frames: List[pd.DataFrame] = []
+
+for model_name, dataset_tables in model_prediction_frames.items():
+    model_dir = BOOTSTRAP_DIR / _sanitise_path_component(model_name)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    model_results: Dict[str, Dict[str, pd.DataFrame]] = {}
+    model_overall_frames: List[pd.DataFrame] = []
+    model_per_class_frames: List[pd.DataFrame] = []
+    model_overall_record_frames: List[pd.DataFrame] = []
+    model_per_class_record_frames: List[pd.DataFrame] = []
+    model_warning_frames: List[pd.DataFrame] = []
+
+    for dataset_name, prediction_df in dataset_tables.items():
+        results = evaluate_predictions(
+            prediction_df,
+            label_col="label",
+            pred_col="y_pred",
+            positive_label=positive_label_name,
+            bootstrap_n=1000,
+            random_state=RANDOM_STATE,
+        )
+        model_results[dataset_name] = results
+
+        dataset_slug = _sanitise_path_component(dataset_name.lower())
+
+        overall_df = results["overall"].copy()
+        overall_augmented = overall_df.copy()
+        overall_augmented.insert(0, "Dataset", dataset_name)
+        overall_augmented.insert(0, "Model", model_name)
+        overall_augmented.insert(0, "Target", TARGET_LABEL)
+        bootstrap_overall_frames.append(overall_augmented)
+        model_overall_frames.append(overall_augmented)
+        overall_df.to_csv(model_dir / f"{dataset_slug}_overall.csv", index=False)
+
+        per_class_df = results["per_class"].copy()
+        per_class_augmented = per_class_df.copy()
+        per_class_augmented.insert(0, "Dataset", dataset_name)
+        per_class_augmented.insert(0, "Model", model_name)
+        per_class_augmented.insert(0, "Target", TARGET_LABEL)
+        bootstrap_per_class_frames.append(per_class_augmented)
+        model_per_class_frames.append(per_class_augmented)
+        per_class_df.to_csv(model_dir / f"{dataset_slug}_per_class.csv", index=False)
+
+        overall_records_df = results.get("bootstrap_overall_records")
+        if overall_records_df is not None and not overall_records_df.empty:
+            overall_records_copy = overall_records_df.copy()
+            overall_records_copy.insert(0, "Dataset", dataset_name)
+            overall_records_copy.insert(0, "Model", model_name)
+            overall_records_copy.insert(0, "Target", TARGET_LABEL)
+            bootstrap_overall_record_frames.append(overall_records_copy)
+            model_overall_record_frames.append(overall_records_copy)
+            overall_records_df.to_csv(
+                model_dir / f"{dataset_slug}_bootstrap_overall_records.csv",
+                index=False,
+            )
+
+        per_class_records_df = results.get("bootstrap_per_class_records")
+        if per_class_records_df is not None and not per_class_records_df.empty:
+            per_class_records_copy = per_class_records_df.copy()
+            per_class_records_copy.insert(0, "Dataset", dataset_name)
+            per_class_records_copy.insert(0, "Model", model_name)
+            per_class_records_copy.insert(0, "Target", TARGET_LABEL)
+            bootstrap_per_class_record_frames.append(per_class_records_copy)
+            model_per_class_record_frames.append(per_class_records_copy)
+            per_class_records_df.to_csv(
+                model_dir / f"{dataset_slug}_bootstrap_per_class_records.csv",
+                index=False,
+            )
+
+        warnings_df = results.get("warnings")
+        if warnings_df is not None and not warnings_df.empty:
+            warnings_copy = warnings_df.copy()
+            warnings_copy.insert(0, "Dataset", dataset_name)
+            warnings_copy.insert(0, "Model", model_name)
+            warnings_copy.insert(0, "Target", TARGET_LABEL)
+            bootstrap_warnings_frames.append(warnings_copy)
+            model_warning_frames.append(warnings_copy)
+            warnings_df.to_csv(
+                model_dir / f"{dataset_slug}_warnings.csv", index=False
+            )
+
+    if model_results:
+        bootstrap_results[model_name] = model_results
+
+    if model_overall_frames:
+        combined_overall_df = pd.concat(model_overall_frames, ignore_index=True)
+        combined_overall_df.to_csv(
+            model_dir / "bootstrap_overall.csv", index=False
+        )
+    else:
+        combined_overall_df = pd.DataFrame()
+
+    if model_per_class_frames:
+        combined_per_class_df = pd.concat(
+            model_per_class_frames, ignore_index=True
+        )
+        combined_per_class_df.to_csv(
+            model_dir / "bootstrap_per_class.csv", index=False
+        )
+
+    if model_overall_record_frames:
+        combined_overall_records_df = pd.concat(
+            model_overall_record_frames, ignore_index=True
+        )
+        combined_overall_records_df.to_csv(
+            model_dir / "bootstrap_overall_records.csv", index=False
+        )
+
+    if model_per_class_record_frames:
+        combined_per_class_records_df = pd.concat(
+            model_per_class_record_frames, ignore_index=True
+        )
+        combined_per_class_records_df.to_csv(
+            model_dir / "bootstrap_per_class_records.csv", index=False
+        )
+
+    if model_warning_frames:
+        combined_warning_df = pd.concat(model_warning_frames, ignore_index=True)
+        combined_warning_df.to_csv(
+            model_dir / "bootstrap_warnings.csv", index=False
+        )
+
+    if not combined_overall_df.empty:
+        summary_df = combined_overall_df.copy()
+        metric_name_map = {
+            "roc_auc": "AUROC",
+            "accuracy": "ACC",
+            "f1_micro": "F1_micro",
+            "pr_auc": "AUPRC",
+        }
+        rename_map = {}
+        for metric_key, display_name in metric_name_map.items():
+            if metric_key in summary_df.columns:
+                rename_map[metric_key] = display_name
+            low_col = f"{metric_key}_ci_low"
+            high_col = f"{metric_key}_ci_high"
+            if low_col in summary_df.columns:
+                rename_map[low_col] = f"{display_name}_ci_low"
+            if high_col in summary_df.columns:
+                rename_map[high_col] = f"{display_name}_ci_high"
+        if rename_map:
+            summary_df = summary_df.rename(columns=rename_map)
+
+        summary_columns = ["Target", "Model", "Dataset"]
+        for display_name in ["AUROC", "ACC", "F1_micro", "AUPRC"]:
+            if display_name in summary_df.columns:
+                summary_columns.append(display_name)
+                low_col = f"{display_name}_ci_low"
+                high_col = f"{display_name}_ci_high"
+                if low_col in summary_df.columns:
+                    summary_columns.append(low_col)
+                if high_col in summary_df.columns:
+                    summary_columns.append(high_col)
+                ci_label = f"{display_name} (95% CI)"
+                summary_df[ci_label] = summary_df.apply(
+                    lambda row, name=display_name: _format_metric_with_ci(
+                        row.get(name),
+                        row.get(f"{name}_ci_low"),
+                        row.get(f"{name}_ci_high"),
+                    ),
+                    axis=1,
+                )
+                summary_columns.append(ci_label)
+        summary_df = summary_df.loc[:, summary_columns]
+        summary_df.to_csv(model_dir / "metric_summary.csv", index=False)
+
+    if model_results:
+        excel_path = model_dir / (
+            _sanitise_path_component(model_name.lower()) + "_bootstrap.xlsx"
+        )
+        write_results_to_excel_unique(
+            model_results,
+            str(excel_path),
+            include_warnings_sheet=True,
+        )
+
+
+bootstrap_overall_df: pd.DataFrame
+if bootstrap_overall_frames:
+    bootstrap_overall_df = pd.concat(bootstrap_overall_frames, ignore_index=True)
+else:
+    bootstrap_overall_df = pd.DataFrame()
+
+bootstrap_per_class_df: pd.DataFrame
+if bootstrap_per_class_frames:
+    bootstrap_per_class_df = pd.concat(bootstrap_per_class_frames, ignore_index=True)
+else:
+    bootstrap_per_class_df = pd.DataFrame()
+
 bootstrap_overall_path = BOOTSTRAP_DIR / f"bootstrap_overall_{TARGET_LABEL}.csv"
 bootstrap_per_class_path = BOOTSTRAP_DIR / f"bootstrap_per_class_{TARGET_LABEL}.csv"
 bootstrap_overall_df.to_csv(bootstrap_overall_path, index=False)
@@ -887,45 +1179,70 @@ if bootstrap_warnings_frames:
 else:
     bootstrap_warning_path = None
 
-bootstrap_excel_path = BOOTSTRAP_DIR / f"bootstrap_{TARGET_LABEL}.xlsx"
-write_results_to_excel_unique(
-    bootstrap_results,
-    str(bootstrap_excel_path),
-    include_warnings_sheet=True,
-)
+metrics_label_map = {
+    "roc_auc": "AUROC",
+    "accuracy": "ACC",
+    "f1_micro": "F1_micro",
+    "pr_auc": "AUPRC",
+}
+bootstrap_summary_df = bootstrap_overall_df.copy()
+rename_map = {}
+for metric_key, display_name in metrics_label_map.items():
+    if metric_key in bootstrap_summary_df.columns:
+        rename_map[metric_key] = display_name
+    low_col = f"{metric_key}_ci_low"
+    high_col = f"{metric_key}_ci_high"
+    if low_col in bootstrap_summary_df.columns:
+        rename_map[low_col] = f"{display_name}_ci_low"
+    if high_col in bootstrap_summary_df.columns:
+        rename_map[high_col] = f"{display_name}_ci_high"
+if rename_map:
+    bootstrap_summary_df = bootstrap_summary_df.rename(columns=rename_map)
 
-summary_metric_candidates = [
-    "accuracy",
-    "balanced_accuracy",
-    "f1_macro",
-    "recall_macro",
-    "specificity_macro",
-    "sensitivity_pos",
-    "specificity_pos",
-    "roc_auc",
-    "pr_auc",
-]
-summary_columns: List[str] = ["Target", "Dataset"]
-for metric_name in summary_metric_candidates:
-    if metric_name in bootstrap_overall_df.columns:
-        summary_columns.append(metric_name)
-        low_col = f"{metric_name}_ci_low"
-        high_col = f"{metric_name}_ci_high"
-        if low_col in bootstrap_overall_df.columns:
+summary_columns = ["Target", "Model", "Dataset"]
+for display_name in metrics_label_map.values():
+    if display_name in bootstrap_summary_df.columns:
+        summary_columns.append(display_name)
+        low_col = f"{display_name}_ci_low"
+        high_col = f"{display_name}_ci_high"
+        if low_col in bootstrap_summary_df.columns:
             summary_columns.append(low_col)
-        if high_col in bootstrap_overall_df.columns:
+        if high_col in bootstrap_summary_df.columns:
             summary_columns.append(high_col)
+        ci_label = f"{display_name} (95% CI)"
+        bootstrap_summary_df[ci_label] = bootstrap_summary_df.apply(
+            lambda row, name=display_name: _format_metric_with_ci(
+                row.get(name), row.get(f"{name}_ci_low"), row.get(f"{name}_ci_high")
+            ),
+            axis=1,
+        )
+        summary_columns.append(ci_label)
 
-bootstrap_summary_df = bootstrap_overall_df.loc[:, summary_columns]
+bootstrap_summary_df = bootstrap_summary_df.loc[:, summary_columns]
+
+required_datasets = ["Train", "Validation", "MIMIC test", "eICU external"]
+bootstrap_summary_df = bootstrap_summary_df[
+    bootstrap_summary_df["Dataset"].isin(required_datasets)
+].copy()
+bootstrap_summary_df["Dataset"] = pd.Categorical(
+    bootstrap_summary_df["Dataset"],
+    categories=required_datasets,
+    ordered=True,
+)
+bootstrap_summary_df = bootstrap_summary_df.sort_values(
+    ["Model", "Dataset"]
+).reset_index(drop=True)
+
 bootstrap_summary_path = BOOTSTRAP_DIR / f"bootstrap_summary_{TARGET_LABEL}.csv"
 bootstrap_summary_df.to_csv(bootstrap_summary_path, index=False)
 render_dataframe(
     bootstrap_summary_df,
-    title=f"Bootstrap performance with confidence intervals for {TARGET_LABEL}",
+    title=(
+        "Bootstrap performance with confidence intervals for "
+        f"{TARGET_LABEL}"
+    ),
     floatfmt=".3f",
 )
-
-
 # %% [markdown]
 # ## TSTR/TRTR comparison
 #
@@ -1612,9 +1929,6 @@ summary_lines.append(
 )
 summary_lines.append(
     f"- Per-class metrics: {bootstrap_per_class_path.relative_to(OUTPUT_DIR)}"
-)
-summary_lines.append(
-    f"- Excel workbook: {bootstrap_excel_path.relative_to(OUTPUT_DIR)}"
 )
 if bootstrap_overall_records_path is not None:
     summary_lines.append(
