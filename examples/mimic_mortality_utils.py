@@ -1546,11 +1546,14 @@ def iteratively_impute_clinical_scores(
     reference_features = feature_frames[reference_key]
 
     for column in available_columns:
+        reference_column = reference_scores[column]
+        if reference_column.isna().all():
+            continue
         imputer = IterativeImputer(max_iter=100, tol=1e-2)
         training_matrix = pd.concat(
             [
                 reference_features.reset_index(drop=True),
-                reference_scores[[column]].reset_index(drop=True),
+                reference_column.to_frame().reset_index(drop=True),
             ],
             axis=1,
         )
