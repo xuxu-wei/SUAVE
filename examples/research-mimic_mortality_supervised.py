@@ -146,6 +146,7 @@ FORCE_UPDATE_SUAVE = read_bool_env_flag(
     "FORCE_UPDATE_SUAVE",
     FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_SUAVE"],
 )
+INCLUDE_SUAVE_TRANSFER = read_bool_env_flag("INCLUDE_SUAVE_TRANSFER", False)
 
 IS_INTERACTIVE = is_interactive_session()
 CLI_REQUESTED_TRIAL_ID: Optional[int] = None
@@ -174,31 +175,33 @@ OUTPUT_DIR = resolve_analysis_output_root(analysis_config["output_dir_name"])
 analysis_dirs = prepare_analysis_output_directories(
     OUTPUT_DIR,
     (
-        "schema",
-        "features",
+        "data_schema",
+        "feature_engineering",
         "optuna",
-        "model",
-        "evaluation",
-        "bootstrap",
-        "baseline",
-        "transfer",
-        "distribution",
-        "privacy",
-        "visualisation",
+        "suave_model",
+        "calibration_uncertainty",
+        "evaluation_reports",
+        "bootstrap_analysis",
+        "baseline_models",
+        "tstr_trtr",
+        "distribution_shift",
+        "privacy_assessment",
+        "visualisations",
     ),
 )
 
-SCHEMA_DIR = analysis_dirs["schema"]
-FEATURE_ENGINEERING_DIR = analysis_dirs["features"]
+DATA_SCHEMA_DIR = analysis_dirs["data_schema"]
+FEATURE_ENGINEERING_DIR = analysis_dirs["feature_engineering"]
 OPTUNA_DIR = analysis_dirs["optuna"]
-MODEL_DIR = analysis_dirs["model"]
-EVALUATION_DIR = analysis_dirs["evaluation"]
-BOOTSTRAP_DIR = analysis_dirs["bootstrap"]
-BASELINE_DIR = analysis_dirs["baseline"]
-TRANSFER_DIR = analysis_dirs["transfer"]
-DISTRIBUTION_DIR = analysis_dirs["distribution"]
-PRIVACY_DIR = analysis_dirs["privacy"]
-VISUALISATION_DIR = analysis_dirs["visualisation"]
+SUAVE_MODEL_DIR = analysis_dirs["suave_model"]
+CALIBRATION_DIR = analysis_dirs["calibration_uncertainty"]
+EVALUATION_DIR = analysis_dirs["evaluation_reports"]
+BOOTSTRAP_DIR = analysis_dirs["bootstrap_analysis"]
+BASELINE_MODELS_DIR = analysis_dirs["baseline_models"]
+TSTR_TRTR_DIR = analysis_dirs["tstr_trtr"]
+DISTRIBUTION_SHIFT_DIR = analysis_dirs["distribution_shift"]
+PRIVACY_ASSESSMENT_DIR = analysis_dirs["privacy_assessment"]
+VISUALISATIONS_DIR = analysis_dirs["visualisations"]
 
 analysis_config["optuna_storage"] = (
     f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
@@ -242,7 +245,7 @@ render_dataframe(schema_df, title="Schema overview", floatfmt=None)
 model_loading_plan: ModelLoadingPlan = resolve_model_loading_plan(
     target_label=TARGET_LABEL,
     analysis_config=analysis_config,
-    model_dir=MODEL_DIR,
+    model_dir=SUAVE_MODEL_DIR,
     optuna_dir=OPTUNA_DIR,
     schema=schema,
     is_interactive=IS_INTERACTIVE,
@@ -479,7 +482,7 @@ train_features_imputed = baseline_imputed_features["Train"]
 train_labels = baseline_label_sets["Train"]
 
 baseline_model_cache_path = (
-    BASELINE_DIR / f"baseline_estimators_{TARGET_LABEL}.joblib"
+    BASELINE_MODELS_DIR / f"baseline_estimators_{TARGET_LABEL}.joblib"
 )
 
 if baseline_model_cache_path.exists() and not FORCE_UPDATE_BENCHMARK_MODEL:
@@ -524,7 +527,7 @@ for model_name, estimator in baseline_models.items():
 baseline_df = pd.DataFrame(baseline_rows)
 baseline_order = ["Model", "Dataset", *metric_columns, "Notes"]
 baseline_df = baseline_df.loc[:, baseline_order]
-baseline_path = BASELINE_DIR / f"baseline_models_{TARGET_LABEL}.csv"
+baseline_path = BASELINE_MODELS_DIR / f"baseline_models_{TARGET_LABEL}.csv"
 baseline_df.to_csv(baseline_path, index=False)
 render_dataframe(
     baseline_df,
@@ -546,7 +549,7 @@ if IS_INTERACTIVE and pareto_trials:
     pareto_summary = summarise_pareto_trials(
         pareto_trials,
         manifest=model_manifest,
-        model_dir=MODEL_DIR,
+        model_dir=SUAVE_MODEL_DIR,
     )
     render_dataframe(
         pareto_summary,
@@ -557,7 +560,7 @@ if IS_INTERACTIVE and pareto_trials:
     model_loading_plan = confirm_model_loading_plan_selection(
         model_loading_plan,
         is_interactive=IS_INTERACTIVE,
-        model_dir=MODEL_DIR,
+        model_dir=SUAVE_MODEL_DIR,
     )
 
 
@@ -654,7 +657,7 @@ if model is None:
 
 if model_was_trained:
     model_output_path = selected_model_path or (
-        MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
+        SUAVE_MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
     )
     model_output_path.parent.mkdir(parents=True, exist_ok=True)
     model.save(model_output_path)
@@ -685,7 +688,7 @@ else:
 
 if calibrator_was_fitted:
     calibrator_output_path = selected_calibrator_path or (
-        MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
+        CALIBRATION_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
     )
     calibrator_output_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(calibrator, calibrator_output_path)
@@ -752,7 +755,7 @@ render_dataframe(
     floatfmt=".3f",
 )
 
-calibration_path = EVALUATION_DIR / f"calibration_{TARGET_LABEL}.png"
+calibration_path = CALIBRATION_DIR / f"calibration_{TARGET_LABEL}.png"
 plot_calibration_curves(
     probability_map, label_map, target_name=TARGET_LABEL, output_path=calibration_path
 )
@@ -1267,7 +1270,7 @@ tstr_bootstrap_overall_records_path: Optional[Path] = None
 tstr_bootstrap_per_class_records_path: Optional[Path] = None
 
 transfer_results_cache_path = (
-    TRANSFER_DIR / f"tstr_trtr_results_{TARGET_LABEL}.joblib"
+    TSTR_TRTR_DIR / f"tstr_trtr_results_{TARGET_LABEL}.joblib"
 )
 
 if TARGET_LABEL != "in_hospital_mortality":
@@ -1302,7 +1305,7 @@ else:
         )
 
     model_factories = dict(make_baseline_model_factories(RANDOM_STATE))
-    if optuna_best_params:
+    if INCLUDE_SUAVE_TRANSFER and optuna_best_params:
         suave_fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
 
         def make_suave_transfer_estimator() -> _TSTRSuaveEstimator:
@@ -1314,7 +1317,7 @@ else:
             return _TSTRSuaveEstimator(base_model, suave_fit_kwargs)
 
         model_factories["SUAVE (Optuna best)"] = make_suave_transfer_estimator
-    else:
+    elif INCLUDE_SUAVE_TRANSFER and not optuna_best_params:
         print(
             "Skipping SUAVE TSTR/TRTR baseline because no Optuna parameters are available."
         )
@@ -1327,15 +1330,23 @@ else:
 
     cached_transfer_payload: Optional[Dict[str, Any]] = None
     if should_use_cached_transfer:
-        cached_transfer_payload = joblib.load(transfer_results_cache_path)
-        tstr_summary_df = cached_transfer_payload.get("summary_df")
-        tstr_plot_df = cached_transfer_payload.get("plot_df")
-        tstr_nested_results = cached_transfer_payload.get("nested_results")
-        print(
-            "Loaded cached TSTR/TRTR evaluation results from",
-            transfer_results_cache_path,
-        )
-    else:
+        payload = joblib.load(transfer_results_cache_path)
+        cached_model_order = payload.get("model_order")
+        expected_model_order = list(model_factories.keys())
+        if list(cached_model_order or []) == expected_model_order:
+            cached_transfer_payload = payload
+            tstr_summary_df = cached_transfer_payload.get("summary_df")
+            tstr_plot_df = cached_transfer_payload.get("plot_df")
+            tstr_nested_results = cached_transfer_payload.get("nested_results")
+            print(
+                "Loaded cached TSTR/TRTR evaluation results from",
+                transfer_results_cache_path,
+            )
+        else:
+            print(
+                "Discarding cached TSTR/TRTR evaluation results because the model roster changed.",
+            )
+    if cached_transfer_payload is None:
         (
             tstr_summary_df,
             tstr_plot_df,
@@ -1358,10 +1369,8 @@ else:
         }
         joblib.dump(transfer_payload, transfer_results_cache_path)
         print("Saved TSTR/TRTR evaluation results to", transfer_results_cache_path)
-    tstr_summary_path = TRANSFER_DIR / f"tstr_trtr_summary_{TARGET_LABEL}.csv"
-    tstr_plot_path = TRANSFER_DIR / f"tstr_trtr_plot_data_{TARGET_LABEL}.csv"
-    tstr_summary_df.to_csv(tstr_summary_path, index=False)
-    tstr_plot_df.to_csv(tstr_plot_path, index=False)
+    transfer_overall_df: Optional[pd.DataFrame] = None
+    transfer_per_class_df: Optional[pd.DataFrame] = None
     render_dataframe(
         tstr_summary_df,
         title="TSTR/TRTR supervised evaluation",
@@ -1372,9 +1381,7 @@ else:
         training_order = cached_transfer_payload.get(
             "training_order", list(training_sets_numeric.keys())
         )
-        model_order = cached_transfer_payload.get(
-            "model_order", list(model_factories.keys())
-        )
+        model_order = list(model_factories.keys())
     else:
         training_order = list(training_sets_numeric.keys())
         model_order = list(model_factories.keys())
@@ -1386,7 +1393,7 @@ else:
                 evaluation_dataset=evaluation_name,
                 training_order=training_order,
                 model_order=model_order,
-                output_dir=TRANSFER_DIR,
+                output_dir=TSTR_TRTR_DIR,
                 target_label=TARGET_LABEL,
             )
             if figure_path is not None:
@@ -1417,76 +1424,96 @@ else:
                         transfer_per_class_records.append(per_class_copy)
         if transfer_overall_records:
             transfer_overall_df = pd.concat(transfer_overall_records, ignore_index=True)
-            tstr_bootstrap_overall_records_path = (
-                TRANSFER_DIR
-                / f"tstr_trtr_bootstrap_overall_records_{TARGET_LABEL}.csv"
-            )
-            transfer_overall_df.to_csv(
-                tstr_bootstrap_overall_records_path, index=False
-            )
         if transfer_per_class_records:
             transfer_per_class_df = pd.concat(
                 transfer_per_class_records, ignore_index=True
             )
-            tstr_bootstrap_per_class_records_path = (
-                TRANSFER_DIR
-                / f"tstr_trtr_bootstrap_per_class_records_{TARGET_LABEL}.csv"
+
+    tstr_excel_path = TSTR_TRTR_DIR / "TSTR_TRTR_eval.xlsx"
+    with pd.ExcelWriter(tstr_excel_path) as writer:
+        tstr_summary_df.to_excel(writer, sheet_name="summary", index=False)
+        tstr_plot_df.to_excel(writer, sheet_name="plot_data", index=False)
+        if transfer_overall_df is not None:
+            transfer_overall_df.to_excel(
+                writer, sheet_name="bootstrap_overall", index=False
             )
-            transfer_per_class_df.to_csv(
-                tstr_bootstrap_per_class_records_path, index=False
+        if transfer_per_class_df is not None:
+            transfer_per_class_df.to_excel(
+                writer, sheet_name="bootstrap_per_class", index=False
             )
+    print("Saved TSTR/TRTR evaluation workbook to", tstr_excel_path)
 
-    def make_c2st_xgboost() -> Any:
-        from xgboost import XGBClassifier
-
-        return XGBClassifier(
-            objective="binary:logistic",
-            eval_metric="auc",
-            n_estimators=200,
-            learning_rate=0.05,
-            max_depth=4,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_lambda=1.0,
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-            tree_method="hist",
-            use_label_encoder=False,
-        )
-
-    def make_c2st_logistic() -> Pipeline:
-        return Pipeline(
-            [
-                ("scaler", StandardScaler()),
-                (
-                    "classifier",
-                    LogisticRegression(
-                        class_weight="balanced",
-                        max_iter=1000,
-                        solver="lbfgs",
-                    ),
-                ),
-            ]
-        )
-
+    c2st_model_factories = make_baseline_model_factories(RANDOM_STATE)
     c2st_metrics = classifier_two_sample_test(
         real_features_numeric.to_numpy(),
         synthesis_features_numeric.to_numpy(),
-        model_factories={
-            "xgboost": make_c2st_xgboost,
-            "logistic": make_c2st_logistic,
-        },
+        model_factories=c2st_model_factories,
         random_state=RANDOM_STATE,
         n_bootstrap=1000,
     )
-    c2st_df = pd.DataFrame([{"target": TARGET_LABEL, **c2st_metrics}])
-    c2st_path = DISTRIBUTION_DIR / "c2st_distribution_test.csv"
-    c2st_df.to_csv(c2st_path, index=False)
+    c2st_primary = pd.DataFrame(
+        [
+            {
+                "target": TARGET_LABEL,
+                "gbdt_auc": c2st_metrics.get("gbdt_auc", float("nan")),
+                "gbdt_auc_ci_low": c2st_metrics.get("gbdt_auc_ci_low", float("nan")),
+                "gbdt_auc_ci_high": c2st_metrics.get("gbdt_auc_ci_high", float("nan")),
+                "gbdt_bootstrap_samples": c2st_metrics.get(
+                    "gbdt_bootstrap_samples", float("nan")
+                ),
+                "n_real_samples": c2st_metrics.get("n_real_samples", float("nan")),
+                "n_synthetic_samples": c2st_metrics.get(
+                    "n_synthetic_samples", float("nan")
+                ),
+                "n_features": c2st_metrics.get("n_features", float("nan")),
+                "cv_splits": c2st_metrics.get("cv_splits", float("nan")),
+            }
+        ]
+    )
+    secondary_rows: List[Dict[str, object]] = []
+    for model_name in c2st_model_factories:
+        if model_name == "GBDT":
+            continue
+        prefix = model_name.lower().replace(" ", "_")
+        auc_key = f"{prefix}_auc"
+        if auc_key not in c2st_metrics:
+            continue
+        secondary_rows.append(
+            {
+                "target": TARGET_LABEL,
+                "model": model_name,
+                "auc": c2st_metrics.get(auc_key, float("nan")),
+                "auc_ci_low": c2st_metrics.get(f"{prefix}_auc_ci_low", float("nan")),
+                "auc_ci_high": c2st_metrics.get(f"{prefix}_auc_ci_high", float("nan")),
+                "bootstrap_samples": c2st_metrics.get(
+                    f"{prefix}_bootstrap_samples", float("nan")
+                ),
+            }
+        )
+    c2st_secondary = pd.DataFrame(secondary_rows)
     render_dataframe(
-        c2st_df,
-        title="Classifier two-sample test (C2ST)",
+        c2st_primary,
+        title="Classifier two-sample test (C2ST) - GBDT",
         floatfmt=".3f",
     )
+    if not c2st_secondary.empty:
+        render_dataframe(
+            c2st_secondary,
+            title="Classifier two-sample test (C2ST) - secondary models",
+            floatfmt=".3f",
+        )
+
+    c2st_workbook_path = DISTRIBUTION_SHIFT_DIR / "C2ST-distribution_shift.xlsx"
+    with pd.ExcelWriter(c2st_workbook_path) as writer:
+        c2st_primary.to_excel(writer, sheet_name="gbdt_primary", index=False)
+        if not c2st_secondary.empty:
+            c2st_secondary.to_excel(
+                writer, sheet_name="secondary_models", index=False
+            )
+        pd.DataFrame([{k: v for k, v in c2st_metrics.items()}]).to_excel(
+            writer, sheet_name="raw_metrics", index=False
+        )
+    print("Saved C2ST results to", c2st_workbook_path)
 
     global_mmd, global_mmd_p_value = rbf_mmd(
         real_features_numeric,
@@ -1546,7 +1573,7 @@ else:
             }
         )
     distribution_df = pd.DataFrame(distribution_rows)
-    distribution_path = DISTRIBUTION_DIR / "distribution_shift_metrics.xlsx"
+    distribution_path = DISTRIBUTION_SHIFT_DIR / "metrics_distribution_shift.xlsx"
     with pd.ExcelWriter(distribution_path) as writer:
         distribution_overall_df.to_excel(writer, sheet_name="overall", index=False)
         distribution_df.to_excel(writer, sheet_name="per_feature", index=False)
@@ -1570,8 +1597,9 @@ else:
         np.asarray(y_test),
     )
     membership_df = pd.DataFrame([{"target": TARGET_LABEL, **membership_metrics}])
-    membership_path = PRIVACY_DIR / "membership_inference.csv"
-    membership_df.to_csv(membership_path, index=False)
+    membership_path = PRIVACY_ASSESSMENT_DIR / "membership_inference.xlsx"
+    with pd.ExcelWriter(membership_path) as writer:
+        membership_df.to_excel(writer, sheet_name="summary", index=False)
     render_dataframe(
         membership_df,
         title="Membership inference baseline",
@@ -1590,7 +1618,7 @@ else:
 # %%
 
 latent_correlation_base = (
-    VISUALISATION_DIR / f"latent_clinical_correlation_{TARGET_LABEL}"
+    VISUALISATIONS_DIR / f"latent_clinical_correlation_{TARGET_LABEL}"
 )
 overall_corr_path = latent_correlation_base.with_name(
     f"{latent_correlation_base.name}_correlations.csv"
@@ -1803,7 +1831,7 @@ latent_features = {
     name: features for name, (features, _) in evaluation_datasets.items()
 }
 latent_labels = {name: labels for name, (_, labels) in evaluation_datasets.items()}
-latent_path = VISUALISATION_DIR / f"latent_{TARGET_LABEL}.png"
+latent_path = VISUALISATIONS_DIR / f"latent_{TARGET_LABEL}.png"
 plot_latent_space(
     model,
     latent_features,
