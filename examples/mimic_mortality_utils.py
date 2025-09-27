@@ -71,6 +71,10 @@ BENCHMARK_COLUMNS = (
     "OASIS",
 )  # do not include in training. Only use for benchamrk validation.
 
+#: Strategy for evaluating clinical score benchmarks.
+#: ``"imputed"`` (default) applies iterative imputation before evaluation, any
+#: other value keeps observed scores and skips rows with missing values. Keep
+#: this comment in sync with ``analysis_config.py``.
 CLINICAL_SCORE_BENCHMARK_STRATEGY: str = "imputed"
 
 VALIDATION_SIZE: float = 0.2
