@@ -2355,10 +2355,21 @@ def build_prediction_dataframe(
                 for idx in range(prob_matrix.shape[1])
             }
 
+    label_array = np.asarray(labels)
+    prediction_array = np.asarray(predictions)
+    if prediction_array.dtype != label_array.dtype:
+        try:
+            label_array = label_array.astype(prediction_array.dtype, copy=False)
+        except (TypeError, ValueError):
+            try:
+                prediction_array = prediction_array.astype(label_array.dtype, copy=False)
+            except (TypeError, ValueError):
+                label_array = label_array.astype(object)
+                prediction_array = prediction_array.astype(object)
     base_df = pd.DataFrame(
         {
-            "label": np.asarray(labels),
-            "y_pred": np.asarray(predictions),
+            "label": label_array,
+            "y_pred": prediction_array,
         }
     )
     if proba_dict:
