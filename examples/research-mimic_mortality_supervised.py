@@ -831,7 +831,7 @@ plot_calibration_curves(
 
 # %%
 
-benchmark_datasets = ["Train", "MIMIC test", "eICU external"]
+benchmark_datasets = ["Train", "Validation", "MIMIC test", "eICU external"]
 benchmark_curve_paths: List[Path] = []
 
 for dataset_name in benchmark_datasets:
