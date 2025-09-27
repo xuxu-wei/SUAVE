@@ -62,6 +62,25 @@ DATASET_FILENAMES: Dict[str, Optional[str]] = {
     "external_validation": "eicu-mortality-external_val.tsv",
 }
 
+# 🟢 Human-readable labels for standard dataset splits used in reports。键值必须
+#     与 :data:`DATASET_FILENAMES`、下游缓存文件命名保持一致。若无外部验证集，请移除
+#     ``"external_validation"`` 项并在 :data:`BASELINE_DATASET_ORDER` 中同步删除。
+BASELINE_DATASET_LABELS: Dict[str, str] = {
+    "train": "Train",
+    "validation": "Validation",
+    "internal_test": "MIMIC test",
+    "external_validation": "eICU external",
+}
+
+# 🟡 Preferred ordering of dataset labels when generating tables and figures。
+#     该顺序会影响生成的表格/图像，亦用于遍历基线模型缓存。请确保仅包含实际存在的数据集键。
+BASELINE_DATASET_ORDER: Tuple[str, ...] = (
+    "train",
+    "validation",
+    "internal_test",
+    "external_validation",
+)
+
 # 🟡 Random seed reused across dataset splits, baseline models, and Optuna.
 RANDOM_STATE: int = 20201021
 
@@ -144,25 +163,6 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "privacy_assessment": "11_privacy_assessment",
     "visualisations": "12_visualizations",
 }
-
-# 🟢 Human-readable labels for standard dataset splits used in reports。键值必须
-#     与 :data:`DATASET_FILENAMES`、下游缓存文件命名保持一致。若无外部验证集，请移除
-#     ``"external_validation"`` 项并在 :data:`BASELINE_DATASET_ORDER` 中同步删除。
-BASELINE_DATASET_LABELS: Dict[str, str] = {
-    "train": "Train",
-    "validation": "Validation",
-    "internal_test": "MIMIC test",
-    "external_validation": "eICU external",
-}
-
-# 🟡 Preferred ordering of dataset labels when generating tables and figures。
-#     该顺序会影响生成的表格/图像，亦用于遍历基线模型缓存。请确保仅包含实际存在的数据集键。
-BASELINE_DATASET_ORDER: Tuple[str, ...] = (
-    "train",
-    "validation",
-    "internal_test",
-    "external_validation",
-)
 
 
 # =============================================================================
