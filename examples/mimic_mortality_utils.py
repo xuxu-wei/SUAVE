@@ -136,13 +136,14 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
 #: when Optuna artefacts are unavailable, allowing callers to refresh the
 #: locally persisted SUAVE model that otherwise acts as a fallback.
 FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
-    "FORCE_UPDATE_BENCHMARK_MODEL": False,
+    "FORCE_UPDATE_BENCHMARK_MODEL": True,
     "FORCE_UPDATE_TSTR_MODEL": True,
     "FORCE_UPDATE_TRTR_MODEL": True,
     "FORCE_UPDATE_SYNTHETIC_DATA": True,
     "FORCE_UPDATE_C2ST_MODEL": True,
     "FORCE_UPDATE_DISTRIBUTION_SHIFT": True,
     "FORCE_UPDATE_SUAVE": False,
+    "FORCE_UPDATE_BOOTSTRAP": True,
 }
 
 ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
