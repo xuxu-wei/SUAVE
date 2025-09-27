@@ -67,9 +67,6 @@ from mimic_mortality_utils import (  # noqa: E402
     PATH_GRAPH_NODE_GROUPS,
     PATH_GRAPH_NODE_LABELS,
     build_analysis_config,
-    choose_preferred_pareto_trial,
-    load_optuna_study,
-    make_study_name,
     prepare_analysis_output_directories,
     parse_script_arguments,
     summarise_pareto_trials,
@@ -84,11 +81,11 @@ from mimic_mortality_utils import (  # noqa: E402
     fit_isotonic_calibrator,
     is_interactive_session,
     load_dataset,
-    load_model_manifest,
     load_or_create_iteratively_imputed_features,
-    manifest_artifact_paths,
-    manifest_artifacts_exist,
+    ModelLoadingPlan,
     make_baseline_model_factories,
+    resolve_model_loading_plan,
+    confirm_model_loading_plan_selection,
     resolve_suave_fit_kwargs,
     resolve_analysis_output_root,
     plot_benchmark_curves,
@@ -210,71 +207,23 @@ schema_df = schema_to_dataframe(schema).reset_index(drop=True)
 render_dataframe(schema_df, title="Schema overview", floatfmt=None)
 
 
+model_loading_plan: ModelLoadingPlan = resolve_model_loading_plan(
+    target_label=TARGET_LABEL,
+    analysis_config=analysis_config,
+    model_dir=MODEL_DIR,
+    optuna_dir=OPTUNA_DIR,
+    schema=schema,
+    is_interactive=IS_INTERACTIVE,
+    cli_requested_trial_id=CLI_REQUESTED_TRIAL_ID,
+)
+
+optuna_best_info = model_loading_plan.optuna_best_info
+optuna_best_params = model_loading_plan.optuna_best_params
+model_manifest = model_loading_plan.model_manifest
+pareto_trials = model_loading_plan.pareto_trials
+
+
 # %%
-def load_optuna_results(
-    output_dir: Path,
-    target_label: str,
-    *,
-    study_prefix: Optional[str],
-    storage: Optional[str],
-) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    """Load the best Optuna trial metadata and parameters if available."""
-
-    best_info_path = output_dir / f"optuna_best_info_{target_label}.json"
-    best_params_path = output_dir / f"optuna_best_params_{target_label}.json"
-
-    best_info: Dict[str, Any] = (
-        json.loads(best_info_path.read_text()) if best_info_path.exists() else {}
-    )
-    best_params: Dict[str, Any] = (
-        json.loads(best_params_path.read_text()) if best_params_path.exists() else {}
-    )
-
-    study_name = make_study_name(study_prefix, target_label)
-    if (not best_info or not best_params) and storage and study_name:
-        try:
-            import optuna  # type: ignore
-        except ImportError:
-            optuna = None  # type: ignore
-        if optuna is not None:  # pragma: no cover - optuna available in examples env
-            study = optuna.load_study(study_name=study_name, storage=storage)
-            feasible_trials = [
-                trial for trial in study.trials if trial.values is not None
-            ]
-            if feasible_trials:
-
-                def sort_key(trial: "optuna.trial.FrozenTrial") -> Tuple[float, float]:
-                    values = trial.values or (float("nan"), float("inf"))
-                    primary = values[0]
-                    secondary = values[1]
-                    return (
-                        primary,
-                        -secondary if np.isfinite(secondary) else float("-inf"),
-                    )
-
-                best_trial = max(feasible_trials, key=sort_key)
-                best_info = {
-                    "trial_number": best_trial.number,
-                    "values": tuple(best_trial.values or ()),
-                    "params": dict(best_trial.params),
-                    "validation_metrics": best_trial.user_attrs.get(
-                        "validation_metrics", {}
-                    ),
-                    "fit_seconds": best_trial.user_attrs.get("fit_seconds"),
-                    "tstr_metrics": best_trial.user_attrs.get("tstr_metrics", {}),
-                    "trtr_metrics": best_trial.user_attrs.get("trtr_metrics", {}),
-                    "tstr_trtr_delta_auc": best_trial.user_attrs.get(
-                        "tstr_trtr_delta_auc"
-                    ),
-                }
-                best_params = dict(best_trial.params)
-    if not best_info:
-        best_info = {}
-    if not best_params and isinstance(best_info.get("params"), Mapping):
-        best_params = dict(best_info["params"])
-    return best_info, best_params
-
-
 def extract_calibrator_estimator(calibrator: Any) -> Optional[SUAVE]:
     """Return the underlying SUAVE estimator from ``calibrator`` if present."""
 
@@ -504,36 +453,7 @@ render_dataframe(
 
 # %%
 
-optuna_best_info, optuna_best_params = load_optuna_results(
-    OPTUNA_DIR,
-    TARGET_LABEL,
-    study_prefix=analysis_config.get("optuna_study_prefix"),
-    storage=analysis_config.get("optuna_storage"),
-)
 optuna_trials_path = OPTUNA_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
-model_manifest = load_model_manifest(MODEL_DIR, TARGET_LABEL)
-
-if not optuna_best_params:
-    print(
-        "Optuna best parameters were not found on disk; subsequent steps will "
-        "rely on defaults unless the storage backend is available."
-    )
-
-optuna_study = load_optuna_study(
-    study_prefix=analysis_config.get("optuna_study_prefix"),
-    target_label=TARGET_LABEL,
-    storage=analysis_config.get("optuna_storage"),
-)
-
-pareto_trials: List["optuna.trial.FrozenTrial"] = []
-if optuna_study is not None:
-    pareto_trials = [
-        trial for trial in optuna_study.best_trials if trial.values is not None
-    ]
-    if not pareto_trials:
-        pareto_trials = [
-            trial for trial in optuna_study.trials if trial.values is not None
-        ]
 
 if IS_INTERACTIVE and pareto_trials:
     pareto_summary = summarise_pareto_trials(
@@ -547,6 +467,12 @@ if IS_INTERACTIVE and pareto_trials:
         floatfmt=".4f",
     )
 
+    model_loading_plan = confirm_model_loading_plan_selection(
+        model_loading_plan,
+        is_interactive=IS_INTERACTIVE,
+        model_dir=MODEL_DIR,
+    )
+
 
 # %% [markdown]
 # ## Ensure calibrated SUAVE model
@@ -557,127 +483,24 @@ if IS_INTERACTIVE and pareto_trials:
 
 # %%
 
-manifest_paths = manifest_artifact_paths(model_manifest, MODEL_DIR)
-saved_model_path = manifest_paths.get("model")
-saved_calibrator_path = manifest_paths.get("calibrator")
-saved_trial_number = model_manifest.get("trial_number")
+selected_trial_number = model_loading_plan.selected_trial_number
+selected_model_path = model_loading_plan.selected_model_path
+selected_calibrator_path = model_loading_plan.selected_calibrator_path
+selected_params: Dict[str, Any] = dict(model_loading_plan.selected_params)
 
-legacy_model_path = MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
-legacy_calibrator_path = MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
-
-pareto_lookup = {trial.number: trial for trial in pareto_trials}
-all_trials_lookup = (
-    {trial.number: trial for trial in optuna_study.trials if trial.values is not None}
-    if optuna_study is not None
-    else {}
-)
-
-selected_trial_number: Optional[int] = None
-selected_trial: Optional["optuna.trial.FrozenTrial"] = None
-selected_model_path: Optional[Path] = None
-selected_calibrator_path: Optional[Path] = None
-
-if IS_INTERACTIVE and pareto_trials:
-    default_hint = (
-        f"trial #{saved_trial_number}"
-        if saved_trial_number is not None
-        and saved_model_path is not None
-        and saved_model_path.exists()
-        else "a new training run"
-    )
-    prompt = (
-        "Enter the Optuna trial ID from the Pareto front to load or train "
-        f"(press Enter to reuse {default_hint}): "
-    )
-    while True:
-        try:
-            response = input(prompt).strip()
-        except EOFError:
-            response = ""
-        if not response:
-            if saved_model_path and saved_model_path.exists():
-                selected_model_path = saved_model_path
-                selected_calibrator_path = saved_calibrator_path
-                selected_trial_number = saved_trial_number
-            break
-        try:
-            candidate_id = int(response)
-        except ValueError:
-            print(
-                "Please enter a valid integer trial identifier from the listed Pareto front."
-            )
-            continue
-        if candidate_id not in pareto_lookup:
-            print(
-                "The specified trial is not part of the Pareto front; choose one of the displayed IDs."
-            )
-            continue
-        selected_trial_number = candidate_id
-        selected_trial = pareto_lookup[candidate_id]
-        if (
-            saved_trial_number == candidate_id
-            and saved_model_path
-            and saved_model_path.exists()
-        ):
-            selected_model_path = saved_model_path
-            selected_calibrator_path = saved_calibrator_path
-        break
-else:
-    requested_id = CLI_REQUESTED_TRIAL_ID
-    if requested_id is not None:
-        if (
-            saved_trial_number == requested_id
-            and saved_model_path
-            and saved_model_path.exists()
-        ):
-            selected_trial_number = requested_id
-            selected_model_path = saved_model_path
-            selected_calibrator_path = saved_calibrator_path
-        else:
-            selected_trial = all_trials_lookup.get(requested_id)
-            if selected_trial is None:
-                print(
-                    f"Requested Optuna trial #{requested_id} could not be located; proceeding with fallback selection."
-                )
-            else:
-                selected_trial_number = requested_id
-    if selected_model_path is None and selected_trial is None:
-        if saved_model_path and saved_model_path.exists():
-            selected_trial_number = saved_trial_number
-            selected_model_path = saved_model_path
-            selected_calibrator_path = saved_calibrator_path
-        elif legacy_model_path.exists() or legacy_calibrator_path.exists():
-            selected_model_path = (
-                legacy_model_path if legacy_model_path.exists() else None
-            )
-            selected_calibrator_path = (
-                legacy_calibrator_path if legacy_calibrator_path.exists() else None
-            )
-        elif pareto_trials:
-            selected_trial = choose_preferred_pareto_trial(
-                pareto_trials,
-                min_validation_roauc=PARETO_MIN_VALIDATION_ROAUC,
-                max_abs_delta_auc=PARETO_MAX_ABS_DELTA_AUC,
-            )
-            if selected_trial is not None:
-                selected_trial_number = selected_trial.number
-        elif optuna_best_params:
-            print(
-                "Optuna study unavailable; using stored best parameters for training."
-            )
-
-selected_params: Dict[str, Any] = {}
-if selected_trial is not None:
-    selected_params = dict(selected_trial.params)
-elif selected_trial_number == saved_trial_number and isinstance(
-    model_manifest.get("params"), Mapping
-):
-    selected_params = dict(model_manifest["params"])
-elif optuna_best_params:
+if not selected_params and optuna_best_params:
     selected_params = dict(optuna_best_params)
 
-model: Optional[SUAVE] = None
+model: Optional[SUAVE] = model_loading_plan.preloaded_model
 calibrator: Optional[Any] = None
+
+if model is not None and selected_model_path and selected_model_path.exists():
+    if selected_trial_number is not None:
+        print(
+            f"Reusing cached SUAVE model for Optuna trial #{selected_trial_number} from {selected_model_path}."
+        )
+    else:
+        print(f"Reusing cached SUAVE model from {selected_model_path}.")
 
 if selected_calibrator_path and selected_calibrator_path.exists():
     calibrator = joblib.load(selected_calibrator_path)
