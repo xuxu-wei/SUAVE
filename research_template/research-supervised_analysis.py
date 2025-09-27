@@ -37,13 +37,16 @@ import matplotlib.pyplot as plt
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
-from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
+
+from analysis_config import (
+    BASELINE_DATASET_LABELS,
+    BASELINE_DATASET_ORDER,
+    BASELINE_MODEL_ABBREVIATIONS,
+    BASELINE_MODEL_PIPELINE_BUILDERS,
+)
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
 if not EXAMPLES_DIR.exists():
@@ -133,6 +136,14 @@ from suave.plots import (  # noqa: E402
 TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
+
+DATASET_NAME_MAP = BASELINE_DATASET_LABELS
+DATASET_ORDER = tuple(BASELINE_DATASET_ORDER)
+
+TRAIN_DATASET_NAME = DATASET_NAME_MAP.get("train", "Train")
+VALIDATION_DATASET_NAME = DATASET_NAME_MAP.get("validation", "Validation")
+INTERNAL_TEST_DATASET_NAME = DATASET_NAME_MAP.get("internal_test", "Internal test")
+EXTERNAL_DATASET_NAME = DATASET_NAME_MAP.get("external_validation")
 
 FORCE_UPDATE_BENCHMARK_MODEL = read_bool_env_flag(
     "FORCE_UPDATE_BENCHMARK_MODEL",
@@ -230,16 +241,10 @@ FEATURE_COLUMNS = [
     if column not in TARGET_COLUMNS + BENCHMARK_COLUMNS
 ]
 
-schema = define_schema(train_df, FEATURE_COLUMNS, 
-                       mode="interactive" if IS_INTERACTIVE else "info"
-                       )
-
-# Manual schema corrections ensure columns with ambiguous types are treated
-# appropriately during modelling.
-schema.update(
-    {
-        "BMI": {"type": "pos"},
-    }
+schema = define_schema(
+    train_df,
+    FEATURE_COLUMNS,
+    mode="interactive" if IS_INTERACTIVE else "info",
 )
 
 schema_df = schema_to_dataframe(schema).reset_index(drop=True)
@@ -367,16 +372,19 @@ else:
     external_labels = None
 
 benchmark_frames: Dict[str, pd.DataFrame] = {
-    "Train": benchmark_train,
-    "Validation": benchmark_validation,
-    "MIMIC test": test_df.loc[:, available_benchmark_columns].reset_index(drop=True),
+    TRAIN_DATASET_NAME: benchmark_train,
+    VALIDATION_DATASET_NAME: benchmark_validation,
+    INTERNAL_TEST_DATASET_NAME: (
+        test_df.loc[:, available_benchmark_columns].reset_index(drop=True)
+    ),
 }
 if external_features is not None and TARGET_LABEL in external_df.columns:
     external_benchmark_columns = [
         column for column in available_benchmark_columns if column in external_df.columns
     ]
     if external_benchmark_columns:
-        benchmark_frames["eICU external"] = (
+        external_name = EXTERNAL_DATASET_NAME or "External validation"
+        benchmark_frames[external_name] = (
             external_df.loc[:, external_benchmark_columns].reset_index(drop=True)
         )
 
@@ -390,12 +398,13 @@ if external_features is not None and TARGET_LABEL in external_df.columns:
 # %%
 
 baseline_feature_frames: Dict[str, pd.DataFrame] = {
-    "Train": X_train_model,
-    "Validation": X_validation,
-    "MIMIC test": X_test,
+    TRAIN_DATASET_NAME: X_train_model,
+    VALIDATION_DATASET_NAME: X_validation,
+    INTERNAL_TEST_DATASET_NAME: X_test,
 }
 if external_features is not None:
-    baseline_feature_frames["eICU external"] = external_features
+    external_name = EXTERNAL_DATASET_NAME or "External validation"
+    baseline_feature_frames[external_name] = external_features
 
 clinical_score_frames: Dict[str, pd.DataFrame] = {
     name: frame.copy() for name, frame in benchmark_frames.items()
@@ -409,7 +418,7 @@ if use_imputed_clinical_scores and available_benchmark_columns:
         clinical_score_frames,
         baseline_feature_frames,
         columns=available_benchmark_columns,
-        reference_key="Train",
+        reference_key=TRAIN_DATASET_NAME,
     )
 
 (
@@ -420,7 +429,7 @@ if use_imputed_clinical_scores and available_benchmark_columns:
     baseline_feature_frames,
     output_dir=FEATURE_ENGINEERING_DIR,
     target_label=TARGET_LABEL,
-    reference_key="Train",
+    reference_key=TRAIN_DATASET_NAME,
 )
 
 if baseline_loaded_from_cache:
@@ -431,52 +440,18 @@ else:
         print(f"  - {name}: {path}")
 
 baseline_models: Dict[str, Pipeline] = {
-    "Logistic regression": Pipeline(
-        [
-            ("scaler", StandardScaler()),
-            (
-                "classifier",
-                LogisticRegression(max_iter=500, random_state=RANDOM_STATE),
-            ),
-        ]
-    ),
-    "KNN": Pipeline(
-        [
-            ("scaler", StandardScaler()),
-            ("classifier", KNeighborsClassifier(n_neighbors=25)),
-        ]
-    ),
-    "Gradient boosting": Pipeline(
-        [
-            (
-                "classifier",
-                GradientBoostingClassifier(random_state=RANDOM_STATE),
-            ),
-        ]
-    ),
-    "Random forest": Pipeline(
-        [
-            (
-                "classifier",
-                RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE),
-            ),
-        ]
-    ),
-    "SVM (RBF)": Pipeline(
-        [
-            ("scaler", StandardScaler()),
-            ("classifier", SVC(kernel="rbf", probability=True)),
-        ]
-    ),
+    name: builder(RANDOM_STATE)
+    for name, builder in BASELINE_MODEL_PIPELINE_BUILDERS.items()
 }
 
 baseline_label_sets: Dict[str, pd.Series] = {
-    "Train": y_train_model,
-    "Validation": y_validation,
-    "MIMIC test": y_test,
+    TRAIN_DATASET_NAME: y_train_model,
+    VALIDATION_DATASET_NAME: y_validation,
+    INTERNAL_TEST_DATASET_NAME: y_test,
 }
 if external_labels is not None:
-    baseline_label_sets["eICU external"] = external_labels
+    external_name = EXTERNAL_DATASET_NAME or "External validation"
+    baseline_label_sets[external_name] = external_labels
 
 baseline_evaluation_sets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
     name: (baseline_imputed_features[name], labels)
@@ -489,16 +464,15 @@ baseline_probability_map: Dict[str, Dict[str, np.ndarray]] = {
     name: {} for name in baseline_evaluation_sets.keys()
 }
 model_abbreviation_lookup = {
-    "Logistic regression": "LR",
-    "KNN": "KNN",
-    "Gradient boosting": "GB",
-    "Random forest": "RF",
-    "SVM (RBF)": "SVM",
+    model_name: BASELINE_MODEL_ABBREVIATIONS.get(model_name, model_name)
+    for model_name in baseline_models.keys()
 }
-model_abbreviation_lookup["SUAVE"] = "SUAVE"
+model_abbreviation_lookup["SUAVE"] = BASELINE_MODEL_ABBREVIATIONS.get(
+    "SUAVE", "SUAVE"
+)
 
-train_features_imputed = baseline_imputed_features["Train"]
-train_labels = baseline_label_sets["Train"]
+train_features_imputed = baseline_imputed_features[TRAIN_DATASET_NAME]
+train_labels = baseline_label_sets[TRAIN_DATASET_NAME]
 
 baseline_model_cache_path = (
     BASELINE_MODELS_DIR / f"baseline_estimators_{TARGET_LABEL}.joblib"
@@ -533,12 +507,16 @@ for model_name, estimator in baseline_models.items():
         )
         baseline_rows.append(row)
 
-    if "eICU external" not in baseline_evaluation_sets:
+    if EXTERNAL_DATASET_NAME and EXTERNAL_DATASET_NAME not in baseline_evaluation_sets:
         baseline_rows.append(
             {
                 "Model": model_name,
-                "Dataset": "eICU external",
-                "Notes": "Target not available in eICU split.",
+                "Dataset": EXTERNAL_DATASET_NAME,
+                "Notes": (
+                    f"Target not available in {EXTERNAL_DATASET_NAME} split."
+                    if EXTERNAL_DATASET_NAME
+                    else "Target not available in external split."
+                ),
                 **{column: float("nan") for column in metric_columns},
             }
         )
@@ -774,12 +752,13 @@ if (
 # %%
 
 evaluation_datasets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
-    "Train": (X_train_model, y_train_model),
-    "Validation": (X_validation, y_validation),
-    "MIMIC test": (X_test, y_test),
+    TRAIN_DATASET_NAME: (X_train_model, y_train_model),
+    VALIDATION_DATASET_NAME: (X_validation, y_validation),
+    INTERNAL_TEST_DATASET_NAME: (X_test, y_test),
 }
 if external_features is not None and external_labels is not None:
-    evaluation_datasets["eICU external"] = (external_features, external_labels)
+    external_name = EXTERNAL_DATASET_NAME or "External validation"
+    evaluation_datasets[external_name] = (external_features, external_labels)
 
 probability_map: Dict[str, np.ndarray] = {}
 label_map: Dict[str, np.ndarray] = {}
@@ -831,7 +810,15 @@ plot_calibration_curves(
 
 # %%
 
-benchmark_datasets = ["Train", "MIMIC test", "eICU external"]
+benchmark_datasets = [
+    name
+    for name in (
+        TRAIN_DATASET_NAME,
+        INTERNAL_TEST_DATASET_NAME,
+        EXTERNAL_DATASET_NAME,
+    )
+    if name is not None
+]
 benchmark_curve_paths: List[Path] = []
 
 for dataset_name in benchmark_datasets:
@@ -880,7 +867,7 @@ if available_benchmark_columns:
         if column not in benchmark_train.columns:
             continue
         training_scores = (
-            clinical_score_frames.get("Train", benchmark_train)
+            clinical_score_frames.get(TRAIN_DATASET_NAME, benchmark_train)
             if use_imputed_clinical_scores
             else benchmark_train
         )
@@ -1321,7 +1308,13 @@ for display_name in metrics_label_map.values():
 
 bootstrap_summary_df = bootstrap_summary_df.loc[:, summary_columns]
 
-required_datasets = ["Train", "Validation", "MIMIC test", "eICU external"]
+available_datasets = set(bootstrap_summary_df["Dataset"].unique())
+required_datasets = [
+    name
+    for key in DATASET_ORDER
+    for name in [DATASET_NAME_MAP.get(key)]
+    if name in available_datasets and name is not None
+]
 bootstrap_summary_df = bootstrap_summary_df[
     bootstrap_summary_df["Dataset"].isin(required_datasets)
 ].copy()
@@ -1387,17 +1380,22 @@ else:
         return_raw=True,
     )
     evaluation_sets_numeric: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
-        "MIMIC test": (to_numeric_frame(X_test), y_test.reset_index(drop=True)),
+        INTERNAL_TEST_DATASET_NAME: (
+            to_numeric_frame(X_test), y_test.reset_index(drop=True)
+        ),
     }
     evaluation_sets_raw: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
-        "MIMIC test": (X_test.reset_index(drop=True), y_test.reset_index(drop=True)),
+        INTERNAL_TEST_DATASET_NAME: (
+            X_test.reset_index(drop=True), y_test.reset_index(drop=True)
+        ),
     }
     if external_features is not None and external_labels is not None:
-        evaluation_sets_numeric["eICU external"] = (
+        external_name = EXTERNAL_DATASET_NAME or "External validation"
+        evaluation_sets_numeric[external_name] = (
             to_numeric_frame(external_features),
             external_labels.reset_index(drop=True),
         )
-        evaluation_sets_raw["eICU external"] = (
+        evaluation_sets_raw[external_name] = (
             external_features.reset_index(drop=True),
             external_labels.reset_index(drop=True),
         )
@@ -1686,8 +1684,8 @@ else:
         floatfmt=".3f",
     )
 
-    train_probabilities = probability_map["Train"]
-    test_probabilities = probability_map["MIMIC test"]
+    train_probabilities = probability_map[TRAIN_DATASET_NAME]
+    test_probabilities = probability_map[INTERNAL_TEST_DATASET_NAME]
     membership_metrics = simple_membership_inference(
         train_probabilities,
         np.asarray(y_train_model),
