@@ -119,17 +119,18 @@ FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
 }
 
 ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
-    "schema": "01_schema_validation",
-    "features": "02_feature_engineering",
+    "data_schema": "01_data_and_schema",
+    "feature_engineering": "02_feature_engineering",
     "optuna": "03_optuna_search",
-    "model": "04_suave_model",
-    "evaluation": "05_evaluation_metrics",
-    "bootstrap": "06_bootstrap_analysis",
-    "baseline": "07_baseline_models",
-    "transfer": "08_transfer_learning",
-    "distribution": "09_distribution_shift",
-    "privacy": "10_privacy_assessment",
-    "visualisation": "11_visualizations",
+    "suave_model": "04_suave_training",
+    "calibration_uncertainty": "05_calibration_uncertainty",
+    "evaluation_reports": "06_evaluation_metrics",
+    "bootstrap_analysis": "07_bootstrap_analysis",
+    "baseline_models": "08_baseline_models",
+    "tstr_trtr": "09_tstr_trtr_transfer",
+    "distribution_shift": "10_distribution_shift",
+    "privacy_assessment": "11_privacy_assessment",
+    "visualisations": "12_visualizations",
 }
 
 
@@ -367,7 +368,7 @@ __all__ = [
     "load_or_create_iteratively_imputed_features",
     "make_logistic_pipeline",
     "make_random_forest_pipeline",
-    "make_xgboost_pipeline",
+    "make_gradient_boosting_pipeline",
     "make_baseline_model_factories",
     "mutual_information_feature",
     "plot_benchmark_curves",
@@ -465,7 +466,10 @@ def _normalise_manifest_path(path: Path, base_dir: Path) -> str:
     try:
         return str(path.relative_to(base_dir))
     except ValueError:
-        return str(path)
+        try:
+            return os.path.relpath(path, base_dir)
+        except ValueError:
+            return str(path)
 
 
 def manifest_artifact_paths(
@@ -1485,7 +1489,7 @@ def load_or_create_iteratively_imputed_features(
     from sklearn.experimental import enable_iterative_imputer  # noqa: F401
     from sklearn.impute import IterativeImputer
 
-    imputer = IterativeImputer(max_iter=50, tol=1e-2)
+    imputer = IterativeImputer(max_iter=100, tol=1e-2)
     imputer.fit(feature_sets[reference_key])
 
     imputed_features: Dict[str, pd.DataFrame] = {}
@@ -1512,14 +1516,15 @@ def make_logistic_pipeline(random_state: Optional[int] = None) -> Pipeline:
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
 
+    classifier = LogisticRegression()
+    if random_state is not None:
+        classifier.set_params(random_state=random_state)
+
     return Pipeline(
         [
-            ("imputer", IterativeImputer(max_iter=50, tol=1e-2)),
+            ("imputer", IterativeImputer(max_iter=100, tol=1e-2)),
             ("scaler", StandardScaler()),
-            (
-                "classifier",
-                LogisticRegression(max_iter=200, random_state=random_state),
-            ),
+            ("classifier", classifier),
         ]
     )
 
@@ -1537,54 +1542,35 @@ def make_random_forest_pipeline(random_state: Optional[int] = None) -> Pipeline:
     from sklearn.experimental import enable_iterative_imputer  # noqa: F401
     from sklearn.impute import IterativeImputer
 
+    classifier = RandomForestClassifier()
+    if random_state is not None:
+        classifier.set_params(random_state=random_state)
+
     return Pipeline(
         [
-            ("imputer", IterativeImputer(max_iter=50, tol=1e-2)),
-            (
-                "classifier",
-                RandomForestClassifier(
-                    n_estimators=400,
-                    max_depth=None,
-                    random_state=random_state,
-                    n_jobs=-1,
-                ),
-            ),
+            ("imputer", IterativeImputer(max_iter=100, tol=1e-2)),
+            ("classifier", classifier),
         ]
     )
 
 
-def make_xgboost_pipeline(random_state: Optional[int] = None) -> Pipeline:
-    """Return an XGBoost pipeline with iterative imputation."""
+def make_gradient_boosting_pipeline(
+    random_state: Optional[int] = None,
+) -> Pipeline:
+    """Return a gradient boosting pipeline with iterative imputation."""
 
+    from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.experimental import enable_iterative_imputer  # noqa: F401
     from sklearn.impute import IterativeImputer
 
-    try:
-        from xgboost import XGBClassifier
-    except ImportError as error:  # pragma: no cover - optional dependency
-        raise ImportError(
-            "xgboost is required for the mortality TSTR evaluation."
-        ) from error
+    classifier = GradientBoostingClassifier()
+    if random_state is not None:
+        classifier.set_params(random_state=random_state)
 
     return Pipeline(
         [
-            ("imputer", IterativeImputer(max_iter=50, tol=1e-2)),
-            (
-                "classifier",
-                XGBClassifier(
-                    n_estimators=400,
-                    learning_rate=0.05,
-                    max_depth=4,
-                    subsample=0.8,
-                    colsample_bytree=0.8,
-                    objective="binary:logistic",
-                    eval_metric="auc",
-                    reg_lambda=1.0,
-                    random_state=random_state,
-                    tree_method="hist",
-                    n_jobs=-1,
-                ),
-            ),
+            ("imputer", IterativeImputer(max_iter=100, tol=1e-2)),
+            ("classifier", classifier),
         ]
     )
 
@@ -1597,7 +1583,7 @@ def make_baseline_model_factories(
     return {
         "Logistic regression": lambda: make_logistic_pipeline(random_state),
         "Random forest": lambda: make_random_forest_pipeline(random_state),
-        "XGBoost": lambda: make_xgboost_pipeline(random_state),
+        "GBDT": lambda: make_gradient_boosting_pipeline(random_state),
     }
 
 
