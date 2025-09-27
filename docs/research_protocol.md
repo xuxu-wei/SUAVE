@@ -75,9 +75,9 @@
 **输入**：从 `02_feature_engineering/` 读取插补前特征，并在 `load_or_create_iteratively_imputed_features` 中生成迭代插补结果。
 **输出**：在 `08_baseline_models/` 写入 `baseline_estimators_{label}.joblib` 与 `baseline_models_{label}.csv`。
 
-1. 借助 `load_or_create_iteratively_imputed_features` 对各评估集执行迭代插补，生成可复用的 `*_imputed.joblib` 文件。
-2. 构建 Logistic Regression（带标准化）、Random Forest 与 GBDT `Pipeline`，通过 `evaluate_transfer_baselines` 统一训练并评估；所有基线共享 `compute_binary_metrics` 统计 AUC、ACC、SPE、SEN 与 Brier，并写入 `baseline_models_{label}.csv`。`mimic_mortality_utils.make_logistic_pipeline`、`make_random_forest_pipeline` 与 `make_gradient_boosting_pipeline` 均保持 scikit-learn 默认超参数，仅在需要时设置 `random_state`，确保与 C2ST/TSTR/TRTR 下游模型一致。
-3. 脚本在 `08_baseline_models/` 下缓存拟合后的 `baseline_estimators_{label}.joblib`，二次运行时默认复用；若需强制重新训练，可在执行前设置 `FORCE_UPDATE_BENCHMARK_MODEL=1`（默认为 `0`）。相关布尔参数统一通过 `mimic_mortality_utils.read_bool_env_flag` 解析，以便批量实验脚本复用。
+1. 借助 `load_or_create_iteratively_imputed_features` 对各评估集执行迭代插补，并将结果保存为 `02_feature_engineering/` 目录下的 `iterative_imputed_{dataset}_{label}.csv`。首次运行会以训练集为参考拟合插补器；后续运行若检测到缓存与原始特征形状匹配，则直接读取 CSV 而无需重新训练。`08_baseline_models/` 仅存放模型权重与指标，不重复缓存这些迭代插补特征。
+2. 构建 Logistic Regression（带标准化）、Random Forest 与 GBDT `Pipeline`，通过 `evaluate_transfer_baselines` 统一训练并评估；所有基线共享 `compute_binary_metrics` 统计 AUC、ACC、SPE、SEN 与 Brier，并写入 `baseline_models_{label}.csv`。`mimic_mortality_utils.make_logistic_pipeline`、`make_random_forest_pipeline` 与 `make_gradient_boosting_pipeline` 均保持 scikit-learn 默认超参数，仅在需要时设置 `random_state`，确保与 C2ST/TSTR/TRTR 下游模型一致。上述流水线会在内部再执行一次迭代插补（同样采用 `max_iter=100`、`tol=1e-2`），从而保证独立运行时也具备缺失值鲁棒性。
+3. 脚本在 `08_baseline_models/` 下缓存拟合后的 `baseline_estimators_{label}.joblib`，二次运行时默认复用；若需强制重新训练，可在执行前设置 `FORCE_UPDATE_BENCHMARK_MODEL=1`（默认为 `0`）。相关布尔参数统一通过 `mimic_mortality_utils.read_bool_env_flag` 解析，以便批量实验脚本复用。SUAVE 主模型及其校准器始终使用 `prepare_features` 产出的原始特征（即未经过该迭代插补管线），保持与生成器训练阶段的输入一致。
 4. 在临床基准方面，保留传统 ICU 评分（如数据集中现成的 SOFA 及相关器官支持指标）作为零参数对照：当 `mimic_mortality_utils.py` 中登记了此类 `baseline_probability_map` 项时，同样纳入基线汇总并在 `Notes` 中标记“临床评分”。
 5. 输出的指标 CSV 与 Markdown 表格需包含训练/验证/测试/eICU 全量指标，若外部验证缺失标签需在脚注注明处理策略。
 
@@ -98,7 +98,12 @@
 7. Optuna 优化脚本会在 `04_suave_training/` 下生成 `suave_model_manifest_{label}.json`，记录 trial 编号、目标函数值与模型/校准器路径；主流程在加载前需校验 manifest 所指向的 artefact 是否存在，不满足时回退至最近一次保存的权重或触发重新训练；当触发重新训练时会自动将新的 SUAVE 权重写入 `suave_best_{label}.pt` 以恢复后续运行的缓存链路。
 8. 若 Optuna study 与最佳参数均缺失，可设置环境变量 `FORCE_UPDATE_SUAVE=1` 强制刷新本地备份模型；该开关仅在 Optuna artefact 不可用时生效，用于确保重新训练覆盖旧的 SUAVE 权重。
 
-### 8. 概率校准与不确定性量化
+### 8. 分类/校准评估与不确定性量化（Bootstrap）
+
+**目的**：量化 SUAVE 输出概率的可靠性，并汇总多样指标的置信区间与可视化，同时复核基线分类器表现。
+**结果解读**：校准曲线平滑且 ECE 较低说明概率可信；bootstrap 置信区间用于评估模型稳定性及分类性能波动。
+**输入**：读取 `04_suave_training/` 下的模型权重、`05_calibration_uncertainty/` 中已有的校准器（若存在）以及 `02_feature_engineering/` 下的特征缓存。SUAVE 与校准器直接使用 `prepare_features` 输出的原始特征；若需评估基线模型，则加载 `iterative_imputed_{dataset}_{label}.csv` 作为对照。
+**输出**：在 `05_calibration_uncertainty/` 保存校准器与曲线，在 `06_evaluation_metrics/` 导出指标表与 Excel。
 
 **目的**：量化 SUAVE 输出概率的可靠性，并汇总多样指标的置信区间与可视化。
 **结果解读**：校准曲线平滑且 ECE 较低说明概率可信；bootstrap 置信区间用于评估模型稳定性。
@@ -106,7 +111,7 @@
 **输出**：在 `05_calibration_uncertainty/` 保存校准器与曲线，在 `06_evaluation_metrics/` 导出指标表与 Excel。
 
 1. 通过 `fit_isotonic_calibrator` 在内部验证集上拟合专为 SUAVE 封装的等渗校准器（内部使用 `IsotonicRegression`，兼容缺失 `decision_function` 的估计器），必要时回退至逻辑回归温度缩放，并保存校准对象；若缓存缺失或校准器与模型不匹配，主流程会重新训练并自动序列化新的校准 artefact。
-2. 使用 `evaluate_predictions` 对训练、验证、MIMIC-IV 测试与 eICU 集执行 bootstrap（默认 1000 次）以估计指标置信区间，并生成 Excel 汇总；除表格主列的 AUC、ACC、SPE、SEN、Brier 外，Excel 中还会给出 `accuracy`、`balanced_accuracy`、`f1_macro`、`recall_macro`、`specificity_macro`、`sensitivity_pos`、`specificity_pos`、`roc_auc`、`pr_auc` 及其置信区间，以支撑不同风险偏好的诊断分析。
+2. 使用 `evaluate_predictions` 对训练、验证、MIMIC-IV 测试与 eICU 集执行 bootstrap（默认 1000 次）以估计指标置信区间，并生成 Excel 汇总；除表格主列的 AUC、ACC、SPE、SEN、Brier 外，Excel 中还会给出 `accuracy`、`balanced_accuracy`、`f1_macro`、`recall_macro`、`specificity_macro`、`sensitivity_pos`、`specificity_pos`、`roc_auc`、`pr_auc` 及其置信区间，以支撑不同风险偏好的诊断分析。若需要并排比较基线分类器，可从迭代插补 CSV 读取概率输出或重新调用 `evaluate_transfer_baselines`。
 3. 评估函数会同步导出 bootstrap 的原始采样记录：总体指标写入 `bootstrap_overall_records_{label}.csv`，逐类指标写入 `bootstrap_per_class_records_{label}.csv`，用于复核任意抽样迭代的轨迹。
 4. 将生成的 `evaluation_metrics.csv` 与 Excel 汇总保存至 `06_evaluation_metrics/`，校准曲线及相关图表保存为 PNG/SVG/PDF/JPG 四种格式并写入 `05_calibration_uncertainty/`，同时在实验日志中登记路径，便于后续报告引用与审计复核。
 
@@ -114,7 +119,7 @@
 
 **目的**：评估 SUAVE 生成数据对下游监督任务的实用性，并对比真实数据训练的基线表现。
 **结果解读**：重点关注 `roc_auc` 与 `accuracy` 的差异；若合成数据与真实数据性能接近，说明生成器具备迁移价值。
-**输入**：使用 `build_tstr_training_sets` 生成的训练集缓存、`08_baseline_models/` 中的插补特征以及 `INCLUDE_SUAVE_TRANSFER` 环境变量。
+**输入**：使用 `build_tstr_training_sets` 生成的训练集缓存、`02_feature_engineering/` 中的迭代插补特征（`iterative_imputed_{dataset}_{label}.csv`）以及 `INCLUDE_SUAVE_TRANSFER` 环境变量。
 **输出**：在 `09_tstr_trtr_transfer/` 缓存 `tstr_trtr_results_{label}.joblib`、`TSTR_TRTR_eval.xlsx` 与可视化结果。
 
 1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR synthesis`、`TSTR synthesis-balance`、`TSTR synthesis-augment`、`TSTR synthesis-5x` 与 `TSTR synthesis-5x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
