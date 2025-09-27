@@ -85,6 +85,7 @@ from mimic_mortality_utils import (  # noqa: E402
     ModelLoadingPlan,
     FORCE_UPDATE_FLAG_DEFAULTS,
     make_baseline_model_factories,
+    make_study_name,
     read_bool_env_flag,
     resolve_model_loading_plan,
     confirm_model_loading_plan_selection,
@@ -98,6 +99,7 @@ from mimic_mortality_utils import (  # noqa: E402
     render_dataframe,
     schema_to_dataframe,
     to_numeric_frame,
+    record_model_manifest,
 )
 from cls_eval import evaluate_predictions, write_results_to_excel_unique  # noqa: E402
 
@@ -700,6 +702,50 @@ if calibrator_was_fitted:
         )
     else:
         print(f"Saved isotonic calibrator to {calibrator_output_path}.")
+
+if (
+    (model_was_trained or calibrator_was_fitted)
+    and selected_model_path is not None
+    and selected_calibrator_path is not None
+):
+    manifest_values: List[float] = []
+
+    if selected_trial_number is not None:
+        matching_trial = next(
+            (trial for trial in pareto_trials if trial.number == selected_trial_number),
+            None,
+        )
+        if matching_trial is not None and matching_trial.values is not None:
+            manifest_values = [float(value) for value in matching_trial.values]
+
+    if not manifest_values:
+        previous_values = model_loading_plan.model_manifest.get("values")
+        if isinstance(previous_values, Sequence) and not isinstance(
+            previous_values, (str, bytes)
+        ):
+            manifest_values = [float(value) for value in previous_values]
+
+    if not manifest_values:
+        best_info_values = optuna_best_info.get("values")
+        if isinstance(best_info_values, Sequence) and not isinstance(
+            best_info_values, (str, bytes)
+        ):
+            manifest_values = [float(value) for value in best_info_values]
+
+    manifest_path = record_model_manifest(
+        SUAVE_MODEL_DIR,
+        TARGET_LABEL,
+        trial_number=selected_trial_number,
+        values=manifest_values,
+        params=selected_params,
+        model_path=selected_model_path,
+        calibrator_path=selected_calibrator_path,
+        study_name=make_study_name(
+            analysis_config.get("optuna_study_prefix"), TARGET_LABEL
+        ),
+        storage=analysis_config.get("optuna_storage"),
+    )
+    print(f"Updated SUAVE model manifest at {manifest_path}.")
 
 
 # %% [markdown]
