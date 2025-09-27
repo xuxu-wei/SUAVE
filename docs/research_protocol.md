@@ -60,11 +60,11 @@
 4. Optuna 搜索完成后需导出参数重要性、最优值收敛轨迹与多目标帕累托前沿图（均保存为 PNG/SVG/PDF/JPG），便于后续调参与审计复核；默认输出位于 `03_optuna_search/figures/`。
 5. Trial 级别的搜索记录需写入 `optuna_trials_{label}.csv` 并在日志中展示前 10 个验证集 AUROC 最优的 trial，确保调参轨迹透明可追溯。
 6. `research-mimic_mortality_supervised.py` 在交互模式下会读取 Optuna 帕累托前沿并列出各 trial 的验证集 AUROC、TSTR/TRTR ΔAUC 与本地模型保存状态，等待人工输入 trial ID 以加载或重新训练；脚本模式可通过 `--trial-id`（或位置参数）指定目标 trial，若未提供则优先加载最近一次保存的模型，缺失时再按照硬阈值（AUROC>0.81、|ΔAUC|<0.035）自动选取帕累托前沿解重训模型。
-7. Optuna 优化脚本会在 `04_suave_model/` 下生成 `suave_model_manifest_{label}.json`，记录 trial 编号、目标函数值与模型/校准器路径；主流程在加载前需校验 manifest 所指向的 artefact 是否存在，不满足时回退至最近一次保存的权重或触发重新训练。
+7. Optuna 优化脚本会在 `04_suave_model/` 下生成 `suave_model_manifest_{label}.json`，记录 trial 编号、目标函数值与模型/校准器路径；主流程在加载前需校验 manifest 所指向的 artefact 是否存在，不满足时回退至最近一次保存的权重或触发重新训练；当触发重新训练时会自动将新的 SUAVE 权重写入 `suave_best_{label}.pt` 以恢复后续运行的缓存链路。
 
 ### 8. 概率校准与不确定性量化
 
-1. 通过 `fit_isotonic_calibrator` 在内部验证集上拟合等渗校准器，必要时回退至逻辑回归温度缩放，并保存校准对象。
+1. 通过 `fit_isotonic_calibrator` 在内部验证集上拟合专为 SUAVE 封装的等渗校准器（内部使用 `IsotonicRegression`，兼容缺失 `decision_function` 的估计器），必要时回退至逻辑回归温度缩放，并保存校准对象；若缓存缺失或校准器与模型不匹配，主流程会重新训练并自动序列化新的校准 artefact。
 2. 使用 `evaluate_predictions` 对训练、验证、MIMIC-IV 测试与 eICU 集执行 bootstrap（默认 1000 次）以估计指标置信区间，并生成 Excel 汇总；除表格主列的 AUC、ACC、SPE、SEN、Brier 外，Excel 中还会给出 `accuracy`、`balanced_accuracy`、`f1_macro`、`recall_macro`、`specificity_macro`、`sensitivity_pos`、`specificity_pos`、`roc_auc`、`pr_auc` 及其置信区间，以支撑不同风险偏好的诊断分析。
 3. 评估函数会同步导出 bootstrap 的原始采样记录：总体指标写入 `bootstrap_overall_records_{label}.csv`，逐类指标写入 `bootstrap_per_class_records_{label}.csv`，用于复核任意抽样迭代的轨迹。
 4. 将生成的 `evaluation_metrics.csv`、校准曲线及相关图表保存为 PNG/SVG/PDF/JPG 四种格式，并写入 `05_evaluation_metrics/` 子目录，同时在实验日志中登记路径，便于后续报告引用与审计复核。

@@ -556,6 +556,8 @@ if model is None and selected_model_path and selected_model_path.exists():
     else:
         print(f"Loaded SUAVE model from {selected_model_path}.")
 
+model_was_trained = False
+
 if model is None:
     if not selected_params:
         raise RuntimeError(
@@ -576,9 +578,27 @@ if model is None:
         y_train_model,
         **fit_kwargs,
     )
+    model_was_trained = True
+
+if model_was_trained:
+    model_output_path = selected_model_path or (
+        MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
+    )
+    model_output_path.parent.mkdir(parents=True, exist_ok=True)
+    model.save(model_output_path)
+    selected_model_path = model_output_path
+    if selected_trial_number is not None:
+        print(
+            f"Saved SUAVE model for Optuna trial #{selected_trial_number} to {model_output_path}."
+        )
+    else:
+        print(f"Saved SUAVE model to {model_output_path}.")
+
+calibrator_was_fitted = False
 
 if calibrator is None:
     calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
+    calibrator_was_fitted = True
     print("Fitted a new isotonic calibrator on the validation split.")
 else:
     embedded = extract_calibrator_estimator(calibrator)
@@ -587,8 +607,24 @@ else:
             "Calibrator did not contain a usable SUAVE estimator; refitting calibrator."
         )
         calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
+        calibrator_was_fitted = True
     else:
         model = embedded
+
+if calibrator_was_fitted:
+    calibrator_output_path = selected_calibrator_path or (
+        MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
+    )
+    calibrator_output_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(calibrator, calibrator_output_path)
+    selected_calibrator_path = calibrator_output_path
+    if selected_trial_number is not None:
+        print(
+            "Saved isotonic calibrator for Optuna trial "
+            f"#{selected_trial_number} to {calibrator_output_path}."
+        )
+    else:
+        print(f"Saved isotonic calibrator to {calibrator_output_path}.")
 
 
 # %% [markdown]

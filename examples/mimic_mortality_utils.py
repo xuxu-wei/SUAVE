@@ -28,7 +28,8 @@ from IPython.display import display
 from matplotlib import pyplot as plt
 from tabulate import tabulate
 
-from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.calibration import calibration_curve
+from sklearn.isotonic import IsotonicRegression
 from sklearn.decomposition import PCA
 from sklearn.metrics import (
     brier_score_loss,
@@ -2012,22 +2013,57 @@ def compute_binary_metrics(
     }
 
 
+class IsotonicProbabilityCalibrator:
+    """Lightweight isotonic calibrator compatible with SUAVE classifiers."""
+
+    def __init__(
+        self,
+        base_estimator: SUAVE,
+        isotonic: IsotonicRegression,
+        classes: np.ndarray,
+    ) -> None:
+        self.base_estimator = base_estimator
+        self.estimator = base_estimator
+        self.isotonic_ = isotonic
+        self.classes_ = np.asarray(classes)
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        raw = np.asarray(self.base_estimator.predict_proba(X))
+        positive = extract_positive_probabilities(raw)
+        calibrated = np.clip(self.isotonic_.predict(positive), 0.0, 1.0)
+        return np.column_stack([1.0 - calibrated, calibrated])
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        probabilities = np.asarray(self.predict_proba(X))
+        indices = np.argmax(probabilities, axis=1)
+        return self.classes_[indices]
+
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple proxy
+        return getattr(self.base_estimator, name)
+
+
 def fit_isotonic_calibrator(
     model: SUAVE,
     features: pd.DataFrame,
     targets: pd.Series | np.ndarray,
-) -> CalibratedClassifierCV:
-    """Wrap ``model`` with an isotonic :class:`CalibratedClassifierCV`."""
+) -> IsotonicProbabilityCalibrator:
+    """Return an isotonic calibrator tailored for SUAVE probability outputs."""
 
-    calibrator = CalibratedClassifierCV(
-        # ``estimator`` supersedes the deprecated ``base_estimator`` argument
-        # and keeps compatibility with modern scikit-learn releases.
-        estimator=model,
-        method="isotonic",
-        cv="prefit",
-    )
-    calibrator.fit(features, np.asarray(targets))
-    return calibrator
+    labels = _normalize_zero_indexed_labels(targets)
+    unique = np.unique(labels)
+    if unique.size < 2:
+        raise ValueError("Isotonic calibration requires at least two classes.")
+    if unique.size > 2:
+        raise ValueError("Isotonic calibration currently supports binary tasks only.")
+
+    raw_probabilities = np.asarray(model.predict_proba(features))
+    positive = extract_positive_probabilities(raw_probabilities)
+
+    isotonic = IsotonicRegression(out_of_bounds="clip")
+    isotonic.fit(positive, labels.astype(float, copy=False))
+
+    classes = getattr(model, "classes_", np.array([0, 1]))
+    return IsotonicProbabilityCalibrator(model, isotonic, np.asarray(classes))
 
 
 def plot_calibration_curves(
