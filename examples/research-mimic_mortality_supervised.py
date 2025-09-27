@@ -208,7 +208,9 @@ FEATURE_COLUMNS = [
     if column not in TARGET_COLUMNS + BENCHMARK_COLUMNS
 ]
 
-schema = define_schema(train_df, FEATURE_COLUMNS, mode="info")
+schema = define_schema(train_df, FEATURE_COLUMNS, 
+                       mode="interactive" if IS_INTERACTIVE else "info"
+                       )
 
 # Manual schema corrections ensure columns with ambiguous types are treated
 # appropriately during modelling.
