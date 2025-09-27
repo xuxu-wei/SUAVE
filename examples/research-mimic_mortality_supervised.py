@@ -138,22 +138,10 @@ IS_INTERACTIVE = is_interactive_session()
 
 cache_default = not IS_INTERACTIVE
 
-FORCE_UPDATE_BENCHMARK_MODEL = read_bool_env_flag(
-    "FORCE_UPDATE_BENCHMARK_MODEL",
-    cache_default,
-)
-FORCE_UPDATE_TSTR_MODEL = read_bool_env_flag(
-    "FORCE_UPDATE_TSTR_MODEL",
-    cache_default,
-)
-FORCE_UPDATE_TRTR_MODEL = read_bool_env_flag(
-    "FORCE_UPDATE_TRTR_MODEL",
-    cache_default,
-)
-FORCE_UPDATE_BOOTSTRAP = read_bool_env_flag(
-    "FORCE_UPDATE_BOOTSTRAP",
-    cache_default,
-)
+FORCE_UPDATE_BENCHMARK_MODEL = cache_default
+FORCE_UPDATE_TSTR_MODEL = cache_default
+FORCE_UPDATE_TRTR_MODEL = cache_default
+FORCE_UPDATE_BOOTSTRAP = cache_default
 FORCE_UPDATE_SUAVE = read_bool_env_flag(
     "FORCE_UPDATE_SUAVE",
     FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_SUAVE"],
