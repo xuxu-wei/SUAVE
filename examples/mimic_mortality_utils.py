@@ -2486,14 +2486,28 @@ def build_prediction_dataframe(
     label_array = np.asarray(labels)
     prediction_array = np.asarray(predictions)
     if prediction_array.dtype != label_array.dtype:
-        try:
-            label_array = label_array.astype(prediction_array.dtype, copy=False)
-        except (TypeError, ValueError):
+        if {
+            prediction_array.dtype.kind,
+            label_array.dtype.kind,
+        } <= {"U", "S"}:  # Prefer the wider string dtype when both are fixed-width
+            # ``itemsize`` reflects the byte-width of each string slot, so use the
+            # larger allocation to avoid truncation (e.g. "Deceased" -> "Decea").
+            target_dtype = (
+                label_array.dtype
+                if label_array.dtype.itemsize >= prediction_array.dtype.itemsize
+                else prediction_array.dtype
+            )
+            label_array = label_array.astype(target_dtype, copy=False)
+            prediction_array = prediction_array.astype(target_dtype, copy=False)
+        else:
             try:
-                prediction_array = prediction_array.astype(label_array.dtype, copy=False)
+                label_array = label_array.astype(prediction_array.dtype, copy=False)
             except (TypeError, ValueError):
-                label_array = label_array.astype(object)
-                prediction_array = prediction_array.astype(object)
+                try:
+                    prediction_array = prediction_array.astype(label_array.dtype, copy=False)
+                except (TypeError, ValueError):
+                    label_array = label_array.astype(object)
+                    prediction_array = prediction_array.astype(object)
     base_df = pd.DataFrame(
         {
             "label": label_array,
