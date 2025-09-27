@@ -54,11 +54,11 @@
 
 ### 7. SUAVE 模型构建、调参与训练
 
-1. 若存在历史最优 trial，优先读取 `optuna_best_params_{label}.json`；否则调用 `build_suave_model` 以默认超参初始化模型，并记录关键参数（latent_dim、beta、dropout 等）。
+1. 若存在历史最优 trial，优先读取 `optuna_best_params_{label}.json`；否则调用 `build_suave_model` 以默认超参初始化模型，并记录关键参数（latent_dim、beta、dropout 等）。该 JSON 现包含完整的帕累托前沿（`pareto_front`）及推荐 trial 编号（`preferred_trial_number`），脚本可按需选择不同 trial 的超参组合。
 2. 训练顺序遵循脚本：先执行 VAE warm-up，再进行分类头独立训练，最后 joint fine-tuning，必要时启用分类损失权重自动调节。
 3. 对于每个阶段，记录训练轮数、早停标准、最优模型路径以及 GPU/CPU 运行时长，用于技术报告的实验设置章节。
 4. Optuna 搜索完成后需导出参数重要性、最优值收敛轨迹与多目标帕累托前沿图（均保存为 PNG/SVG/PDF/JPG），便于后续调参与审计复核；默认输出位于 `03_optuna_search/figures/`。
-5. Trial 级别的搜索记录需写入 `optuna_trials_{label}.csv` 并在日志中展示前 10 个验证集 AUROC 最优的 trial，确保调参轨迹透明可追溯。
+5. Trial 级别的搜索记录需写入 `optuna_trials_{label}.csv` 并在日志中展示前 10 个验证集 AUROC 最优的 trial，确保调参轨迹透明可追溯。帕累托前沿的完整元数据与指标同步保存于 `optuna_best_info_{label}.json`，供后续复核和多 trial 对比分析。
 6. `research-mimic_mortality_supervised.py` 在交互模式下会读取 Optuna 帕累托前沿并列出各 trial 的验证集 AUROC、TSTR/TRTR ΔAUC 与本地模型保存状态，等待人工输入 trial ID 以加载或重新训练；脚本模式可通过 `--trial-id`（或位置参数）指定目标 trial，若未提供则优先加载最近一次保存的模型，缺失时再按照硬阈值（AUROC>0.81、|ΔAUC|<0.035）自动选取帕累托前沿解重训模型。
 7. Optuna 优化脚本会在 `04_suave_model/` 下生成 `suave_model_manifest_{label}.json`，记录 trial 编号、目标函数值与模型/校准器路径；主流程在加载前需校验 manifest 所指向的 artefact 是否存在，不满足时回退至最近一次保存的权重或触发重新训练；当触发重新训练时会自动将新的 SUAVE 权重写入 `suave_best_{label}.pt` 以恢复后续运行的缓存链路。
 8. 若 Optuna study 与最佳参数均缺失，可设置环境变量 `FORCE_UPDATE_SUAVE=1` 强制刷新本地备份模型；该开关仅在 Optuna artefact 不可用时生效，用于确保重新训练覆盖旧的 SUAVE 权重。

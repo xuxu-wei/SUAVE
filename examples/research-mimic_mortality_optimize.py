@@ -240,7 +240,12 @@ def run_optuna_search(
     storage: Optional[str] = None,
     target_label: str,
     diagnostics_dir: Path,
-) -> tuple["optuna.study.Study", Dict[str, object], Mapping[str, Path]]:
+) -> tuple[
+    "optuna.study.Study",
+    Dict[str, object],
+    list[Dict[str, object]],
+    Mapping[str, Path],
+]:
     """Perform Optuna hyperparameter optimisation for :class:`SUAVE`."""
 
     if n_trials is not None and n_trials <= 0:
@@ -378,18 +383,38 @@ def run_optuna_search(
     )
     if best_trial is None:
         best_trial = max(pareto_trials, key=lambda trial: _trial_objectives(trial)[0])
-    best_attributes: Dict[str, object] = {
-        "trial_number": best_trial.number,
-        "values": tuple(best_trial.values or ()),
-        "params": dict(best_trial.params),
-        "validation_metrics": best_trial.user_attrs.get("validation_metrics", {}),
-        "fit_seconds": best_trial.user_attrs.get("fit_seconds"),
-        "tstr_metrics": best_trial.user_attrs.get("tstr_metrics", {}),
-        "trtr_metrics": best_trial.user_attrs.get("trtr_metrics", {}),
-        "tstr_trtr_delta_auc": best_trial.user_attrs.get("tstr_trtr_delta_auc"),
-        "diagnostic_paths": {name: str(path) for name, path in diagnostics.items()},
+
+    def _trial_metadata(trial: "optuna.trial.FrozenTrial") -> Dict[str, object]:
+        metadata: Dict[str, object] = {
+            "trial_number": trial.number,
+            "values": tuple(trial.values or ()),
+            "params": dict(trial.params),
+            "validation_metrics": trial.user_attrs.get("validation_metrics", {}),
+            "fit_seconds": trial.user_attrs.get("fit_seconds"),
+            "tstr_metrics": trial.user_attrs.get("tstr_metrics", {}),
+            "trtr_metrics": trial.user_attrs.get("trtr_metrics", {}),
+            "tstr_trtr_delta_auc": trial.user_attrs.get("tstr_trtr_delta_auc"),
+        }
+        if "tstr_trtr_error" in trial.user_attrs:
+            metadata["tstr_trtr_error"] = trial.user_attrs["tstr_trtr_error"]
+        return metadata
+
+    pareto_metadata = [_trial_metadata(trial) for trial in pareto_trials]
+    best_metadata = next(
+        (
+            metadata
+            for metadata in pareto_metadata
+            if metadata.get("trial_number") == best_trial.number
+        ),
+        _trial_metadata(best_trial),
+    )
+    best_metadata["diagnostic_paths"] = {
+        name: str(path) for name, path in diagnostics.items()
     }
-    return study, best_attributes, diagnostics
+    if best_metadata not in pareto_metadata:
+        pareto_metadata.append(best_metadata)
+
+    return study, best_metadata, pareto_metadata, diagnostics
 
 
 # %% [markdown]
@@ -421,7 +446,7 @@ y_validation = y_validation.reset_index(drop=True)
 
 study_name = make_study_name(analysis_config["optuna_study_prefix"], TARGET_LABEL)
 
-study, optuna_best_info, optuna_diagnostics = run_optuna_search(
+study, optuna_best_info, optuna_pareto_info, optuna_diagnostics = run_optuna_search(
     X_train_model,
     y_train_model,
     X_validation,
@@ -497,11 +522,45 @@ def _json_ready(value: object) -> object:
 best_params = dict(optuna_best_info.get("params", {}))
 best_info_path = OPTUNA_DIR / f"optuna_best_info_{TARGET_LABEL}.json"
 best_params_path = OPTUNA_DIR / f"optuna_best_params_{TARGET_LABEL}.json"
+
+preferred_trial_number = optuna_best_info.get("trial_number")
+
+pareto_info_payload: list[dict[str, object]] = []
+for entry in optuna_pareto_info:
+    enriched_entry = dict(entry)
+    enriched_entry["is_preferred"] = (
+        entry.get("trial_number") == preferred_trial_number
+    )
+    pareto_info_payload.append(enriched_entry)
+
+best_info_payload = {
+    "preferred_trial_number": preferred_trial_number,
+    "preferred_trial": optuna_best_info,
+    "pareto_front": pareto_info_payload,
+}
+
+pareto_params_payload: list[dict[str, object]] = []
+for entry in optuna_pareto_info:
+    params_dict = dict(entry.get("params", {}))
+    pareto_params_payload.append(
+        {
+            "trial_number": entry.get("trial_number"),
+            "params": params_dict,
+            "is_preferred": entry.get("trial_number") == preferred_trial_number,
+        }
+    )
+
+best_params_payload = {
+    "preferred_trial_number": preferred_trial_number,
+    "preferred_params": best_params,
+    "pareto_front": pareto_params_payload,
+}
+
 best_info_path.write_text(
-    json.dumps(_json_ready(optuna_best_info), indent=2, ensure_ascii=False)
+    json.dumps(_json_ready(best_info_payload), indent=2, ensure_ascii=False)
 )
 best_params_path.write_text(
-    json.dumps(_json_ready(best_params), indent=2, ensure_ascii=False)
+    json.dumps(_json_ready(best_params_payload), indent=2, ensure_ascii=False)
 )
 
 
@@ -560,8 +619,9 @@ summary_lines = [
     "",
     "Saved artefacts:",
     f"- Optuna trials: {optuna_trials_path.relative_to(OUTPUT_DIR)}",
-    f"- Best info: {best_info_path.relative_to(OUTPUT_DIR)}",
-    f"- Best params: {best_params_path.relative_to(OUTPUT_DIR)}",
+    f"- Pareto front size: {len(optuna_pareto_info)} trials",
+    f"- Pareto front info: {best_info_path.relative_to(OUTPUT_DIR)}",
+    f"- Pareto front params: {best_params_path.relative_to(OUTPUT_DIR)}",
     f"- Model manifest: {manifest_path.relative_to(OUTPUT_DIR)}",
     f"- SUAVE model: {model_path.relative_to(OUTPUT_DIR)}",
     f"- Isotonic calibrator: {calibrator_path.relative_to(OUTPUT_DIR)}",
