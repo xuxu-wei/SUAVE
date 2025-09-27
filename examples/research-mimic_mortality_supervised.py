@@ -384,6 +384,7 @@ if external_features is not None and TARGET_LABEL in external_df.columns:
 
 baseline_feature_frames: Dict[str, pd.DataFrame] = {
     "Train": X_train_model,
+    "Validation": X_validation,
     "MIMIC test": X_test,
 }
 if external_features is not None:
@@ -449,6 +450,7 @@ baseline_models: Dict[str, Pipeline] = {
 
 baseline_label_sets: Dict[str, pd.Series] = {
     "Train": y_train_model,
+    "Validation": y_validation,
     "MIMIC test": y_test,
 }
 if external_labels is not None:
@@ -1218,7 +1220,7 @@ for display_name in metrics_label_map.values():
 
 bootstrap_summary_df = bootstrap_summary_df.loc[:, summary_columns]
 
-required_datasets = ["Train", "MIMIC test", "eICU external"]
+required_datasets = ["Train", "Validation", "MIMIC test", "eICU external"]
 bootstrap_summary_df = bootstrap_summary_df[
     bootstrap_summary_df["Dataset"].isin(required_datasets)
 ].copy()
