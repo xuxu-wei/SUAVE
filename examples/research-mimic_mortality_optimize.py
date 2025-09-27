@@ -123,7 +123,7 @@ FEATURE_COLUMNS = [
     for column in train_df.columns
     if column not in TARGET_COLUMNS + BENCHMARK_COLUMNS
 ]
-schema = define_schema(train_df, FEATURE_COLUMNS, mode="interactive")
+schema = define_schema(train_df, FEATURE_COLUMNS, mode="info")
 schema.update(
     {
         "age": {"type": "real"},
