@@ -218,6 +218,10 @@ def evaluate_predictions(
         - ``confusion`` : 混淆矩阵（行为 ``true_{class}``、列为 ``pred_{class}``）。
         - ``class_distribution`` : 每类真实/预测样本数。
         - ``warnings`` : 计算过程中的告警信息（例如概率行和不为 1 的重标化提示）。
+        - ``bootstrap_overall_records`` : 每次 bootstrap 的总体指标原始记录，含
+          ``iteration`` 序号列。
+        - ``bootstrap_per_class_records`` : 每次 bootstrap、每个类别的逐类指标原始记录，
+          含 ``iteration`` 与 ``class`` 列。
 
     Raises
     ------
@@ -384,6 +388,8 @@ def evaluate_predictions(
     })
 
     overall_df = pd.DataFrame([overall])
+    overall_bootstrap_df = pd.DataFrame()
+    per_class_bootstrap_df = pd.DataFrame()
 
     # -------------------- Bootstrap 置信区间 --------------------
     if bootstrap_n and bootstrap_n > 0:
@@ -538,12 +544,28 @@ def evaluate_predictions(
             overall_df[k + "_ci_high"] = high
 
         # per-class CI 列
+        per_class_bootstrap_frames: List[pd.DataFrame] = []
         for cls in classes:
             mask = (per_class_df["class"].astype(str) == str(cls))
             for m, arr in per_class_boot[cls].items():
                 low, high = _ci(arr)
                 per_class_df.loc[mask, m + "_ci_low"]  = low
                 per_class_df.loc[mask, m + "_ci_high"] = high
+            class_boot_df = pd.DataFrame(per_class_boot[cls])
+            class_boot_df.insert(0, "iteration", np.arange(len(class_boot_df)))
+            class_boot_df.insert(0, "class", cls)
+            per_class_bootstrap_frames.append(class_boot_df)
+
+        overall_bootstrap_df = pd.DataFrame(overall_boot)
+        if not overall_bootstrap_df.empty:
+            overall_bootstrap_df.insert(
+                0, "iteration", np.arange(len(overall_bootstrap_df))
+            )
+        per_class_bootstrap_df = (
+            pd.concat(per_class_bootstrap_frames, ignore_index=True)
+            if per_class_bootstrap_frames
+            else pd.DataFrame(columns=["iteration", "class"])
+        )
 
     warnings_df = pd.DataFrame({"message": warn_list}) if warn_list else pd.DataFrame(columns=["message"])
 
@@ -553,6 +575,8 @@ def evaluate_predictions(
         "confusion": confusion_df,
         "class_distribution": class_dist_df,
         "warnings": warnings_df,
+        "bootstrap_overall_records": overall_bootstrap_df,
+        "bootstrap_per_class_records": per_class_bootstrap_df,
     }
 
 

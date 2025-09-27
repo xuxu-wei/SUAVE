@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 import json
@@ -105,6 +106,12 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
     "output_dir_name": "research_outputs_supervised",
 }
 
+FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
+    "FORCE_UPDATE_BENCHMARK_MODEL": False,
+    "FORCE_UPDATE_TSTR_MODEL": True,
+    "FORCE_UPDATE_TRTR_MODEL": True,
+}
+
 ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "schema": "01_schema_validation",
     "features": "02_feature_engineering",
@@ -118,6 +125,38 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "privacy": "10_privacy_assessment",
     "visualisation": "11_visualizations",
 }
+
+
+def read_bool_env_flag(variable: str, default: bool) -> bool:
+    """Return a boolean flag parsed from ``variable``.
+
+    Parameters
+    ----------
+    variable
+        Name of the environment variable to inspect.
+    default
+        Fallback value when the variable is undefined.
+
+    Returns
+    -------
+    bool
+        ``True`` if the variable is set to a truthy token, ``False`` otherwise.
+
+    Examples
+    --------
+    >>> import os
+    >>> os.environ["EXAMPLE_FLAG"] = "yes"
+    >>> read_bool_env_flag("EXAMPLE_FLAG", False)
+    True
+    >>> del os.environ["EXAMPLE_FLAG"]
+    >>> read_bool_env_flag("EXAMPLE_FLAG", True)
+    True
+    """
+
+    raw_value = os.getenv(variable)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 # =============================================================================

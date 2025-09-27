@@ -47,8 +47,9 @@
 
 1. 借助 `load_or_create_iteratively_imputed_features` 对各评估集执行迭代插补，生成可复用的 `*_imputed.joblib` 文件。
 2. 构建 Logistic Regression（带标准化）、KNN、Decision Tree、Random Forest 与 RBF-SVM 等 `Pipeline`，通过 `evaluate_transfer_baselines` 统一训练并评估；所有基线共享 `compute_binary_metrics` 统计 AUC、ACC、SPE、SEN 与 Brier，并写入 `baseline_models_{label}.csv`。
-3. 在临床基准方面，保留传统 ICU 评分（如数据集中现成的 SOFA 及相关器官支持指标）作为零参数对照：当 `mimic_mortality_utils.py` 中登记了此类 `baseline_probability_map` 项时，同样纳入基线汇总并在 `Notes` 中标记“临床评分”。
-4. 输出的指标 CSV 与 Markdown 表格需包含训练/验证/测试/eICU 全量指标，若外部验证缺失标签需在脚注注明处理策略。
+3. 脚本在 `07_baseline_models/` 下缓存拟合后的 `baseline_estimators_{label}.joblib`，二次运行时默认复用；若需强制重新训练，可在执行前设置 `FORCE_UPDATE_BENCHMARK_MODEL=1`（默认为 `0`）。相关布尔参数统一通过 `mimic_mortality_utils.read_bool_env_flag` 解析，以便批量实验脚本复用。
+4. 在临床基准方面，保留传统 ICU 评分（如数据集中现成的 SOFA 及相关器官支持指标）作为零参数对照：当 `mimic_mortality_utils.py` 中登记了此类 `baseline_probability_map` 项时，同样纳入基线汇总并在 `Notes` 中标记“临床评分”。
+5. 输出的指标 CSV 与 Markdown 表格需包含训练/验证/测试/eICU 全量指标，若外部验证缺失标签需在脚注注明处理策略。
 
 
 ### 7. SUAVE 模型构建、调参与训练
@@ -65,18 +66,21 @@
 
 1. 通过 `fit_isotonic_calibrator` 在内部验证集上拟合等渗校准器，必要时回退至逻辑回归温度缩放，并保存校准对象。
 2. 使用 `evaluate_predictions` 对训练、验证、MIMIC-IV 测试与 eICU 集执行 bootstrap（默认 1000 次）以估计指标置信区间，并生成 Excel 汇总；除表格主列的 AUC、ACC、SPE、SEN、Brier 外，Excel 中还会给出 `accuracy`、`balanced_accuracy`、`f1_macro`、`recall_macro`、`specificity_macro`、`sensitivity_pos`、`specificity_pos`、`roc_auc`、`pr_auc` 及其置信区间，以支撑不同风险偏好的诊断分析。
-3. 将生成的 `evaluation_metrics.csv`、校准曲线及相关图表保存为 PNG/SVG/PDF/JPG 四种格式，并写入 `05_evaluation_metrics/` 子目录，同时在实验日志中登记路径，便于后续报告引用与审计复核。
+3. 评估函数会同步导出 bootstrap 的原始采样记录：总体指标写入 `bootstrap_overall_records_{label}.csv`，逐类指标写入 `bootstrap_per_class_records_{label}.csv`，用于复核任意抽样迭代的轨迹。
+4. 将生成的 `evaluation_metrics.csv`、校准曲线及相关图表保存为 PNG/SVG/PDF/JPG 四种格式，并写入 `05_evaluation_metrics/` 子目录，同时在实验日志中登记路径，便于后续报告引用与审计复核。
 
 ### 9. 合成数据（TSTR/TRTR）与分布漂移分析
 
 1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR synthesis`、`TSTR synthesis-balance`、`TSTR synthesis-augment`、`TSTR synthesis-5x` 与 `TSTR synthesis-5x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
 2. 通过 `make_baseline_model_factories` 注册 `Logistic regression`、`Random forest` 与 `XGBoost` 三类下游分类器，对每个训练方案分别拟合并在 `evaluate_transfer_baselines` 中统计 `accuracy` 与 `roc_auc`（含置信区间）。
-3. 分布漂移的主要结局指标采用 `classifier_two_sample_test`：以 `TRTR (real)` 与 `TSTR synthesis` 作为两类样本，使用 XGBoost 分类器执行 C2ST 并报告 ROC-AUC 及 95% bootstrap 置信区间；同一流程下的逻辑回归 AUC 作为次要敏感性指标。
-4. 次要结局指标包括全局 `rbf_mmd` 与 `energy_distance`，均基于置换检验给出 `p` 值，用于量化生成数据与真实分布之间的整体偏移程度。
-5. `rbf_mmd`、`energy_distance` 与 `mutual_information_feature` 继续按特征逐列计算，定位非单调差异或潜在信息泄露风险的列，并与 C2ST 结果交叉验证。
-6. `plot_transfer_metric_bars` 负责绘制 TSTR/TRTR 方案在 `accuracy`、`roc_auc` 等指标上的分组柱状图（含置信区间），展示不同生成数据训练集对下游分类器的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
-7. 在生成数据性能分析后运行 `simple_membership_inference`，补充隐私攻击基线并记录攻击 AUC/阈值，支撑隐私风险评估章节。
-8. 所有 TRTR/TSTR 指标、C2ST 结果及分布漂移指标需导出至同一个 Excel 工作簿：`overall` 工作表整合 C2ST 与全局 MMD/能量距离统计，`per_feature` 工作表罗列逐列 MMD/能量距离/互信息；配套的分布漂移可视化图表需在 `09_distribution_shift/` 中以 PNG/SVG/PDF/JPG 四种格式保存，纳入附录及复现包。
+3. `evaluate_transfer_baselines` 的结果会缓存在 `08_transfer_learning/` 中的 `tstr_trtr_results_{label}.joblib`；若需跳过缓存直接重训，可设置 `FORCE_UPDATE_TSTR_MODEL=1` 或 `FORCE_UPDATE_TRTR_MODEL=1`（默认均为 `1`，即始终更新）。缓存中还包含训练/模型顺序元数据，复用时需保持与现有目录结构兼容。
+4. 运行结束后会额外导出 bootstrap 抽样记录：整体指标写入 `tstr_trtr_bootstrap_overall_records_{label}.csv`，逐类指标写入 `tstr_trtr_bootstrap_per_class_records_{label}.csv`，便于二次分析 TSTR/TRTR 的不确定性分布。
+5. 分布漂移的主要结局指标采用 `classifier_two_sample_test`：以 `TRTR (real)` 与 `TSTR synthesis` 作为两类样本，使用 XGBoost 分类器执行 C2ST 并报告 ROC-AUC 及 95% bootstrap 置信区间；同一流程下的逻辑回归 AUC 作为次要敏感性指标。
+6. 次要结局指标包括全局 `rbf_mmd` 与 `energy_distance`，均基于置换检验给出 `p` 值，用于量化生成数据与真实分布之间的整体偏移程度。
+7. `rbf_mmd`、`energy_distance` 与 `mutual_information_feature` 继续按特征逐列计算，定位非单调差异或潜在信息泄露风险的列，并与 C2ST 结果交叉验证。
+8. `plot_transfer_metric_bars` 负责绘制 TSTR/TRTR 方案在 `accuracy`、`roc_auc` 等指标上的分组柱状图（含置信区间），展示不同生成数据训练集对下游分类器的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
+9. 在生成数据性能分析后运行 `simple_membership_inference`，补充隐私攻击基线并记录攻击 AUC/阈值，支撑隐私风险评估章节。
+10. 所有 TRTR/TSTR 指标、C2ST 结果及分布漂移指标需导出至同一个 Excel 工作簿：`overall` 工作表整合 C2ST 与全局 MMD/能量距离统计，`per_feature` 工作表罗列逐列 MMD/能量距离/互信息；配套的分布漂移可视化图表需在 `09_distribution_shift/` 中以 PNG/SVG/PDF/JPG 四种格式保存，纳入附录及复现包。
 
 
 ### 10. 潜空间可视化、报告生成与归档
