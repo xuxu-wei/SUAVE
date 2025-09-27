@@ -1,0 +1,158 @@
+# 研究工作流模板
+
+本目录汇总了 SUAVE 项目在 `examples/` 中沉淀的研究脚本，并将其整理为可复用的“模板工程”。通过集中化的配置文件，你只需调整少量硬编码常量即可在新的临床数据上复用整套流程。
+
+## 目录概览
+
+| 文件 | 作用 | 备注 |
+| --- | --- | --- |
+| `analysis_config.py` | 集中定义数据集路径、标签名称、特征分组、图形配色、Optuna 搜索阈值等常量。 | 迁移到新数据集时，仅需修改此文件。导入时会被其它模块读取并作为单一事实来源。 |
+| `analysis_utils.py` | 研究流程的核心工具函数，涵盖 schema 校验、特征工程、模型训练、校准、评估与报告导出。 | 除非需要修改整体流程，否则保持逻辑不变；此文件从 `analysis_config.py` 读取全部配置。 |
+| `cls_eval.py` | 分类评估与 Bootstrap 汇总工具。 | 依赖 `pandas`、`numpy`，以及 `openpyxl`/`xlsxwriter` 等表格写入库。 |
+| `research-suave_optimize.py` | SUAVE 模型的 Optuna 调参入口。 | 读写最优 Trial、帕累托前沿与调参图表。 |
+| `research-supervised_analysis.py` | 主分析脚本：加载 Artefact、执行校准与评估、生成总结报告。 | 支持 `--trial-id` 参数与 `FORCE_UPDATE_*` 环境变量。 |
+| `datasets/` | 训练集、验证集、测试集、外部评估集等原始/加工数据的占位目录。 | 请放置与 `analysis_config.py` 中 schema 对应的 TSV/CSV 文件。 |
+
+## 快速开始
+
+1. **准备数据**
+   - 将数据集复制或软链接到 `datasets/`。
+   - 确认列名、数据类型、缺失值与 `analysis_config.py` 中的 `TARGET_COLUMNS`、`BENCHMARK_COLUMNS`、`VAR_GROUP_DICT` 等定义保持一致。
+
+2. **定制配置**
+   - 编辑 `analysis_config.py`，更新 `DATA_DIR`、标签名称、特征分组、输出目录、Optuna 搜索范围等。
+   - 检查 `DEFAULT_ANALYSIS_CONFIG` 以同步存储路径、缓存目录与运行超参数。
+
+3. **安装依赖**
+   - 按项目根目录的 `README.md` 或 `README-CN.md` 安装 SUAVE 及其可选依赖（Optuna、statsmodels、绘图后端等）。
+
+4. **运行 Optuna 搜索**
+   - 执行 `python research-suave_optimize.py` 生成帕累托前沿、最优 Trial JSON 与调参可视化。目录结构遵循 `analysis_config.py` 的 `ANALYSIS_SUBDIRECTORIES` 定义。
+
+5. **执行主分析**
+   - 运行 `python research-supervised_analysis.py [--trial-id N]` 以加载或训练目标模型、拟合校准器并完成下游评估。交互模式会提示选择 Trial，脚本模式可通过参数或环境变量控制缓存策略。
+   - 需要重新生成基线或迁移实验时，可设置 `FORCE_UPDATE_BENCHMARK_MODEL`、`FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL`。
+
+6. **整理与归档**
+   - 所有 Artefact 默认存储在 `resolve_analysis_output_root()` 指向的目录（通常为 `research_outputs_supervised/`）。请保留分阶段子目录以确保审计可追溯性。
+
+## 使用注意事项
+
+- **单一配置源**：务必将数据集路径、标签、特征分组等修改集中在 `analysis_config.py`。若在运行后更改配置，请清理相关缓存以避免 schema 不一致。
+- **Schema 校验**：在执行耗时步骤前，先调用 `define_schema` 与 `schema_to_dataframe` 生成最新的 schema 记录。更新特征或列类型时需同步刷新。
+- **缓存管理**：修改影响特征工程的设置后，删除 `02_feature_engineering/` 等目录中的旧缓存，防止旧特征沿用。
+- **可选依赖**：潜空间图或路径图等高级可视化可能需要 `networkx`、`pygraphviz` 等额外库。根据需求安装或在脚本中禁用相关段落。
+- **可重复性**：`RANDOM_STATE` 控制 Optuna、数据划分、基线模型等多个随机流程。若需更新，请在研究日志中记录原因与时间。
+
+## 通用监督学习分析流程
+
+以下步骤整合自原版研究协议，适用于任意结构化临床数据的监督学习研究。请将示例路径替换为你在 `analysis_config.py` 中配置的实际目录，并在每一步维护详尽的研究日志。
+
+### 1. 研究目标与核心指标
+- **目的**：明确研究问题、建模目标与评估维度，为实验提供统一的成效标准。
+- **结果解读**：通常以 AUROC/AUPRC 衡量判别能力，结合 Brier Score、期望校准误差（ECE）与校准曲线评估概率可靠性。
+- **输入**：目标标签枚举与评估配置，来自 `analysis_config.py` 或对应工具函数。
+- **输出**：在研究日志中记录目标定义与评估方案，为后续报告撰写奠定基础。
+
+### 2. 数据来源与管理
+- **目的**：列出训练、验证、测试、外部评估等必要数据集，并规划 Artefact 的目录结构，确保研究可复现、可审计。
+- **结果解读**：schema 校验与缺失值报告用于确认数据完整性；目录命名需与后续章节对应，方便追踪产出。
+- **输入**：`datasets/` 下的 TSV/CSV 数据、schema 定义、必要的元数据。
+- **输出**：在 `01_data_and_schema/` 记录数据加载日志、schema DataFrame 与 Markdown 摘要。
+- **执行要点**：
+  1. 确定训练集、内部验证集、测试集与外部验证集的来源及纳入标准，保持与配置文件一致。
+  2. 保留原始列名与数据类型，必要时在日志中记录转换或派生字段。
+  3. 按章节编号划分输出目录（默认 `01` 至 `12`），所有 Artefact（缓存、模型、图表、报告）写入对应子目录。
+
+### 3. 准备阶段
+- **目的**：初始化实验配置、输出目录、环境变量，保证流程可重入。
+- **结果解读**：通过目录与缓存检查确认是否可以复用历史 Artefact。
+- **输入**：`analysis_config.py` 中的默认设置与命令行参数。
+- **输出**：在研究日志中记录配置摘要与缓存状态。
+- **执行要点**：
+  1. 确认目标标签存在于配置的 `TARGET_COLUMNS`，并列出潜在的扩展标签。
+  2. 自动创建输出目录与 Optuna 存储路径；必要时备份既有最优 Trial 信息。
+  3. 若检测到已有模型或调参缓存，记录对应配置以便差异分析。
+
+### 4. 数据加载与 Schema 校验
+- **目的**：验证列名、类型、取值范围，为特征工程建立可信输入。
+- **结果解读**：校验通过说明数据与预期一致；若发现冲突需在日志中说明并修复。
+- **输入**：`01_data_and_schema/` 中的 TSV/CSV 或原始数据集。
+- **输出**：schema DataFrame、Markdown 报告、可选可视化。
+- **执行要点**：
+  1. 使用 `load_dataset` 读取训练/验证/测试/外部集，确保列齐全。
+  2. 调用 `define_schema(..., mode="interactive")` 生成 schema，必要时手动调整数值范围或类别映射。
+  3. 借助 `schema_to_dataframe`、`render_dataframe` 导出摘要并保存到输出目录。
+
+### 5. 特征构建与内部验证划分
+- **目的**：在统一流程下生成模型输入，并构建稳定的内部验证集。
+- **结果解读**：成功生成特征缓存意味着后续模型可直接加载；若失败需回溯数据阶段。
+- **输入**：`02_feature_engineering/` 中的缓存或 `prepare_features` 生成的新特征。
+- **输出**：特征矩阵、验证划分日志、`baseline_feature_frames`。
+- **执行要点**：
+  1. 对训练集运行 `prepare_features`，并使用固定 `VALIDATION_SIZE`、`RANDOM_STATE` 进行分层划分。
+  2. 对测试集与外部集复用同一转换逻辑，确保列顺序一致。
+  3. 记录所有派生特征、缺失值处理策略与生成时间。
+
+### 6. 基线模型与对照实验
+- **目的**：构建与 SUAVE 独立的分类基线，用于衡量数据质量与合成数据贡献。
+- **结果解读**：对比各基线的 AUC、准确率、Brier Score，以评估数据可用性。
+- **输入**：迭代插补特征、基线模型工厂函数。
+- **输出**：`08_baseline_models/` 下的 `baseline_estimators_{label}.joblib`、`baseline_models_{label}.csv`。
+- **执行要点**：
+  1. 使用 `load_or_create_iteratively_imputed_features` 生成或复用插补特征，并记录缺失处理策略。
+  2. 通过 `evaluate_transfer_baselines` 训练 Logistic 回归、随机森林、GBDT 等基线，统一统计指标。
+  3. 若集成临床评分或专家基准，需注明数据来源与缺失处理方式。
+
+### 7. SUAVE 模型构建、调参与训练
+- **目的**：利用 Optuna 搜索结果训练最优 SUAVE 模型，并生成可复用的 Artefact。
+- **结果解读**：验证集 AUROC 及迁移实验 ΔAUC 等指标用于选择最终模型。
+- **输入**：`03_optuna_search/` 中的最优参数、trial CSV 与图表。
+- **输出**：`04_suave_training/` 下的模型权重、manifest 与训练日志。
+- **执行要点**：
+  1. 若存在历史最优 Trial，优先加载对应 JSON；否则使用默认超参重新搜索。
+  2. 记录每个训练阶段（预训练、分类头、联合微调）的轮数、早停标准与耗时。
+  3. 导出参数重要性、收敛曲线、帕累托前沿图，并保存到 `03_optuna_search/figures/`。
+
+### 8. 分类、校准与不确定性分析
+- **目的**：量化模型概率输出的可靠性，并汇总各指标的置信区间与可视化。
+- **结果解读**：平滑的校准曲线和较低的 ECE 表示概率可信；Bootstrap 区间衡量指标稳定性。
+- **输入**：`04_suave_training/` 中的模型、`05_calibration_uncertainty/` 中的校准器、`02_feature_engineering/` 中的特征。
+- **输出**：校准对象、曲线图、指标表格与 Excel 汇总。
+- **执行要点**：
+  1. 通过 `fit_isotonic_calibrator` 在内部验证集拟合校准器，必要时回退到温度缩放。
+  2. 使用 `evaluate_predictions` 对所有数据集执行 Bootstrap，生成 CSV/Excel 以及抽样记录。
+  3. 将校准曲线、指标图表保存为多种格式，便于报告引用。
+
+### 9. 合成数据 TSTR/TRTR 评估
+- **目的**：评估生成数据对监督任务的迁移能力，与真实数据训练的基线做比较。
+- **结果解读**：关注真实 vs. 合成训练的指标差异；差距越小，说明生成器迁移价值越高。
+- **输入**：`build_tstr_training_sets` 生成的训练方案、迭代插补特征、基线模型工厂。
+- **输出**：`09_tstr_trtr_transfer/` 下的结果缓存与 Excel/图表。
+- **执行要点**：
+  1. 按既定方案（真实训练、合成训练、平衡/增广等）构建训练集。
+  2. 统一使用 `evaluate_transfer_baselines` 计算 accuracy、roc_auc 及置信区间。
+  3. 需要纳入 SUAVE 迁移评估时，确保已有最优 Trial 并设置相关环境变量。
+
+### 10. 合成数据分布漂移分析
+- **目的**：量化生成数据与真实数据的分布差异，定位潜在失真。
+- **结果解读**：C2ST ROC-AUC 接近 0.5 表示难以区分；MMD、能量距离与互信息提供全局/逐列视角。
+- **输入**：TSTR/TRTR 数据拆分、基线模型工厂、分布漂移评估函数。
+- **输出**：`10_distribution_shift/` 下的对比表格、图表与逐列统计。
+- **执行要点**：
+  1. 使用 `classifier_two_sample_test` 评估多种分类器的区分能力。
+  2. 结合 `rbf_mmd`、`energy_distance`、`mutual_information_feature` 获取全局与逐列指标。
+  3. 将所有结果导出为 Excel/图像，并在研究日志记录关键信息。
+
+### 11. 潜空间可视化、报告生成与归档
+- **目的**：整合模型性能与解释性结果，形成可交付的研究报告与可视化资产。
+- **结果解读**：潜空间图用于定性评估生成特征区分度，相关性分析揭示潜变量与临床特征之间的联系。
+- **输入**：`04_suave_training/`、`05_calibration_uncertainty/`、`06_evaluation_metrics/` 中的 Artefact。
+- **输出**：`12_visualizations/` 中的图像、`evaluation_summary_{label}.md` 等总结文档。
+- **执行要点**：
+  1. 使用 `plot_latent_space` 生成潜空间投影，对比不同数据集的分布。
+  2. 借助 `dataframe_to_markdown`、`render_dataframe`、`write_results_to_excel_unique` 汇总指标并生成报告草稿。
+  3. 调用 `compute_feature_latent_correlation`、`plot_feature_latent_*` 等函数量化潜变量与特征/结局的相关性，导出 CSV 与可视化。
+  4. 归档所有模型、插补缓存、图表、日志与数据引用，确保第三方可复现。
+
+该模板保持数据集无关性，只要在 `analysis_config.py` 中完成适配，即可在新的临床研究任务上复用完整流程。
