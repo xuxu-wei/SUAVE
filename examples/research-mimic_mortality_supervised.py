@@ -576,6 +576,7 @@ if model is None:
     model.fit(
         X_train_model,
         y_train_model,
+        plot_monitor=IS_INTERACTIVE,
         **fit_kwargs,
     )
     model_was_trained = True
