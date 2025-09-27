@@ -147,6 +147,7 @@ from suave.plots import (  # noqa: E402
 TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
+IS_INTERACTIVE = is_interactive_session()
 
 DATASET_NAME_MAP = BASELINE_DATASET_LABELS
 DATASET_ORDER = tuple(BASELINE_DATASET_ORDER)

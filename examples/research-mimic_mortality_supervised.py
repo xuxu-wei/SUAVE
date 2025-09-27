@@ -141,20 +141,7 @@ from suave.plots import (  # noqa: E402
 TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
-
 IS_INTERACTIVE = is_interactive_session()
-
-cache_default = not IS_INTERACTIVE
-
-FORCE_UPDATE_BENCHMARK_MODEL = cache_default
-FORCE_UPDATE_TSTR_MODEL = cache_default
-FORCE_UPDATE_TRTR_MODEL = cache_default
-FORCE_UPDATE_BOOTSTRAP = cache_default
-FORCE_UPDATE_SUAVE = read_bool_env_flag(
-    "FORCE_UPDATE_SUAVE",
-    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_SUAVE"],
-)
-INCLUDE_SUAVE_TRANSFER = read_bool_env_flag("INCLUDE_SUAVE_TRANSFER", False)
 
 CLI_REQUESTED_TRIAL_ID: Optional[int] = None
 if not IS_INTERACTIVE:
