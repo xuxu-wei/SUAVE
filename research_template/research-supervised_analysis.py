@@ -42,10 +42,27 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
 from analysis_config import (
+    ANALYSIS_SUBDIRECTORIES,
     BASELINE_DATASET_LABELS,
     BASELINE_DATASET_ORDER,
     BASELINE_MODEL_ABBREVIATIONS,
     BASELINE_MODEL_PIPELINE_BUILDERS,
+    BENCHMARK_COLUMNS,
+    CLINICAL_SCORE_BENCHMARK_STRATEGY,
+    DATA_DIR,
+    DATASET_FILENAMES,
+    FORCE_UPDATE_FLAG_DEFAULTS,
+    PARETO_MAX_ABS_DELTA_AUC,
+    PARETO_MIN_VALIDATION_ROAUC,
+    RANDOM_STATE,
+    TARGET_COLUMNS,
+    TARGET_LABEL,
+    VALIDATION_SIZE,
+    VAR_GROUP_DICT,
+    PATH_GRAPH_GROUP_COLORS,
+    PATH_GRAPH_NODE_COLORS,
+    PATH_GRAPH_NODE_GROUPS,
+    PATH_GRAPH_NODE_LABELS,
 )
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
@@ -56,20 +73,7 @@ if not EXAMPLES_DIR.exists():
 if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
-from mimic_mortality_utils import (  # noqa: E402
-    RANDOM_STATE,
-    TARGET_COLUMNS,
-    BENCHMARK_COLUMNS,
-    CLINICAL_SCORE_BENCHMARK_STRATEGY,
-    VALIDATION_SIZE,
-    PARETO_MAX_ABS_DELTA_AUC,
-    PARETO_MIN_VALIDATION_ROAUC,
-    DATA_DIR,
-    VAR_GROUP_DICT,
-    PATH_GRAPH_GROUP_COLORS,
-    PATH_GRAPH_NODE_COLORS,
-    PATH_GRAPH_NODE_GROUPS,
-    PATH_GRAPH_NODE_LABELS,
+from analysis_utils import (  # noqa: E402
     build_analysis_config,
     prepare_analysis_output_directories,
     parse_script_arguments,
@@ -88,7 +92,6 @@ from mimic_mortality_utils import (  # noqa: E402
     load_or_create_iteratively_imputed_features,
     iteratively_impute_clinical_scores,
     ModelLoadingPlan,
-    FORCE_UPDATE_FLAG_DEFAULTS,
     make_baseline_model_factories,
     make_study_name,
     read_bool_env_flag,
@@ -189,20 +192,7 @@ OUTPUT_DIR = resolve_analysis_output_root(analysis_config["output_dir_name"])
 
 analysis_dirs = prepare_analysis_output_directories(
     OUTPUT_DIR,
-    (
-        "data_schema",
-        "feature_engineering",
-        "optuna",
-        "suave_model",
-        "calibration_uncertainty",
-        "evaluation_reports",
-        "bootstrap_analysis",
-        "baseline_models",
-        "tstr_trtr",
-        "distribution_shift",
-        "privacy_assessment",
-        "visualisations",
-    ),
+    tuple(ANALYSIS_SUBDIRECTORIES.keys()),
 )
 
 DATA_SCHEMA_DIR = analysis_dirs["data_schema"]
@@ -222,9 +212,28 @@ analysis_config["optuna_storage"] = (
     f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
 )
 
-train_df = load_dataset(DATA_DIR / "mimic-mortality-train.tsv")
-test_df = load_dataset(DATA_DIR / "mimic-mortality-test.tsv")
-external_df = load_dataset(DATA_DIR / "eicu-mortality-external_val.tsv")
+dataset_files = DATASET_FILENAMES
+
+train_file = dataset_files.get("train")
+if not train_file:
+    raise ValueError(
+        "DATASET_FILENAMES['train'] must be set to the training dataset file name."
+    )
+test_file = dataset_files.get("internal_test")
+if not test_file:
+    raise ValueError(
+        "DATASET_FILENAMES['internal_test'] must be set to the test dataset file name."
+    )
+
+train_df = load_dataset(DATA_DIR / train_file)
+test_df = load_dataset(DATA_DIR / test_file)
+
+external_file = dataset_files.get("external_validation")
+external_df: Optional[pd.DataFrame]
+if external_file:
+    external_df = load_dataset(DATA_DIR / external_file)
+else:
+    external_df = None
 
 if TARGET_LABEL not in TARGET_COLUMNS:
     raise ValueError(
@@ -362,14 +371,11 @@ benchmark_validation = benchmark_validation.reset_index(drop=True)
 X_test = prepare_features(test_df, FEATURE_COLUMNS)
 y_test = test_df[TARGET_LABEL]
 
-external_features: Optional[pd.DataFrame]
-external_labels: Optional[pd.Series]
-if TARGET_LABEL in external_df.columns:
+external_features: Optional[pd.DataFrame] = None
+external_labels: Optional[pd.Series] = None
+if external_df is not None and TARGET_LABEL in external_df.columns:
     external_features = prepare_features(external_df, FEATURE_COLUMNS)
     external_labels = external_df[TARGET_LABEL]
-else:
-    external_features = None
-    external_labels = None
 
 benchmark_frames: Dict[str, pd.DataFrame] = {
     TRAIN_DATASET_NAME: benchmark_train,
@@ -378,7 +384,7 @@ benchmark_frames: Dict[str, pd.DataFrame] = {
         test_df.loc[:, available_benchmark_columns].reset_index(drop=True)
     ),
 }
-if external_features is not None and TARGET_LABEL in external_df.columns:
+if external_df is not None and external_features is not None:
     external_benchmark_columns = [
         column for column in available_benchmark_columns if column in external_df.columns
     ]

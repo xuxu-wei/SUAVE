@@ -4,6 +4,15 @@ This module centralises every project-specific constant that is expected to
 change when porting the research workflow to a new dataset. Users should edit
 these values instead of modifying :mod:`analysis_utils` directly.
 
+Alignment checklist
+-------------------
+* 在运行分析之前，请先确认不同数据集（训练、测试、外部验证等）中的变量集合已经对齐；只有
+  :data:`BENCHMARK_COLUMNS` 中登记的临床评分允许在不同数据集中缺失。
+* 模型特征是通过排除 :data:`BENCHMARK_COLUMNS` 和 :data:`TARGET_COLUMNS` 得到的，因此数据文件
+  中不应再包含其它非对齐变量；否则这些额外列会被视为模型特征。
+* :data:`TARGET_COLUMNS` 仅用于在构建特征时排除目标变量，真正用于训练与评估的标签由
+  :data:`TARGET_LABEL` 指定。
+
 Emoji legend
 ------------
 🟢 Update for every new project.
@@ -14,7 +23,7 @@ Emoji legend
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
@@ -31,13 +40,33 @@ TEMPLATE_ROOT = Path(__file__).resolve().parent
 # === Dataset, modelling and evaluation defaults ==============================
 # =============================================================================
 
+# 🟢 Directory containing raw tabular datasets used by the workflow.
+DATA_DIR: Path = (TEMPLATE_ROOT / "datasets").resolve()
+
+# 🟢 Primary target label for supervised analysis. Must appear in ``TARGET_COLUMNS``.
+TARGET_LABEL: str = "in_hospital_mortality"
+
+# 🟢 Ordered tuple of candidate target columns for the current project.
+#     Only :data:`TARGET_LABEL` participates in modelling.
+#     （仅 :data:`TARGET_LABEL` 会用于建模，其余条目用于避免误把目标列当成特征。）
+TARGET_COLUMNS: Tuple[str, ...] = ("in_hospital_mortality", "28d_mortality")
+
+# 🟢 File names for the canonical dataset splits. Replace the placeholders with
+#     your own file names.
+#     （若没有外部验证集，可删除 ``"external_validation"`` 条目，并同步更新
+#     :data:`BASELINE_DATASET_LABELS` 与 :data:`BASELINE_DATASET_ORDER`。）
+DATASET_FILENAMES: Dict[str, Optional[str]] = {
+    "train": "mimic-mortality-train.tsv",
+    "internal_test": "mimic-mortality-test.tsv",
+    # Validation features are derived via ``train_test_split`` from the train file.
+    "external_validation": "eicu-mortality-external_val.tsv",
+}
+
 # 🟡 Random seed reused across dataset splits, baseline models, and Optuna.
 RANDOM_STATE: int = 20201021
 
-# 🟢 Ordered tuple of candidate target columns for the current project.
-TARGET_COLUMNS: Tuple[str, ...] = ("in_hospital_mortality", "28d_mortality")
-
 # 🟢 Clinical score columns that act as reference benchmarks.
+#     （这些列会被排除在特征之外，仅在评估或缺失值处理阶段使用。）
 BENCHMARK_COLUMNS: Tuple[str, ...] = (
     "APS_III",
     "APACHE_IV",
@@ -46,13 +75,14 @@ BENCHMARK_COLUMNS: Tuple[str, ...] = (
 )
 
 # 🟡 Strategy used when comparing clinical scores with model predictions.
+#     Available options:
+#     ``"imputed"`` – default iterative imputation before evaluating scores.
+#     Any other value – keep observed scores and skip rows with missing values.
+#     （修改时请同步阅读 `examples/mimic_mortality_utils.py` 中的注释，确保主流程行为一致。）
 CLINICAL_SCORE_BENCHMARK_STRATEGY: str = "imputed"
 
 # 🟡 Fraction of the training cohort reserved for internal validation.
 VALIDATION_SIZE: float = 0.2
-
-# 🟢 Directory containing raw tabular datasets used by the workflow.
-DATA_DIR: Path = (TEMPLATE_ROOT / "datasets").resolve()
 
 # 🟡 Minimum validation AUROC for an Optuna trial to be considered viable.
 PARETO_MIN_VALIDATION_ROAUC: float = 0.81
@@ -115,7 +145,9 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "visualisations": "12_visualizations",
 }
 
-# 🟢 Human-readable labels for standard dataset splits used in reports.
+# 🟢 Human-readable labels for standard dataset splits used in reports。键值必须
+#     与 :data:`DATASET_FILENAMES`、下游缓存文件命名保持一致。若无外部验证集，请移除
+#     ``"external_validation"`` 项并在 :data:`BASELINE_DATASET_ORDER` 中同步删除。
 BASELINE_DATASET_LABELS: Dict[str, str] = {
     "train": "Train",
     "validation": "Validation",
@@ -123,7 +155,8 @@ BASELINE_DATASET_LABELS: Dict[str, str] = {
     "external_validation": "eICU external",
 }
 
-# 🟡 Preferred ordering of dataset labels when generating tables and figures.
+# 🟡 Preferred ordering of dataset labels when generating tables and figures。
+#     该顺序会影响生成的表格/图像，亦用于遍历基线模型缓存。请确保仅包含实际存在的数据集键。
 BASELINE_DATASET_ORDER: Tuple[str, ...] = (
     "train",
     "validation",
@@ -339,6 +372,7 @@ __all__ = [
     "BENCHMARK_COLUMNS",
     "CLINICAL_SCORE_BENCHMARK_STRATEGY",
     "DATA_DIR",
+    "DATASET_FILENAMES",
     "DEFAULT_ANALYSIS_CONFIG",
     "FORCE_UPDATE_FLAG_DEFAULTS",
     "HEAD_HIDDEN_DIMENSION_OPTIONS",
@@ -351,6 +385,7 @@ __all__ = [
     "PARETO_MAX_ABS_DELTA_AUC",
     "PARETO_MIN_VALIDATION_ROAUC",
     "RANDOM_STATE",
+    "TARGET_LABEL",
     "TARGET_COLUMNS",
     "VALIDATION_SIZE",
     "VAR_GROUP_DICT",

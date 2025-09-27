@@ -17,10 +17,12 @@
 
 1. **准备数据**
    - 将数据集复制或软链接到 `datasets/`。
-   - 确认列名、数据类型、缺失值与 `analysis_config.py` 中的 `TARGET_COLUMNS`、`BENCHMARK_COLUMNS`、`VAR_GROUP_DICT` 等定义保持一致。
+   - 确认训练集、测试集及（如有）外部验证集的列名、数据类型、缺失值处理策略完全一致；只有 `BENCHMARK_COLUMNS` 中登记的临床评分允许在部分数据集中缺失。
+   - 由于特征列是通过排除 `BENCHMARK_COLUMNS` 与 `TARGET_COLUMNS` 得到的，请确保数据文件中除目标列与临床评分外不包含额外信息，否则这些列会自动进入模型特征。
 
 2. **定制配置**
-   - 编辑 `analysis_config.py`，更新 `DATA_DIR`、标签名称、特征分组、输出目录、Optuna 搜索范围等。
+   - 编辑 `analysis_config.py`，更新 `DATA_DIR`、`DATASET_FILENAMES`、标签名称、特征分组、输出目录、Optuna 搜索范围等。若研究不包含外部验证集，可删除 `DATASET_FILENAMES`、`BASELINE_DATASET_LABELS`、`BASELINE_DATASET_ORDER` 中的 `external_validation` 项。
+   - 根据研究目标设置 `TARGET_LABEL`（实际建模用的标签）与 `TARGET_COLUMNS`（用于排除的所有目标变量集合），保持两者一致以避免误用。
    - 检查 `DEFAULT_ANALYSIS_CONFIG` 以同步存储路径、缓存目录与运行超参数。
 
 3. **安装依赖**
@@ -43,6 +45,7 @@
 - **缓存管理**：修改影响特征工程的设置后，删除 `02_feature_engineering/` 等目录中的旧缓存，防止旧特征沿用。
 - **可选依赖**：潜空间图或路径图等高级可视化可能需要 `networkx`、`pygraphviz` 等额外库。根据需求安装或在脚本中禁用相关段落。
 - **可重复性**：`RANDOM_STATE` 控制 Optuna、数据划分、基线模型等多个随机流程。若需更新，请在研究日志中记录原因与时间。
+- **临床评分策略**：`CLINICAL_SCORE_BENCHMARK_STRATEGY="imputed"` 时会对 `BENCHMARK_COLUMNS` 进行迭代插补后再评估，设置为其他值则保持原始观测并跳过缺失样本；如需调整，请同步检查主流程与 `analysis_config.py` 中的注释。
 - **⚠️ 深度修改提醒**：TSTR/TRTR 基线模型工厂、分布漂移评估函数与绘图参数主要位于 `research-supervised_analysis.py` 和 `analysis_utils.py` 中。若需调整，请先确认依赖关系并备份原始实现。
 
 ## 通用监督学习分析流程
@@ -101,6 +104,7 @@
 - **输入**：迭代插补特征、基线模型工厂函数。
 - **输出**：`08_baseline_models/` 下的 `baseline_estimators_{label}.joblib`、`baseline_models_{label}.csv`。
 - **执行要点**：
+  0. `BASELINE_DATASET_LABELS` 决定结果表中的数据集名称，`BASELINE_DATASET_ORDER` 控制输出顺序；如移除外部验证集，请同步修改两者及 `DATASET_FILENAMES`。
   1. 使用 `load_or_create_iteratively_imputed_features` 生成或复用插补特征，并记录缺失处理策略。
   2. 通过 `evaluate_transfer_baselines` 训练 Logistic 回归、随机森林、GBDT 等基线，统一统计指标。
   3. 若集成临床评分或专家基准，需注明数据来源与缺失处理方式。
