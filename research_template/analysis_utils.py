@@ -2248,7 +2248,17 @@ class IsotonicProbabilityCalibrator:
         return self.classes_[indices]
 
     def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple proxy
-        return getattr(self.base_estimator, name)
+        try:
+            base = object.__getattribute__(self, "base_estimator")
+        except AttributeError as exc:
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {name!r}"
+            ) from exc
+        if base is None or base is self:
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {name!r}"
+            )
+        return getattr(base, name)
 
 
 def fit_isotonic_calibrator(
