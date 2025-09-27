@@ -71,6 +71,8 @@ BENCHMARK_COLUMNS = (
     "OASIS",
 )  # do not include in training. Only use for benchamrk validation.
 
+CLINICAL_SCORE_BENCHMARK_STRATEGY: str = "imputed"
+
 VALIDATION_SIZE: float = 0.2
 
 DATA_DIR: Path = (EXAMPLES_DIR / "data" / "sepsis_mortality_dataset").resolve()
@@ -334,6 +336,7 @@ __all__ = [
     "RANDOM_STATE",
     "TARGET_COLUMNS",
     "BENCHMARK_COLUMNS",
+    "CLINICAL_SCORE_BENCHMARK_STRATEGY",
     "VALIDATION_SIZE",
     "DATA_DIR",
     "Schema",
@@ -366,6 +369,7 @@ __all__ = [
     "kolmogorov_smirnov_statistic",
     "load_dataset",
     "load_or_create_iteratively_imputed_features",
+    "iteratively_impute_clinical_scores",
     "make_logistic_pipeline",
     "make_random_forest_pipeline",
     "make_gradient_boosting_pipeline",
@@ -1506,6 +1510,72 @@ def load_or_create_iteratively_imputed_features(
         imputed_features[name] = imputed_df
 
     return imputed_features, dataset_paths, False
+
+
+def iteratively_impute_clinical_scores(
+    score_frames: Mapping[str, pd.DataFrame],
+    feature_frames: Mapping[str, pd.DataFrame],
+    *,
+    columns: Sequence[str],
+    reference_key: str,
+) -> Dict[str, pd.DataFrame]:
+    """Return copies of ``score_frames`` with missing values imputed per score."""
+
+    if reference_key not in score_frames:
+        raise KeyError(
+            f"Reference key '{reference_key}' missing from score frames: {list(score_frames)}"
+        )
+    if reference_key not in feature_frames:
+        raise KeyError(
+            f"Reference key '{reference_key}' missing from feature frames: {list(feature_frames)}"
+        )
+
+    from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+    from sklearn.impute import IterativeImputer
+
+    imputed_frames = {name: frame.copy() for name, frame in score_frames.items()}
+
+    reference_scores = score_frames[reference_key]
+    available_columns = [
+        column for column in columns if column in reference_scores.columns
+    ]
+
+    if not available_columns:
+        return imputed_frames
+
+    reference_features = feature_frames[reference_key]
+
+    for column in available_columns:
+        imputer = IterativeImputer(max_iter=100, tol=1e-2)
+        training_matrix = pd.concat(
+            [
+                reference_features.reset_index(drop=True),
+                reference_scores[[column]].reset_index(drop=True),
+            ],
+            axis=1,
+        )
+        imputer.fit(training_matrix)
+
+        for dataset_name, score_frame in score_frames.items():
+            if column not in score_frame.columns:
+                continue
+            feature_frame = feature_frames.get(dataset_name)
+            if feature_frame is None:
+                continue
+            dataset_matrix = pd.concat(
+                [
+                    feature_frame.reset_index(drop=True),
+                    score_frame[[column]].reset_index(drop=True),
+                ],
+                axis=1,
+            )
+            transformed = imputer.transform(dataset_matrix)
+            imputed_series = pd.Series(
+                transformed[:, -1], index=score_frame.index, name=column
+            )
+            imputed_frames[dataset_name][column] = imputed_series
+
+    return imputed_frames
 
 
 def make_logistic_pipeline(random_state: Optional[int] = None) -> Pipeline:
