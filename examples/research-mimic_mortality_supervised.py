@@ -491,7 +491,7 @@ baseline_probability_map: Dict[str, Dict[str, np.ndarray]] = {
 model_abbreviation_lookup = {
     "Logistic regression": "LR",
     "KNN": "KNN",
-    "Gradient boosting": "GB",
+    "Gradient boosting": "GBDT",
     "Random forest": "RF",
     "SVM (RBF)": "SVM",
 }
