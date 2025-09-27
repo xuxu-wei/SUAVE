@@ -1930,9 +1930,6 @@ summary_lines.append(
 summary_lines.append(
     f"- Per-class metrics: {bootstrap_per_class_path.relative_to(OUTPUT_DIR)}"
 )
-summary_lines.append(
-    f"- Excel workbook: {bootstrap_excel_path.relative_to(OUTPUT_DIR)}"
-)
 if bootstrap_overall_records_path is not None:
     summary_lines.append(
         f"- Overall bootstrap samples: {bootstrap_overall_records_path.relative_to(OUTPUT_DIR)}"
