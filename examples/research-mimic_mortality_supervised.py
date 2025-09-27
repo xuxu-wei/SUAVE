@@ -36,14 +36,13 @@ import matplotlib.pyplot as plt
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
-from sklearn.tree import DecisionTreeClassifier
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
 if not EXAMPLES_DIR.exists():
@@ -389,9 +388,12 @@ baseline_models: Dict[str, Pipeline] = {
             ("classifier", KNeighborsClassifier(n_neighbors=25)),
         ]
     ),
-    "Decision tree": Pipeline(
+    "Gradient boosting": Pipeline(
         [
-            ("classifier", DecisionTreeClassifier(random_state=RANDOM_STATE)),
+            (
+                "classifier",
+                GradientBoostingClassifier(random_state=RANDOM_STATE),
+            ),
         ]
     ),
     "Random forest": Pipeline(
@@ -430,7 +432,7 @@ baseline_probability_map: Dict[str, Dict[str, np.ndarray]] = {
 model_abbreviation_lookup = {
     "Logistic regression": "LR",
     "KNN": "KNN",
-    "Decision tree": "DT",
+    "Gradient boosting": "GB",
     "Random forest": "RF",
     "SVM (RBF)": "SVM",
 }

@@ -46,7 +46,7 @@
 ### 6. 基线模型与对照实验
 
 1. 借助 `load_or_create_iteratively_imputed_features` 对各评估集执行迭代插补，生成可复用的 `*_imputed.joblib` 文件。
-2. 构建 Logistic Regression（带标准化）、KNN、Decision Tree、Random Forest 与 RBF-SVM 等 `Pipeline`，通过 `evaluate_transfer_baselines` 统一训练并评估；所有基线共享 `compute_binary_metrics` 统计 AUC、ACC、SPE、SEN 与 Brier，并写入 `baseline_models_{label}.csv`。
+2. 构建 Logistic Regression（带标准化）、KNN、Gradient Boosting、Random Forest 与 RBF-SVM 等 `Pipeline`，通过 `evaluate_transfer_baselines` 统一训练并评估；所有基线共享 `compute_binary_metrics` 统计 AUC、ACC、SPE、SEN 与 Brier，并写入 `baseline_models_{label}.csv`。
 3. 脚本在 `07_baseline_models/` 下缓存拟合后的 `baseline_estimators_{label}.joblib`，二次运行时默认复用；若需强制重新训练，可在执行前设置 `FORCE_UPDATE_BENCHMARK_MODEL=1`（默认为 `0`）。相关布尔参数统一通过 `mimic_mortality_utils.read_bool_env_flag` 解析，以便批量实验脚本复用。
 4. 在临床基准方面，保留传统 ICU 评分（如数据集中现成的 SOFA 及相关器官支持指标）作为零参数对照：当 `mimic_mortality_utils.py` 中登记了此类 `baseline_probability_map` 项时，同样纳入基线汇总并在 `Notes` 中标记“临床评分”。
 5. 输出的指标 CSV 与 Markdown 表格需包含训练/验证/测试/eICU 全量指标，若外部验证缺失标签需在脚注注明处理策略。
