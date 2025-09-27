@@ -100,7 +100,7 @@ HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
 }
 
 DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
-    "optuna_trials": 60,
+    "optuna_trials": 5,
     "optuna_timeout": 3600 * 48,
     "optuna_study_prefix": "supervised",
     "optuna_storage": None,
