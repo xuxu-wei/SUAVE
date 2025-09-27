@@ -99,12 +99,14 @@ analysis_dirs = prepare_analysis_output_directories(
     OUTPUT_DIR,
     (
         "optuna",
-        "model",
+        "suave_model",
+        "calibration_uncertainty",
     ),
 )
 
 OPTUNA_DIR = analysis_dirs["optuna"]
-MODEL_DIR = analysis_dirs["model"]
+SUAVE_MODEL_DIR = analysis_dirs["suave_model"]
+CALIBRATION_DIR = analysis_dirs["calibration_uncertainty"]
 
 analysis_config["optuna_storage"] = (
     f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
@@ -584,14 +586,14 @@ model.fit(
 
 isotonic_calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
 
-model_path = MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
-calibrator_path = MODEL_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
+model_path = SUAVE_MODEL_DIR / f"suave_best_{TARGET_LABEL}.pt"
+calibrator_path = CALIBRATION_DIR / f"isotonic_calibrator_{TARGET_LABEL}.joblib"
 
 model.save(model_path)
 joblib.dump(isotonic_calibrator, calibrator_path)
 
 manifest_path = record_model_manifest(
-    MODEL_DIR,
+    SUAVE_MODEL_DIR,
     TARGET_LABEL,
     trial_number=optuna_best_info.get("trial_number"),
     values=best_trial_values,
