@@ -134,17 +134,25 @@ TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
 
+IS_INTERACTIVE = is_interactive_session()
+
+cache_default = not IS_INTERACTIVE
+
 FORCE_UPDATE_BENCHMARK_MODEL = read_bool_env_flag(
     "FORCE_UPDATE_BENCHMARK_MODEL",
-    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_BENCHMARK_MODEL"],
+    cache_default,
 )
 FORCE_UPDATE_TSTR_MODEL = read_bool_env_flag(
     "FORCE_UPDATE_TSTR_MODEL",
-    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_TSTR_MODEL"],
+    cache_default,
 )
 FORCE_UPDATE_TRTR_MODEL = read_bool_env_flag(
     "FORCE_UPDATE_TRTR_MODEL",
-    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_TRTR_MODEL"],
+    cache_default,
+)
+FORCE_UPDATE_BOOTSTRAP = read_bool_env_flag(
+    "FORCE_UPDATE_BOOTSTRAP",
+    cache_default,
 )
 FORCE_UPDATE_SUAVE = read_bool_env_flag(
     "FORCE_UPDATE_SUAVE",
@@ -152,7 +160,6 @@ FORCE_UPDATE_SUAVE = read_bool_env_flag(
 )
 INCLUDE_SUAVE_TRANSFER = read_bool_env_flag("INCLUDE_SUAVE_TRANSFER", False)
 
-IS_INTERACTIVE = is_interactive_session()
 CLI_REQUESTED_TRIAL_ID: Optional[int] = None
 if not IS_INTERACTIVE:
     CLI_REQUESTED_TRIAL_ID = parse_script_arguments(sys.argv[1:])
@@ -1063,19 +1070,52 @@ for model_name, dataset_tables in model_prediction_frames.items():
     model_warning_frames: List[pd.DataFrame] = []
 
     for dataset_name, prediction_df in dataset_tables.items():
-        results = evaluate_predictions(
-            prediction_df,
-            label_col="label",
-            pred_col="y_pred",
-            positive_label=positive_label_name,
-            bootstrap_n=1000,
-            random_state=RANDOM_STATE,
-            show_progress=True,
-            progress_desc=f"Bootstrap | {model_name} @ {dataset_name}",
-        )
-        model_results[dataset_name] = results
-
         dataset_slug = _sanitise_path_component(dataset_name.lower())
+        dataset_cache_path = model_dir / f"{dataset_slug}_bootstrap.joblib"
+
+        cached_results: Optional[Dict[str, pd.DataFrame]] = None
+        if dataset_cache_path.exists() and not FORCE_UPDATE_BOOTSTRAP:
+            try:
+                potential_results = joblib.load(dataset_cache_path)
+            except Exception as error:
+                print(
+                    "Failed to load cached bootstrap metrics for",
+                    f"{model_name} @ {dataset_name}:",
+                    error,
+                )
+            else:
+                required_keys = {"overall", "per_class"}
+                if isinstance(potential_results, dict) and required_keys.issubset(
+                    potential_results.keys()
+                ):
+                    cached_results = potential_results
+                    print(
+                        "Loaded cached bootstrap metrics for",
+                        f"{model_name} @ {dataset_name}",
+                    )
+                else:
+                    print(
+                        "Discarding cached bootstrap metrics for",
+                        f"{model_name} @ {dataset_name} due to missing keys.",
+                    )
+
+        if cached_results is None:
+            results = evaluate_predictions(
+                prediction_df,
+                label_col="label",
+                pred_col="y_pred",
+                positive_label=positive_label_name,
+                bootstrap_n=1000,
+                random_state=RANDOM_STATE,
+                show_progress=True,
+                progress_desc=f"Bootstrap | {model_name} @ {dataset_name}",
+            )
+            joblib.dump(results, dataset_cache_path)
+            print("Saved bootstrap metrics to", dataset_cache_path)
+        else:
+            results = cached_results
+
+        model_results[dataset_name] = results
 
         overall_df = results["overall"].copy()
         overall_augmented = overall_df.copy()
@@ -1233,13 +1273,13 @@ bootstrap_overall_df: pd.DataFrame
 if bootstrap_overall_frames:
     bootstrap_overall_df = pd.concat(bootstrap_overall_frames, ignore_index=True)
 else:
-    bootstrap_overall_df = pd.DataFrame()
+    bootstrap_overall_df = pd.DataFrame(columns=["Target", "Model", "Dataset"])
 
 bootstrap_per_class_df: pd.DataFrame
 if bootstrap_per_class_frames:
     bootstrap_per_class_df = pd.concat(bootstrap_per_class_frames, ignore_index=True)
 else:
-    bootstrap_per_class_df = pd.DataFrame()
+    bootstrap_per_class_df = pd.DataFrame(columns=["Target", "Model", "Dataset"])
 
 bootstrap_overall_path = BOOTSTRAP_DIR / f"bootstrap_overall_{TARGET_LABEL}.csv"
 bootstrap_per_class_path = BOOTSTRAP_DIR / f"bootstrap_per_class_{TARGET_LABEL}.csv"
@@ -1280,6 +1320,9 @@ if bootstrap_warnings_frames:
     bootstrap_warning_path = BOOTSTRAP_DIR / f"bootstrap_warnings_{TARGET_LABEL}.csv"
     bootstrap_warning_df.to_csv(bootstrap_warning_path, index=False)
 else:
+    bootstrap_warning_df = pd.DataFrame(
+        columns=["Target", "Model", "Dataset", "message"]
+    )
     bootstrap_warning_path = None
 
 metrics_label_map = {
@@ -1346,6 +1389,17 @@ render_dataframe(
     ),
     floatfmt=".3f",
 )
+
+benchmark_excel_path = BOOTSTRAP_DIR / (
+    f"bootstrap_benchmark_{TARGET_LABEL}.xlsx"
+)
+with pd.ExcelWriter(benchmark_excel_path) as writer:
+    bootstrap_summary_df.to_excel(writer, sheet_name="Summary", index=False)
+    bootstrap_overall_df.to_excel(writer, sheet_name="overall", index=False)
+    bootstrap_per_class_df.to_excel(writer, sheet_name="Perclass", index=False)
+    bootstrap_warning_df.to_excel(writer, sheet_name="Warnings", index=False)
+
+print("Saved consolidated bootstrap benchmark workbook to", benchmark_excel_path)
 # %% [markdown]
 # ## TSTR/TRTR comparison
 #
