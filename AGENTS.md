@@ -4,6 +4,7 @@
 1) **API stability > feature breadth**: keep `SUAVE` methods stable (`fit/predict/predict_proba/calibrate/encode/sample/save/load`) unless indicated.
 2) **Small steps, small diffs**: each request updates as few files as possible; include docstrings and type hints.
 3) **Tests & style**: add/maintain pytest for each new module; keep `black` and `ruff` clean.
+4) **Minimum-change principle**: When fixing bugs or enhancing functionality, always keep code modifications as small as necessary while ensuring the result remains clear, concise, and easy to understand; unless explicitly instructed by the user, do not create new classes, nest multiple functions, or disrupt the existing naming system.
 
 ## Documentation
 - Each public method must include an example code snippet.
