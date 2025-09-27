@@ -57,6 +57,7 @@ from mimic_mortality_utils import (  # noqa: E402
     RANDOM_STATE,
     TARGET_COLUMNS,
     BENCHMARK_COLUMNS,
+    CLINICAL_SCORE_BENCHMARK_STRATEGY,
     VALIDATION_SIZE,
     PARETO_MAX_ABS_DELTA_AUC,
     PARETO_MIN_VALIDATION_ROAUC,
@@ -82,6 +83,7 @@ from mimic_mortality_utils import (  # noqa: E402
     is_interactive_session,
     load_dataset,
     load_or_create_iteratively_imputed_features,
+    iteratively_impute_clinical_scores,
     ModelLoadingPlan,
     FORCE_UPDATE_FLAG_DEFAULTS,
     make_baseline_model_factories,
@@ -394,6 +396,21 @@ baseline_feature_frames: Dict[str, pd.DataFrame] = {
 }
 if external_features is not None:
     baseline_feature_frames["eICU external"] = external_features
+
+clinical_score_frames: Dict[str, pd.DataFrame] = {
+    name: frame.copy() for name, frame in benchmark_frames.items()
+}
+
+clinical_score_strategy = CLINICAL_SCORE_BENCHMARK_STRATEGY.lower()
+use_imputed_clinical_scores = clinical_score_strategy == "imputed"
+
+if use_imputed_clinical_scores and available_benchmark_columns:
+    clinical_score_frames = iteratively_impute_clinical_scores(
+        clinical_score_frames,
+        baseline_feature_frames,
+        columns=available_benchmark_columns,
+        reference_key="Train",
+    )
 
 (
     baseline_imputed_features,
@@ -862,12 +879,28 @@ if available_benchmark_columns:
     for column in available_benchmark_columns:
         if column not in benchmark_train.columns:
             continue
-        score_frame = benchmark_train[[column]]
-        if score_frame.empty:
+        training_scores = (
+            clinical_score_frames.get("Train", benchmark_train)
+            if use_imputed_clinical_scores
+            else benchmark_train
+        )
+        if column not in training_scores.columns:
+            continue
+        score_frame = training_scores[[column]].reset_index(drop=True)
+        score_labels = y_train_model
+        if use_imputed_clinical_scores:
+            score_labels = score_labels.reset_index(drop=True)
+        else:
+            mask = score_frame[column].notna()
+            if not mask.any():
+                continue
+            score_frame = score_frame.loc[mask].reset_index(drop=True)
+            score_labels = score_labels.loc[mask].reset_index(drop=True)
+        if score_frame.empty or score_labels.empty:
             continue
         try:
             estimator = LogisticRegression(max_iter=1000, solver="lbfgs")
-            estimator.fit(score_frame, y_train_model)
+            estimator.fit(score_frame, score_labels)
         except ValueError as exc:
             print(
                 f"Skipping calibration for clinical score '{column}' because "
@@ -980,11 +1013,30 @@ for score_name, estimator in clinical_score_models.items():
     for dataset_name, score_frame in benchmark_frames.items():
         if dataset_name not in label_map or score_name not in score_frame.columns:
             continue
-        probability_matrix = estimator.predict_proba(score_frame[[score_name]])
-        predictions = estimator.predict(score_frame[[score_name]])
+        if use_imputed_clinical_scores:
+            dataset_scores = clinical_score_frames.get(dataset_name)
+            if dataset_scores is None or score_name not in dataset_scores.columns:
+                continue
+            input_frame = dataset_scores[[score_name]].reset_index(drop=True)
+            label_series = pd.Series(
+                label_map[dataset_name], index=score_frame.index
+            ).reset_index(drop=True)
+        else:
+            raw_scores = score_frame[[score_name]]
+            mask = raw_scores[score_name].notna()
+            if not mask.any():
+                continue
+            input_frame = raw_scores.loc[mask].reset_index(drop=True)
+            label_series = pd.Series(
+                label_map[dataset_name], index=raw_scores.index
+            ).loc[mask].reset_index(drop=True)
+        if input_frame.empty or label_series.empty:
+            continue
+        probability_matrix = estimator.predict_proba(input_frame)
+        predictions = estimator.predict(input_frame)
         score_tables[dataset_name] = build_prediction_dataframe(
             probability_matrix,
-            label_map[dataset_name],
+            label_series,
             predictions,
             estimator_class_names,
         )

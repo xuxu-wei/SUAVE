@@ -78,7 +78,7 @@
 1. 借助 `load_or_create_iteratively_imputed_features` 对各评估集执行迭代插补，并将结果保存为 `02_feature_engineering/` 目录下的 `iterative_imputed_{dataset}_{label}.csv`。首次运行会以训练集为参考拟合插补器；后续运行若检测到缓存与原始特征形状匹配，则直接读取 CSV 而无需重新训练。`08_baseline_models/` 仅存放模型权重与指标，不重复缓存这些迭代插补特征。
 2. 构建 Logistic Regression（带标准化）、Random Forest 与 GBDT `Pipeline`，通过 `evaluate_transfer_baselines` 统一训练并评估；所有基线共享 `compute_binary_metrics` 统计 AUC、ACC、SPE、SEN 与 Brier，并写入 `baseline_models_{label}.csv`。`mimic_mortality_utils.make_logistic_pipeline`、`make_random_forest_pipeline` 与 `make_gradient_boosting_pipeline` 均保持 scikit-learn 默认超参数，仅在需要时设置 `random_state`，确保与 C2ST/TSTR/TRTR 下游模型一致。上述流水线会在内部再执行一次迭代插补（同样采用 `max_iter=100`、`tol=1e-2`），从而保证独立运行时也具备缺失值鲁棒性。
 3. 脚本在 `08_baseline_models/` 下缓存拟合后的 `baseline_estimators_{label}.joblib`，二次运行时默认复用；若需强制重新训练，可在执行前设置 `FORCE_UPDATE_BENCHMARK_MODEL=1`（默认为 `0`）。相关布尔参数统一通过 `mimic_mortality_utils.read_bool_env_flag` 解析，以便批量实验脚本复用。SUAVE 主模型及其校准器始终使用 `prepare_features` 产出的原始特征（即未经过该迭代插补管线），保持与生成器训练阶段的输入一致。
-4. 在临床基准方面，保留传统 ICU 评分（如数据集中现成的 SOFA 及相关器官支持指标）作为零参数对照：当 `mimic_mortality_utils.py` 中登记了此类 `baseline_probability_map` 项时，同样纳入基线汇总并在 `Notes` 中标记“临床评分”。
+4. 在临床基准方面，保留传统 ICU 评分（如数据集中现成的 SOFA 及相关器官支持指标）作为零参数对照：当 `mimic_mortality_utils.py` 中登记了此类 `baseline_probability_map` 项时，同样纳入基线汇总并在 `Notes` 中标记“临床评分”。`CLINICAL_SCORE_BENCHMARK_STRATEGY` 默认设为 `"imputed"`，针对每个评分独立地使用建模特征驱动的 `IterativeImputer` 进行缺失填补，确保不在评分之间泄露信息；若调至 `"observed"`，则在评估阶段跳过缺失评分的样本，维持原始分布。
 5. 输出的指标 CSV 与 Markdown 表格需包含训练/验证/测试/eICU 全量指标，若外部验证缺失标签需在脚注注明处理策略。
 
 
