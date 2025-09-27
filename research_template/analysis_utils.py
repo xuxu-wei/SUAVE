@@ -1,4 +1,4 @@
-"""Shared utilities for the MIMIC mortality modelling examples."""
+"""Shared utilities for the generic research workflow template."""
 
 from __future__ import annotations
 
@@ -28,6 +28,31 @@ from IPython.display import display
 from matplotlib import pyplot as plt
 from tabulate import tabulate
 
+
+class ProgressReporter:
+    """Lightweight textual progress helper for long-running loops."""
+
+    def __init__(self, total_steps: int, description: str) -> None:
+        self.total_steps = max(int(total_steps), 1)
+        self.description = description
+        self.current = 0
+
+    def advance(self, detail: str) -> None:
+        """Advance the progress bar and display ``detail`` as the current step."""
+
+        self.current += 1
+        fraction = min(self.current / self.total_steps, 1.0)
+        bar_width = 28
+        filled = int(bar_width * fraction)
+        bar = "#" * filled + "-" * (bar_width - filled)
+        message = (
+            f"\r[{bar}] {self.current}/{self.total_steps} "
+            f"{self.description}: {detail}"
+        )
+        print(message, end="", flush=True)
+        if self.current >= self.total_steps:
+            print()
+
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
 from sklearn.decomposition import PCA
@@ -51,6 +76,28 @@ EXAMPLES_DIR = Path(__file__).resolve().parent
 if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
+from analysis_config import (  # noqa: E402
+    ANALYSIS_SUBDIRECTORIES,
+    BENCHMARK_COLUMNS,
+    CLINICAL_SCORE_BENCHMARK_STRATEGY,
+    DATA_DIR,
+    DEFAULT_ANALYSIS_CONFIG,
+    FORCE_UPDATE_FLAG_DEFAULTS,
+    HEAD_HIDDEN_DIMENSION_OPTIONS,
+    HIDDEN_DIMENSION_OPTIONS,
+    PATH_GRAPH_GROUP_COLORS,
+    PATH_GRAPH_NODE_COLORS,
+    PATH_GRAPH_NODE_DEFINITIONS,
+    PATH_GRAPH_NODE_GROUPS,
+    PATH_GRAPH_NODE_LABELS,
+    PARETO_MAX_ABS_DELTA_AUC,
+    PARETO_MIN_VALIDATION_ROAUC,
+    RANDOM_STATE,
+    TARGET_COLUMNS,
+    VALIDATION_SIZE,
+    VAR_GROUP_DICT,
+)
+
 from suave import Schema, SchemaInferencer, SUAVE  # noqa: E402
 from suave.evaluate import (  # noqa: E402
     compute_auroc,
@@ -60,81 +107,6 @@ from suave.evaluate import (  # noqa: E402
     rbf_mmd,
 )
 from cls_eval import evaluate_predictions  # noqa: E402
-
-
-RANDOM_STATE: int = 20201021
-TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
-BENCHMARK_COLUMNS = (
-    "APS_III",
-    "APACHE_IV",
-    "SAPS_II",
-    "OASIS",
-)  # do not include in training. Only use for benchamrk validation.
-
-CLINICAL_SCORE_BENCHMARK_STRATEGY: str = "imputed"
-
-VALIDATION_SIZE: float = 0.2
-
-DATA_DIR: Path = (EXAMPLES_DIR / "data" / "sepsis_mortality_dataset").resolve()
-
-# Thresholds governing which Optuna trials are considered viable for persistence.
-PARETO_MIN_VALIDATION_ROAUC: float = 0.81
-PARETO_MAX_ABS_DELTA_AUC: float = 0.035
-
-HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
-    "lean": (64, 32),
-    "compact": (96, 48),
-    "small": (128, 64),
-    "medium": (256, 128),
-    "wide": (384, 192),
-    "extra_wide": (512, 256),
-    "ultra_wide": (640, 320),
-}
-
-HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
-    "minimal": (16,),
-    "compact": (32,),
-    "small": (48,),
-    "medium": (48, 32),
-    "wide": (96, 48, 16),
-    "extra_wide": (64, 128, 64, 16),
-    "deep": (128, 64, 32),
-}
-
-DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
-    "optuna_trials": 5,
-    "optuna_timeout": 3600 * 48,
-    "optuna_study_prefix": "supervised",
-    "optuna_storage": None,
-    "output_dir_name": "research_outputs_supervised",
-}
-
-#: Default environment flags that determine whether cached artefacts should be
-#: regenerated. ``FORCE_UPDATE_SUAVE`` is only consulted when Optuna artefacts
-#: are unavailable, allowing callers to refresh the locally persisted SUAVE
-#: model that otherwise acts as a fallback.
-FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
-    "FORCE_UPDATE_BENCHMARK_MODEL": False,
-    "FORCE_UPDATE_TSTR_MODEL": True,
-    "FORCE_UPDATE_TRTR_MODEL": True,
-    "FORCE_UPDATE_SUAVE": False,
-}
-
-ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
-    "data_schema": "01_data_and_schema",
-    "feature_engineering": "02_feature_engineering",
-    "optuna": "03_optuna_search",
-    "suave_model": "04_suave_training",
-    "calibration_uncertainty": "05_calibration_uncertainty",
-    "evaluation_reports": "06_evaluation_metrics",
-    "bootstrap_analysis": "07_bootstrap_analysis",
-    "baseline_models": "08_baseline_models",
-    "tstr_trtr": "09_tstr_trtr_transfer",
-    "distribution_shift": "10_distribution_shift",
-    "privacy_assessment": "11_privacy_assessment",
-    "visualisations": "12_visualizations",
-}
-
 
 def read_bool_env_flag(variable: str, default: bool) -> bool:
     """Return a boolean flag parsed from ``variable``.
@@ -166,104 +138,6 @@ def read_bool_env_flag(variable: str, default: bool) -> bool:
     if raw_value is None:
         return default
     return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-# =============================================================================
-# === Feature grouping and visualisation metadata ============================
-# =============================================================================
-
-
-# fmt: off
-VAR_GROUP_DICT: Dict[str, List[str]] = {
-    "basic_feature_and_organ_support": [
-        "sex", "age", "BMI", "temperature", "heart_rate", "respir_rate",
-        "GCS", "CRRT", "Respiratory_Support",
-    ],
-    "BP_and_perfusion": ["SBP", "MAP", "Lac", "septic_shock"],
-    "respiratory_and_bg": [
-        "SPO2", "PaO2", "PaO2/FiO2", "PaCO2", "HCO3-", "PH",
-    ],
-    "blood_routine": [
-        "RBC", "Hb", "HCT", "WBC", "NE%", "LYM%",
-    ],
-    "coagulation": ["PLT", "PT", "APTT", "Fg"],
-    "biochem_lab": [
-        "ALT", "AST", "STB", "BUN", "Scr", "Glu", "K+", "Na+",
-    ],
-}
-# fmt: on
-
-
-PATH_GRAPH_GROUP_COLORS: Dict[str, str] = {
-    "Demographics & Vitals": "#1f77b4",
-    "Hemodynamics & Perfusion": "#d62728",
-    "Organ Support & Neurology": "#9467bd",
-    "Hematology and Immunology": "#2ca02c",
-    "Hepatic Function": "#bcbd22",
-    "Renal Function": "#17becf",
-    "Metabolic & Electrolytes": "#ff7f0e",
-    "Coagulation": "#8c564b",
-    "Respiratory and Blood Gas": "#7f7f7f",
-    "Outcome": "#e377c2",
-    "Latent": "#4c72b0",
-}
-
-
-PATH_GRAPH_NODE_DEFINITIONS: Dict[str, Dict[str, str]] = {
-    "age": {"group": "Demographics & Vitals", "label": "Age"},
-    "sex": {"group": "Demographics & Vitals", "label": "Male sex"},
-    "BMI": {"group": "Demographics & Vitals", "label": r"BMI",},
-    "temperature": {"group": "Demographics & Vitals", "label": "Temperature"},
-    "heart_rate": {"group": "Demographics & Vitals","label": "Heart rate",},
-    "respir_rate": {"group": "Demographics & Vitals","label": "Respiratory rate",},
-    "SBP": {"group": "Hemodynamics & Perfusion", "label": "SBP"},
-    "DBP": {"group": "Hemodynamics & Perfusion", "label": "DBP"},
-    "MAP": {"group": "Hemodynamics & Perfusion", "label": "MAP"},
-    "Lac": {"group": "Hemodynamics & Perfusion","label": "Serum lactate",},
-    "SOFA_cns": {"group": "Organ Support & Neurology", "label": "SOFA CNS"},
-    "CRRT": {"group": "Organ Support & Neurology", "label": "CRRT"},
-    "Respiratory_Support": {"group": "Organ Support & Neurology","label": "Respiratory support",},
-    "WBC": {"group": "Hematology and Immunology", "label": "WBC"},
-    "Hb": {"group": "Hematology and Immunology", "label": "Hb"},
-    "NE%": {"group": "Hematology and Immunology", "label": "NE%"},
-    "LYM%": {"group": "Hematology and Immunology", "label": "LYM%"},
-    "PLT": {"group": "Hematology and Immunology", "label": "PLT"},
-    "ALT": {"group": "Hepatic Function", "label": "ALT"},
-    "AST": {"group": "Hepatic Function", "label": "AST"},
-    "STB": {"group": "Hepatic Function", "label": "TBil"},
-    "BUN": {"group": "Renal Function", "label": "BUN"},
-    "Scr": {"group": "Renal Function", "label": "SCr"},
-    "Glu": {"group": "Metabolic & Electrolytes", "label": "Glucose"},
-    "K+": {"group": "Metabolic & Electrolytes", "label": r"$\mathrm{K}^{+}$"},
-    "Na+": {"group": "Metabolic & Electrolytes", "label": r"$\mathrm{Na}^{+}$"},
-    "HCO3-": {"group": "Metabolic & Electrolytes", "label": r"$\mathrm{HCO}_{3}^{-}$"},
-    "Fg": {"group": "Coagulation", "label": "Fibrinogen"},
-    "PT": {"group": "Coagulation", "label": "PT"},
-    "APTT": {"group": "Coagulation", "label": "APTT"},
-    "PH": {"group": "Respiratory and Blood Gas", "label": "pH"},
-    "PaO2": {"group": "Respiratory and Blood Gas", "label": r"$\mathrm{PaO}_{2}$"},
-    "PaO2/FiO2": {"group": "Respiratory and Blood Gas","label": r"$\mathrm{PaO}_{2}/\mathrm{FiO}_{2}$ ratio",},
-    "PaCO2": {"group": "Respiratory and Blood Gas", "label": r"$\mathrm{PaCO}_{2}$"},
-    "in_hospital_mortality": {"group": "Outcome","label": "In-hospital mortality",},
-}
-
-
-PATH_GRAPH_NODE_LABELS: Dict[str, str] = {
-    node_id: metadata["label"]
-    for node_id, metadata in PATH_GRAPH_NODE_DEFINITIONS.items()
-}
-
-
-PATH_GRAPH_NODE_GROUPS: Dict[str, str] = {
-    node_id: metadata["group"]
-    for node_id, metadata in PATH_GRAPH_NODE_DEFINITIONS.items()
-}
-
-
-PATH_GRAPH_NODE_COLORS: Dict[str, str] = {
-    node_id: PATH_GRAPH_GROUP_COLORS[metadata["group"]]
-    for node_id, metadata in PATH_GRAPH_NODE_DEFINITIONS.items()
-}
 
 
 # =============================================================================
@@ -349,6 +223,7 @@ __all__ = [
     "PATH_GRAPH_GROUP_COLORS",
     "PATH_GRAPH_NODE_DEFINITIONS",
     "PATH_GRAPH_NODE_LABELS",
+    "ProgressReporter",
     "PATH_GRAPH_NODE_GROUPS",
     "PATH_GRAPH_NODE_COLORS",
     "choose_preferred_pareto_trial",
@@ -1800,6 +1675,8 @@ def build_tstr_training_sets(
     *,
     random_state: int,
     return_raw: bool = False,
+    show_progress: bool = False,
+    progress_description: str = "Synthetic dataset generation",
 ) -> Union[
     Dict[str, Tuple[pd.DataFrame, pd.Series]],
     Tuple[
@@ -1825,6 +1702,12 @@ def build_tstr_training_sets(
         When ``True``, also return schema-aligned (non-numeric) feature frames for
         each training set. These are required when re-training SUAVE models that
         expect categorical values rather than numeric casts.
+    show_progress:
+        When ``True``, emit a textual progress bar that tracks the synthetic
+        datasets being prepared.
+    progress_description:
+        Caption displayed alongside the progress bar when ``show_progress`` is
+        enabled.
 
     Returns
     -------
@@ -1838,6 +1721,13 @@ def build_tstr_training_sets(
     """
 
     feature_columns = list(feature_columns)
+    progress: Optional[ProgressReporter] = None
+    if show_progress:
+        progress = ProgressReporter(6, progress_description)
+
+    def _advance_progress(detail: str) -> None:
+        if progress is not None:
+            progress.advance(detail)
     raw_real_features = real_features.loc[:, feature_columns].reset_index(drop=True)
     real_label_series = pd.Series(real_labels).reset_index(drop=True)
     real_label_series.name = real_labels.name
@@ -1855,6 +1745,7 @@ def build_tstr_training_sets(
         )
         for name, (features, labels) in raw_datasets.items()
     }
+    _advance_progress("TRTR (real)")
 
     n_train = len(real_label_series)
     label_array = real_label_series.to_numpy()
@@ -1893,6 +1784,7 @@ def build_tstr_training_sets(
         synthesis_features,
         synthesis_labels,
     )
+    _advance_progress("TSTR synthesis")
 
     balanced_labels = _generate_balanced_labels(
         label_array,
@@ -1913,6 +1805,7 @@ def build_tstr_training_sets(
         balance_features,
         balance_labels,
     )
+    _advance_progress("TSTR synthesis-balance")
 
     label_counts = real_label_series.value_counts().sort_index()
     target_count = int(label_counts.max()) if not label_counts.empty else 0
@@ -1943,6 +1836,7 @@ def build_tstr_training_sets(
         raw_augmented,
         augmented_labels_series.copy(),
     )
+    _advance_progress("TSTR synthesis-augment")
 
     five_x = n_train * 5
     five_x_labels = np.random.default_rng(random_state + 20).choice(
@@ -1964,6 +1858,7 @@ def build_tstr_training_sets(
         five_x_features,
         five_x_series,
     )
+    _advance_progress("TSTR synthesis-5x")
 
     five_x_balanced = _generate_balanced_labels(
         label_array,
@@ -1984,6 +1879,7 @@ def build_tstr_training_sets(
         five_x_balance_features,
         five_x_balance_labels,
     )
+    _advance_progress("TSTR synthesis-5x balance")
 
     if return_raw:
         return datasets, raw_datasets
@@ -1999,6 +1895,8 @@ def evaluate_transfer_baselines(
     random_state: int,
     raw_training_sets: Optional[Mapping[str, Tuple[pd.DataFrame, pd.Series]]] = None,
     raw_evaluation_sets: Optional[Mapping[str, Tuple[pd.DataFrame, pd.Series]]] = None,
+    show_progress: bool = False,
+    progress_description: str = "TSTR/TRTR evaluation",
 ) -> Tuple[
     pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]]
 ]:
@@ -2020,11 +1918,25 @@ def evaluate_transfer_baselines(
         ``training_sets`` and ``evaluation_sets``. Estimators declaring the
         attribute ``requires_schema_aligned_features`` will be trained and
         evaluated using these raw frames.
+    show_progress:
+        When ``True``, display a progress bar covering every
+        training/model/evaluation combination.
+    progress_description:
+        Caption displayed alongside the progress bar when ``show_progress`` is
+        enabled.
     """
 
     summary_rows: List[Dict[str, object]] = []
     long_rows: List[Dict[str, object]] = []
     nested_results: Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]] = {}
+
+    reporter: Optional[ProgressReporter] = None
+    if show_progress:
+        total_steps = (
+            len(training_sets) * len(model_factories) * len(evaluation_sets)
+        )
+        if total_steps > 0:
+            reporter = ProgressReporter(total_steps, progress_description)
 
     for training_name, (train_X_numeric, train_y_numeric) in training_sets.items():
         nested_results.setdefault(training_name, {})
@@ -2095,6 +2007,11 @@ def evaluate_transfer_baselines(
                     random_state=random_state,
                 )
                 nested_results[training_name][model_name][evaluation_name] = results
+
+                if reporter is not None:
+                    reporter.advance(
+                        f"{training_name} → {model_name} @ {evaluation_name}"
+                    )
 
                 overall_df = results.get("overall", pd.DataFrame())
                 if overall_df.empty:
@@ -2248,7 +2165,17 @@ class IsotonicProbabilityCalibrator:
         return self.classes_[indices]
 
     def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple proxy
-        return getattr(self.base_estimator, name)
+        try:
+            base = object.__getattribute__(self, "base_estimator")
+        except AttributeError as exc:
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {name!r}"
+            ) from exc
+        if base is None or base is self:
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {name!r}"
+            )
+        return getattr(base, name)
 
 
 def fit_isotonic_calibrator(

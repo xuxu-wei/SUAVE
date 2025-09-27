@@ -28,6 +28,31 @@ from IPython.display import display
 from matplotlib import pyplot as plt
 from tabulate import tabulate
 
+
+class ProgressReporter:
+    """Lightweight textual progress helper for long-running loops."""
+
+    def __init__(self, total_steps: int, description: str) -> None:
+        self.total_steps = max(int(total_steps), 1)
+        self.description = description
+        self.current = 0
+
+    def advance(self, detail: str) -> None:
+        """Advance the progress bar and display ``detail`` as the current step."""
+
+        self.current += 1
+        fraction = min(self.current / self.total_steps, 1.0)
+        bar_width = 28
+        filled = int(bar_width * fraction)
+        bar = "#" * filled + "-" * (bar_width - filled)
+        message = (
+            f"\r[{bar}] {self.current}/{self.total_steps} "
+            f"{self.description}: {detail}"
+        )
+        print(message, end="", flush=True)
+        if self.current >= self.total_steps:
+            print()
+
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
 from sklearn.decomposition import PCA
@@ -71,6 +96,10 @@ BENCHMARK_COLUMNS = (
     "OASIS",
 )  # do not include in training. Only use for benchamrk validation.
 
+#: Strategy for evaluating clinical score benchmarks.
+#: ``"imputed"`` (default) applies iterative imputation before evaluation, any
+#: other value keeps observed scores and skips rows with missing values. Keep
+#: this comment in sync with ``analysis_config.py``.
 CLINICAL_SCORE_BENCHMARK_STRATEGY: str = "imputed"
 
 VALIDATION_SIZE: float = 0.2
@@ -118,6 +147,7 @@ FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
     "FORCE_UPDATE_TSTR_MODEL": True,
     "FORCE_UPDATE_TRTR_MODEL": True,
     "FORCE_UPDATE_SUAVE": False,
+    "FORCE_UPDATE_DISTRIBUTION_SHIFT": True,
 }
 
 ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
@@ -1800,6 +1830,8 @@ def build_tstr_training_sets(
     *,
     random_state: int,
     return_raw: bool = False,
+    show_progress: bool = False,
+    progress_description: str = "Synthetic dataset generation",
 ) -> Union[
     Dict[str, Tuple[pd.DataFrame, pd.Series]],
     Tuple[
@@ -1825,6 +1857,12 @@ def build_tstr_training_sets(
         When ``True``, also return schema-aligned (non-numeric) feature frames for
         each training set. These are required when re-training SUAVE models that
         expect categorical values rather than numeric casts.
+    show_progress:
+        When ``True``, emit a textual progress bar that tracks the synthetic
+        datasets being prepared.
+    progress_description:
+        Caption displayed alongside the progress bar when ``show_progress`` is
+        enabled.
 
     Returns
     -------
@@ -1838,6 +1876,13 @@ def build_tstr_training_sets(
     """
 
     feature_columns = list(feature_columns)
+    progress: Optional[ProgressReporter] = None
+    if show_progress:
+        progress = ProgressReporter(6, progress_description)
+
+    def _advance_progress(detail: str) -> None:
+        if progress is not None:
+            progress.advance(detail)
     raw_real_features = real_features.loc[:, feature_columns].reset_index(drop=True)
     real_label_series = pd.Series(real_labels).reset_index(drop=True)
     real_label_series.name = real_labels.name
@@ -1855,6 +1900,7 @@ def build_tstr_training_sets(
         )
         for name, (features, labels) in raw_datasets.items()
     }
+    _advance_progress("TRTR (real)")
 
     n_train = len(real_label_series)
     label_array = real_label_series.to_numpy()
@@ -1893,6 +1939,7 @@ def build_tstr_training_sets(
         synthesis_features,
         synthesis_labels,
     )
+    _advance_progress("TSTR synthesis")
 
     balanced_labels = _generate_balanced_labels(
         label_array,
@@ -1913,6 +1960,7 @@ def build_tstr_training_sets(
         balance_features,
         balance_labels,
     )
+    _advance_progress("TSTR synthesis-balance")
 
     label_counts = real_label_series.value_counts().sort_index()
     target_count = int(label_counts.max()) if not label_counts.empty else 0
@@ -1943,6 +1991,7 @@ def build_tstr_training_sets(
         raw_augmented,
         augmented_labels_series.copy(),
     )
+    _advance_progress("TSTR synthesis-augment")
 
     five_x = n_train * 5
     five_x_labels = np.random.default_rng(random_state + 20).choice(
@@ -1964,6 +2013,7 @@ def build_tstr_training_sets(
         five_x_features,
         five_x_series,
     )
+    _advance_progress("TSTR synthesis-5x")
 
     five_x_balanced = _generate_balanced_labels(
         label_array,
@@ -1984,6 +2034,7 @@ def build_tstr_training_sets(
         five_x_balance_features,
         five_x_balance_labels,
     )
+    _advance_progress("TSTR synthesis-5x balance")
 
     if return_raw:
         return datasets, raw_datasets
@@ -1999,6 +2050,8 @@ def evaluate_transfer_baselines(
     random_state: int,
     raw_training_sets: Optional[Mapping[str, Tuple[pd.DataFrame, pd.Series]]] = None,
     raw_evaluation_sets: Optional[Mapping[str, Tuple[pd.DataFrame, pd.Series]]] = None,
+    show_progress: bool = False,
+    progress_description: str = "TSTR/TRTR evaluation",
 ) -> Tuple[
     pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]]
 ]:
@@ -2020,11 +2073,25 @@ def evaluate_transfer_baselines(
         ``training_sets`` and ``evaluation_sets``. Estimators declaring the
         attribute ``requires_schema_aligned_features`` will be trained and
         evaluated using these raw frames.
+    show_progress:
+        When ``True``, display a progress bar covering every
+        training/model/evaluation combination.
+    progress_description:
+        Caption displayed alongside the progress bar when ``show_progress`` is
+        enabled.
     """
 
     summary_rows: List[Dict[str, object]] = []
     long_rows: List[Dict[str, object]] = []
     nested_results: Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]] = {}
+
+    reporter: Optional[ProgressReporter] = None
+    if show_progress:
+        total_steps = (
+            len(training_sets) * len(model_factories) * len(evaluation_sets)
+        )
+        if total_steps > 0:
+            reporter = ProgressReporter(total_steps, progress_description)
 
     for training_name, (train_X_numeric, train_y_numeric) in training_sets.items():
         nested_results.setdefault(training_name, {})
@@ -2095,6 +2162,11 @@ def evaluate_transfer_baselines(
                     random_state=random_state,
                 )
                 nested_results[training_name][model_name][evaluation_name] = results
+
+                if reporter is not None:
+                    reporter.advance(
+                        f"{training_name} → {model_name} @ {evaluation_name}"
+                    )
 
                 overall_df = results.get("overall", pd.DataFrame())
                 if overall_df.empty:
@@ -2248,7 +2320,17 @@ class IsotonicProbabilityCalibrator:
         return self.classes_[indices]
 
     def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple proxy
-        return getattr(self.base_estimator, name)
+        try:
+            base = object.__getattribute__(self, "base_estimator")
+        except AttributeError as exc:
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {name!r}"
+            ) from exc
+        if base is None or base is self:
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {name!r}"
+            )
+        return getattr(base, name)
 
 
 def fit_isotonic_calibrator(

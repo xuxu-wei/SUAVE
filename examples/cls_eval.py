@@ -29,6 +29,7 @@ from sklearn.metrics import (
     average_precision_score,
 )
 from sklearn.preprocessing import label_binarize
+from tqdm.auto import tqdm
 
 _PREVIEW_TMPDIR = None
 
@@ -179,6 +180,8 @@ def evaluate_predictions(
     ci_percentiles: Tuple[float, float] = (2.5, 97.5),# 百分位法 CI
     bootstrap_strategy: str = "stratified",  # "stratified" | "simple" | "class_balanced"
     random_state: Optional[int] = 20201021,           # 复现性
+    show_progress: bool = False,                      # 是否展示 bootstrap 进度条
+    progress_desc: Optional[str] = None,              # 进度条描述文本
 ) -> Dict[str, pd.DataFrame]:
     """
     评估分类模型预测（兼容二分类与多分类），并在存在概率列时补充 ROC-AUC / PR-AUC。
@@ -205,6 +208,10 @@ def evaluate_predictions(
         分层（各类内重采样，保持类占比）或整体重采样。
     random_state : int | None, default 20201021
         随机种子（None 时不固定）。
+    show_progress : bool, default False
+        是否在 bootstrap 阶段显示 tqdm 进度条。
+    progress_desc : str | None, default None
+        进度条描述文本；为 None 时使用 "Bootstrap"。
     Returns
     -------
     dict of pandas.DataFrame
@@ -420,7 +427,13 @@ def evaluate_predictions(
         overall_boot = {k: [] for k in overall_ci_keys}
         per_class_boot = {cls: {m: [] for m in per_class_metrics} for cls in classes}
 
-        for _ in range(bootstrap_n):
+        iterator = range(bootstrap_n)
+        progress_bar = None
+        if show_progress and bootstrap_n > 0:
+            # tqdm 可视化当前模型/数据集的 bootstrap 进度。
+            progress_bar = tqdm(iterator, desc=progress_desc or "Bootstrap", leave=False)
+            iterator = progress_bar
+        for _ in iterator:
             sample_idx = _bootstrap_sample_indices(
                 y_true=y_true,
                 classes=classes,
@@ -528,6 +541,9 @@ def evaluate_predictions(
                             ap_val = np.nan
                         per_class_boot[cls]["roc_auc_ovr"].append(auc_val)
                         per_class_boot[cls]["pr_auc_ovr"].append(ap_val)
+
+        if progress_bar is not None:
+            progress_bar.close()
 
         # 百分位法聚合
         lo, hi = ci_percentiles
