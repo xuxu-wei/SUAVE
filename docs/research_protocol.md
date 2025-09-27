@@ -105,6 +105,11 @@
 **输入**：读取 `04_suave_training/` 下的模型权重、`05_calibration_uncertainty/` 中已有的校准器（若存在）以及 `02_feature_engineering/` 下的特征缓存。SUAVE 与校准器直接使用 `prepare_features` 输出的原始特征；若需评估基线模型，则加载 `iterative_imputed_{dataset}_{label}.csv` 作为对照。
 **输出**：在 `05_calibration_uncertainty/` 保存校准器与曲线，在 `06_evaluation_metrics/` 导出指标表与 Excel。
 
+**目的**：量化 SUAVE 输出概率的可靠性，并汇总多样指标的置信区间与可视化。
+**结果解读**：校准曲线平滑且 ECE 较低说明概率可信；bootstrap 置信区间用于评估模型稳定性。
+**输入**：读取 `04_suave_training/` 下的模型权重及 `08_baseline_models/` 中的插补特征。
+**输出**：在 `05_calibration_uncertainty/` 保存校准器与曲线，在 `06_evaluation_metrics/` 导出指标表与 Excel。
+
 1. 通过 `fit_isotonic_calibrator` 在内部验证集上拟合专为 SUAVE 封装的等渗校准器（内部使用 `IsotonicRegression`，兼容缺失 `decision_function` 的估计器），必要时回退至逻辑回归温度缩放，并保存校准对象；若缓存缺失或校准器与模型不匹配，主流程会重新训练并自动序列化新的校准 artefact。
 2. 使用 `evaluate_predictions` 对训练、验证、MIMIC-IV 测试与 eICU 集执行 bootstrap（默认 1000 次）以估计指标置信区间，并生成 Excel 汇总；除表格主列的 AUC、ACC、SPE、SEN、Brier 外，Excel 中还会给出 `accuracy`、`balanced_accuracy`、`f1_macro`、`recall_macro`、`specificity_macro`、`sensitivity_pos`、`specificity_pos`、`roc_auc`、`pr_auc` 及其置信区间，以支撑不同风险偏好的诊断分析。若需要并排比较基线分类器，可从迭代插补 CSV 读取概率输出或重新调用 `evaluate_transfer_baselines`。
 3. 评估函数会同步导出 bootstrap 的原始采样记录：总体指标写入 `bootstrap_overall_records_{label}.csv`，逐类指标写入 `bootstrap_per_class_records_{label}.csv`，用于复核任意抽样迭代的轨迹。
