@@ -142,6 +142,10 @@ FORCE_UPDATE_TRTR_MODEL = read_bool_env_flag(
     "FORCE_UPDATE_TRTR_MODEL",
     FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_TRTR_MODEL"],
 )
+FORCE_UPDATE_SUAVE = read_bool_env_flag(
+    "FORCE_UPDATE_SUAVE",
+    FORCE_UPDATE_FLAG_DEFAULTS["FORCE_UPDATE_SUAVE"],
+)
 
 IS_INTERACTIVE = is_interactive_session()
 CLI_REQUESTED_TRIAL_ID: Optional[int] = None
@@ -232,12 +236,24 @@ model_loading_plan: ModelLoadingPlan = resolve_model_loading_plan(
     schema=schema,
     is_interactive=IS_INTERACTIVE,
     cli_requested_trial_id=CLI_REQUESTED_TRIAL_ID,
+    force_update_suave=FORCE_UPDATE_SUAVE,
 )
 
 optuna_best_info = model_loading_plan.optuna_best_info
 optuna_best_params = model_loading_plan.optuna_best_params
 model_manifest = model_loading_plan.model_manifest
 pareto_trials = model_loading_plan.pareto_trials
+
+optuna_storage_uri = analysis_config.get("optuna_storage")
+optuna_storage_path = None
+if isinstance(optuna_storage_uri, str) and optuna_storage_uri.startswith("sqlite:///"):
+    optuna_storage_path = Path(optuna_storage_uri.replace("sqlite:///", "", 1))
+
+missing_optuna = (
+    model_loading_plan.optuna_study is None
+    or not model_loading_plan.optuna_best_params
+    or (optuna_storage_path is not None and not optuna_storage_path.exists())
+)
 
 
 # %%
@@ -533,6 +549,10 @@ if model is not None and selected_model_path and selected_model_path.exists():
         )
     else:
         print(f"Reusing cached SUAVE model from {selected_model_path}.")
+    if missing_optuna:
+        print(
+            "Optuna tuning artefacts were unavailable; using the saved SUAVE model as a local backup."
+        )
 
 if selected_calibrator_path and selected_calibrator_path.exists():
     calibrator = joblib.load(selected_calibrator_path)
@@ -557,24 +577,34 @@ if model is None and selected_model_path and selected_model_path.exists():
         )
     else:
         print(f"Loaded SUAVE model from {selected_model_path}.")
+    if missing_optuna:
+        print(
+            "Optuna tuning artefacts were unavailable; using the saved SUAVE model as a local backup."
+        )
 
 model_was_trained = False
 
 if model is None:
-    if not selected_params:
-        raise RuntimeError(
-            "Unable to determine hyperparameters for training; rerun the optimisation pipeline first."
+    fit_params = selected_params or {}
+    if not fit_params and missing_optuna:
+        print(
+            "Warning: Optuna tuning artefacts were not found; falling back to default SUAVE hyperparameters."
         )
     if selected_trial_number is not None:
         print(
             f"Training SUAVE for Optuna trial #{selected_trial_number} because no saved model artefacts were available…"
         )
     else:
-        print(
-            "Training SUAVE with fallback hyperparameters because no saved model was available…"
-        )
-    model = build_suave_model(selected_params, schema, random_state=RANDOM_STATE)
-    fit_kwargs = resolve_suave_fit_kwargs(selected_params)
+        if fit_params:
+            print(
+                "Training SUAVE with fallback hyperparameters because no saved model was available…"
+            )
+        else:
+            print(
+                "Training SUAVE with default hyperparameters because no saved model was available…"
+            )
+    model = build_suave_model(fit_params, schema, random_state=RANDOM_STATE)
+    fit_kwargs = resolve_suave_fit_kwargs(fit_params)
     model.fit(
         X_train_model,
         y_train_model,

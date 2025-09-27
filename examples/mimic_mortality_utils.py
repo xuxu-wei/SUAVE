@@ -107,10 +107,15 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
     "output_dir_name": "research_outputs_supervised",
 }
 
+#: Default environment flags that determine whether cached artefacts should be
+#: regenerated. ``FORCE_UPDATE_SUAVE`` is only consulted when Optuna artefacts
+#: are unavailable, allowing callers to refresh the locally persisted SUAVE
+#: model that otherwise acts as a fallback.
 FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
     "FORCE_UPDATE_BENCHMARK_MODEL": False,
     "FORCE_UPDATE_TSTR_MODEL": True,
     "FORCE_UPDATE_TRTR_MODEL": True,
+    "FORCE_UPDATE_SUAVE": False,
 }
 
 ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
@@ -937,6 +942,7 @@ def resolve_model_loading_plan(
     schema: Schema,
     is_interactive: bool,
     cli_requested_trial_id: Optional[int] = None,
+    force_update_suave: bool = False,
     pareto_min_validation_roauc: float = PARETO_MIN_VALIDATION_ROAUC,
     pareto_max_abs_delta_auc: float = PARETO_MAX_ABS_DELTA_AUC,
 ) -> ModelLoadingPlan:
@@ -962,6 +968,10 @@ def resolve_model_loading_plan(
         drive the selection.
     cli_requested_trial_id
         Optional Optuna trial identifier supplied via command-line arguments.
+    force_update_suave
+        Boolean flag indicating whether cached SUAVE artefacts should be
+        retrained when Optuna outputs are unavailable. When Optuna metadata can
+        be loaded the flag has no effect, preserving Pareto trial selection.
     pareto_min_validation_roauc
         Minimum acceptable validation ROC-AUC used when choosing a Pareto
         candidate automatically.
@@ -1082,6 +1092,18 @@ def resolve_model_loading_plan(
             print(
                 "Optuna study unavailable; using stored best parameters for training."
             )
+
+    optuna_outputs_available = bool(optuna_study is not None or optuna_best_params)
+    if force_update_suave and not optuna_outputs_available:
+        if selected_model_path is not None or selected_calibrator_path is not None:
+            print(
+                "FORCE_UPDATE_SUAVE enabled and Optuna artefacts are unavailable; "
+                "the saved SUAVE model will be retrained."
+            )
+        if selected_trial_number == saved_trial_number:
+            selected_trial_number = None
+        selected_model_path = None
+        selected_calibrator_path = None
 
     selected_params: Dict[str, Any] = {}
     if selected_trial is not None:
