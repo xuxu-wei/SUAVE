@@ -100,6 +100,7 @@ def test_manual_manifest_round_trip(tmp_path: Path, module_path: str) -> None:
 
     manifest = module.load_manual_model_manifest(model_dir, "mortality")
     assert manifest.get("model_path") == "manual.pt"
+    assert manifest.get("trial_number") == "manual"
     assert manifest.get("params", {}).get("learning_rate") == 0.01
 
     resolved = module.manifest_artifact_paths(manifest, model_dir)
