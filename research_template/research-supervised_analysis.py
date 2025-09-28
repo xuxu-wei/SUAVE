@@ -70,11 +70,29 @@ from analysis_config import (
     PATH_GRAPH_NODE_LABELS,
 )
 
-EXAMPLES_DIR = Path(__file__).resolve().parent
-if not EXAMPLES_DIR.exists():
+def _resolve_examples_dir() -> Path:
+    """Resolve the template directory for both scripts and notebooks."""
+
+    candidates = []
+    try:
+        candidates.append(Path(__file__).resolve().parent)
+    except NameError:
+        # ``__file__`` is not defined when executing inside a notebook.
+        pass
+
+    cwd = Path.cwd()
+    candidates.extend([cwd, cwd / "research_template"])
+
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "analysis_config.py").exists():
+            return candidate
+
     raise RuntimeError(
-        "Run this notebook from the repository root so 'examples' is available."
+        "Run this notebook from the repository root so 'research_template' is available."
     )
+
+
+EXAMPLES_DIR = _resolve_examples_dir()
 if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
