@@ -3,6 +3,7 @@
 /examples/analysis_outputs_*/
 /examples/*local_test.*
 /examples/research-mimic_mortality_supervised.ipynb
+/examples/research-mimic_mortality_optimize.ipynb
 /examples/.
 /task_list.md
 
