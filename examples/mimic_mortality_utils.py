@@ -1656,33 +1656,36 @@ def _build_manual_optuna_ranked_table(
             identifier_key = str(trial_identifier)
             if identifier_key in seen_identifiers:
                 continue
+            record_dict = record.to_dict()
+            validation, delta = _extract_trial_metrics(record_dict)
             row: Dict[str, object] = {
                 "Source": "Optuna study",
                 "Saved locally": "",
                 "Trial ID": trial_identifier,
                 "Model path": "",
-                "Validation ROAUC": _coerce_float(
-                    record.get("validation_roauc")
-                ),
-                "TSTR/TRTR ΔAUC": _coerce_float(
-                    record.get("tstr_trtr_delta_auc")
-                ),
+                "Validation ROAUC": validation,
+                "TSTR/TRTR ΔAUC": delta,
             }
 
-            for column_name, value in _collect_metric_columns(record.to_dict()).items():
+            for column_name, value in _collect_metric_columns(record_dict).items():
                 row[column_name] = value
                 _append_unique(metric_columns, column_name)
+
+            for column_name, value in _collect_param_columns(record_dict).items():
+                row[column_name] = value
+                _append_unique(param_columns, column_name)
 
             for column_name in record.index:
                 if column_name in {
                     "trial_number",
                     "validation_roauc",
                     "tstr_trtr_delta_auc",
+                    "params",
                 }:
                     continue
                 value = record.get(column_name)
-                row[column_name] = value
                 _append_unique(param_columns, str(column_name))
+                row[column_name] = value
 
             rows.append(row)
 
