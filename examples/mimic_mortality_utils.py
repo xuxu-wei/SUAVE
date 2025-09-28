@@ -158,10 +158,10 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "evaluation_reports": "06_evaluation_metrics",
     "bootstrap_analysis": "07_bootstrap_analysis",
     "baseline_models": "08_baseline_models",
-    "tstr_trtr": "09_tstr_trtr_transfer",
-    "distribution_shift": "10_distribution_shift",
-    "privacy_assessment": "11_privacy_assessment",
-    "visualisations": "12_visualizations",
+    "interpretation": "09_interpretation",
+    "tstr_trtr": "10_tstr_trtr_transfer",
+    "distribution_shift": "11_distribution_shift",
+    "privacy_assessment": "12_privacy_assessment",
 }
 
 

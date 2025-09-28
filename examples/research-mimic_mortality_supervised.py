@@ -234,7 +234,7 @@ analysis_dirs = prepare_analysis_output_directories(
         "tstr_trtr",
         "distribution_shift",
         "privacy_assessment",
-        "visualisations",
+        "interpretation",
     ),
 )
 
@@ -249,7 +249,7 @@ BASELINE_MODELS_DIR = analysis_dirs["baseline_models"]
 TSTR_TRTR_DIR = analysis_dirs["tstr_trtr"]
 DISTRIBUTION_SHIFT_DIR = analysis_dirs["distribution_shift"]
 PRIVACY_ASSESSMENT_DIR = analysis_dirs["privacy_assessment"]
-VISUALISATIONS_DIR = analysis_dirs["visualisations"]
+INTERPRETATION_DIR = analysis_dirs["interpretation"]
 
 analysis_config["optuna_storage"] = (
     f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
@@ -288,6 +288,12 @@ schema.update(
 
 schema_df = schema_to_dataframe(schema).reset_index(drop=True)
 render_dataframe(schema_df, title="Schema overview", floatfmt=None)
+
+schema_dir = DATA_SCHEMA_DIR
+schema_dir.mkdir(parents=True, exist_ok=True)
+schema_excel_path = schema_dir / f"schema_{TARGET_LABEL}.xlsx"
+schema_df.to_excel(schema_excel_path, index=False)
+print("Saved schema workbook to", schema_excel_path)
 
 
 model_loading_plan: ModelLoadingPlan = resolve_model_loading_plan(
@@ -833,6 +839,17 @@ evaluation_datasets: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
 }
 if external_features is not None and external_labels is not None:
     evaluation_datasets["eICU external"] = (external_features, external_labels)
+
+evaluation_cache_path = DATA_SCHEMA_DIR / f"evaluation_datasets_{TARGET_LABEL}.joblib"
+joblib.dump(
+    {
+        "target_label": TARGET_LABEL,
+        "feature_columns": list(FEATURE_COLUMNS),
+        "datasets": evaluation_datasets,
+    },
+    evaluation_cache_path,
+)
+print("Saved evaluation datasets to", evaluation_cache_path)
 
 probability_map: Dict[str, np.ndarray] = {}
 label_map: Dict[str, np.ndarray] = {}
@@ -1489,6 +1506,231 @@ export_three_line_tables(
 )
 
 print("Saved formatted three-line benchmark workbook to", three_line_benchmark_path)
+
+# %% [markdown]
+# ## SUAVE latent interpretation
+#
+# Purpose: quantify latent-feature-target relationships via correlation analyses
+# and project cohort embeddings for qualitative review. Outputs reside in the
+# dedicated interpretation directory so reviewers can trace back to model
+# explainability artefacts before inspecting downstream transfer results.
+
+# %%
+
+latent_correlation_base = (
+    INTERPRETATION_DIR / f"latent_clinical_correlation_{TARGET_LABEL}"
+)
+overall_corr_path = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_correlations.csv"
+)
+overall_pval_path = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_pvalues.csv"
+)
+overall_bubble_base = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_bubble"
+)
+overall_corr_heatmap_base = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_corr_heatmap"
+)
+overall_pval_heatmap_base = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_pvalue_heatmap"
+)
+
+overall_corr, overall_pvals = compute_feature_latent_correlation(
+    model,
+    X_train_model,
+    targets=y_train_model,
+    target_name=TARGET_LABEL,
+    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
+)
+overall_corr.to_csv(overall_corr_path)
+overall_pvals.to_csv(overall_pval_path)
+
+overall_path_graph_base = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_path_graph"
+)
+overall_path_fig, _overall_path_ax = plot_feature_latent_outcome_path_graph(
+    model,
+    X_train_model,
+    y=y_train_model,
+    target_name=TARGET_LABEL,
+    node_label_mapping=PATH_GRAPH_NODE_LABELS,
+    node_color_mapping=PATH_GRAPH_NODE_COLORS,
+    node_group_mapping=PATH_GRAPH_NODE_GROUPS,
+    group_color_mapping=PATH_GRAPH_GROUP_COLORS,
+    edge_label_top_k=15,
+    figure_kwargs={"figsize": (14, 8)},
+)
+overall_path_graph_path = overall_path_graph_base.with_suffix(".png")
+overall_path_fig.savefig(overall_path_graph_path, dpi=300, bbox_inches="tight")
+overall_path_fig.savefig(
+    overall_path_graph_base.with_suffix(".pdf"), bbox_inches="tight"
+)
+plt.close(overall_path_fig)
+
+overall_bubble_fig, _overall_bubble_ax = plot_feature_latent_correlation_bubble(
+    model,
+    X_train_model,
+    targets=y_train_model,
+    target_name=TARGET_LABEL,
+    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
+    title=f"Latent correlations ({TARGET_LABEL}) – bubble chart",
+    output_path=overall_bubble_base,
+    correlations=overall_corr,
+    p_values=overall_pvals,
+)
+plt.close(overall_bubble_fig)
+overall_bubble_path = overall_bubble_base.with_suffix(".png")
+
+overall_corr_fig, _overall_corr_ax = plot_feature_latent_correlation_heatmap(
+    model,
+    X_train_model,
+    targets=y_train_model,
+    target_name=TARGET_LABEL,
+    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
+    title=f"Latent correlations ({TARGET_LABEL}) – correlation heatmap",
+    output_path=overall_corr_heatmap_base,
+    correlations=overall_corr,
+    p_values=overall_pvals,
+)
+plt.close(overall_corr_fig)
+overall_corr_heatmap_path = overall_corr_heatmap_base.with_suffix(".png")
+
+overall_pval_fig, _overall_pval_ax = plot_feature_latent_correlation_heatmap(
+    model,
+    X_train_model,
+    targets=y_train_model,
+    target_name=TARGET_LABEL,
+    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
+    title=f"Latent correlations ({TARGET_LABEL}) – p-value heatmap",
+    value="pvalue",
+    output_path=overall_pval_heatmap_base,
+    correlations=overall_corr,
+    p_values=overall_pvals,
+)
+plt.close(overall_pval_fig)
+overall_pval_heatmap_path = overall_pval_heatmap_base.with_suffix(".png")
+
+feature_only_corr = overall_corr.drop(index=TARGET_LABEL, errors="ignore")
+has_latent_correlations = not feature_only_corr.empty
+if not has_latent_correlations:
+    print("Latent-clinical correlation heatmap could not be generated.")
+else:
+    top_correlated = (
+        feature_only_corr.abs().max(axis=1).sort_values(ascending=False).head(10)
+    )
+    render_dataframe(
+        top_correlated.rename("max_abs_correlation")
+        .reset_index()
+        .rename(columns={"index": "variable"}),
+        title="Top latent-clinical correlations (absolute)",
+        floatfmt=".3f",
+    )
+
+available_features = set(FEATURE_COLUMNS)
+latent_group_outputs: list[tuple[str, Path, Path, Path, Path, Path]] = []
+for group_name, candidate_columns in VAR_GROUP_DICT.items():
+    missing = sorted(set(candidate_columns) - available_features)
+    if missing:
+        print(f"Skipping unavailable variables for {group_name}: {', '.join(missing)}")
+    group_features = [
+        column for column in candidate_columns if column in available_features
+    ]
+    if not group_features:
+        continue
+
+    group_base = latent_correlation_base.with_name(
+        f"{latent_correlation_base.name}_{group_name}"
+    )
+    group_corr, group_pvals = compute_feature_latent_correlation(
+        model,
+        X_train_model,
+        targets=y_train_model,
+        target_name=TARGET_LABEL,
+        variables=group_features + [TARGET_LABEL],
+    )
+    corr_path = group_base.with_name(f"{group_base.name}_correlations.csv")
+    pval_path = group_base.with_name(f"{group_base.name}_pvalues.csv")
+    group_corr.to_csv(corr_path)
+    group_pvals.to_csv(pval_path)
+
+    bubble_base = group_base.with_name(f"{group_base.name}_bubble")
+    corr_heatmap_base = group_base.with_name(f"{group_base.name}_corr_heatmap")
+    pval_heatmap_base = group_base.with_name(f"{group_base.name}_pvalue_heatmap")
+
+    bubble_fig, _bubble_ax = plot_feature_latent_correlation_bubble(
+        model,
+        X_train_model,
+        targets=y_train_model,
+        target_name=TARGET_LABEL,
+        variables=group_features + [TARGET_LABEL],
+        title=(
+            f"Latent correlations ({TARGET_LABEL}) – "
+            f"{group_name.replace('_', ' ').title()} bubble"
+        ),
+        output_path=bubble_base,
+        correlations=group_corr,
+        p_values=group_pvals,
+    )
+    plt.close(bubble_fig)
+
+    corr_fig, _corr_ax = plot_feature_latent_correlation_heatmap(
+        model,
+        X_train_model,
+        targets=y_train_model,
+        target_name=TARGET_LABEL,
+        variables=group_features + [TARGET_LABEL],
+        title=(
+            f"Latent correlations ({TARGET_LABEL}) – "
+            f"{group_name.replace('_', ' ').title()} correlation"
+        ),
+        output_path=corr_heatmap_base,
+        correlations=group_corr,
+        p_values=group_pvals,
+    )
+    plt.close(corr_fig)
+
+    pval_fig, _pval_ax = plot_feature_latent_correlation_heatmap(
+        model,
+        X_train_model,
+        targets=y_train_model,
+        target_name=TARGET_LABEL,
+        variables=group_features + [TARGET_LABEL],
+        title=(
+            f"Latent correlations ({TARGET_LABEL}) – "
+            f"{group_name.replace('_', ' ').title()} p-values"
+        ),
+        value="pvalue",
+        output_path=pval_heatmap_base,
+        correlations=group_corr,
+        p_values=group_pvals,
+    )
+    plt.close(pval_fig)
+
+    latent_group_outputs.append(
+        (
+            group_name,
+            bubble_base.with_suffix(".png"),
+            corr_heatmap_base.with_suffix(".png"),
+            pval_heatmap_base.with_suffix(".png"),
+            corr_path,
+            pval_path,
+        )
+    )
+
+latent_features = {
+    name: features for name, (features, _) in evaluation_datasets.items()
+}
+latent_labels = {name: labels for name, (_, labels) in evaluation_datasets.items()}
+latent_path = INTERPRETATION_DIR / f"latent_{TARGET_LABEL}.png"
+plot_latent_space(
+    model,
+    latent_features,
+    latent_labels,
+    target_name=TARGET_LABEL,
+    output_path=latent_path,
+)
+
 # %% [markdown]
 # ## Synthetic data – TSTR/TRTR, distribution shift, and privacy
 #
@@ -2254,238 +2496,6 @@ render_dataframe(
 )
 
 
-# %% [markdown]
-# ## Latent space correlation analysis
-#
-# Quantify the relationship between latent representations and clinical
-# features using Spearman correlation. The multilayer path graph provides the
-# primary interpretation of latent-feature-target associations, with heatmaps
-# and bubble charts serving as supplementary summaries.
-
-# %%
-
-latent_correlation_base = (
-    VISUALISATIONS_DIR / f"latent_clinical_correlation_{TARGET_LABEL}"
-)
-overall_corr_path = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_correlations.csv"
-)
-overall_pval_path = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_pvalues.csv"
-)
-overall_bubble_base = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_bubble"
-)
-overall_corr_heatmap_base = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_corr_heatmap"
-)
-overall_pval_heatmap_base = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_pvalue_heatmap"
-)
-
-overall_corr, overall_pvals = compute_feature_latent_correlation(
-    model,
-    X_train_model,
-    targets=y_train_model,
-    target_name=TARGET_LABEL,
-    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-)
-overall_corr.to_csv(overall_corr_path)
-overall_pvals.to_csv(overall_pval_path)
-
-overall_path_graph_base = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_path_graph"
-)
-overall_path_fig, _overall_path_ax = plot_feature_latent_outcome_path_graph(
-    model,
-    X_train_model,
-    y=y_train_model,
-    target_name=TARGET_LABEL,
-    node_label_mapping=PATH_GRAPH_NODE_LABELS,
-    node_color_mapping=PATH_GRAPH_NODE_COLORS,
-    node_group_mapping=PATH_GRAPH_NODE_GROUPS,
-    group_color_mapping=PATH_GRAPH_GROUP_COLORS,
-    edge_label_top_k=15,
-    figure_kwargs={"figsize": (14, 8)},
-)
-overall_path_graph_path = overall_path_graph_base.with_suffix(".png")
-overall_path_fig.savefig(overall_path_graph_path, dpi=300, bbox_inches="tight")
-overall_path_fig.savefig(
-    overall_path_graph_base.with_suffix(".pdf"), bbox_inches="tight"
-)
-plt.close(overall_path_fig)
-
-overall_bubble_fig, _overall_bubble_ax = plot_feature_latent_correlation_bubble(
-    model,
-    X_train_model,
-    targets=y_train_model,
-    target_name=TARGET_LABEL,
-    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-    title=f"Latent correlations ({TARGET_LABEL}) – bubble chart",
-    output_path=overall_bubble_base,
-    correlations=overall_corr,
-    p_values=overall_pvals,
-)
-plt.close(overall_bubble_fig)
-overall_bubble_path = overall_bubble_base.with_suffix(".png")
-
-overall_corr_fig, _overall_corr_ax = plot_feature_latent_correlation_heatmap(
-    model,
-    X_train_model,
-    targets=y_train_model,
-    target_name=TARGET_LABEL,
-    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-    title=f"Latent correlations ({TARGET_LABEL}) – correlation heatmap",
-    output_path=overall_corr_heatmap_base,
-    correlations=overall_corr,
-    p_values=overall_pvals,
-)
-plt.close(overall_corr_fig)
-overall_corr_heatmap_path = overall_corr_heatmap_base.with_suffix(".png")
-
-overall_pval_fig, _overall_pval_ax = plot_feature_latent_correlation_heatmap(
-    model,
-    X_train_model,
-    targets=y_train_model,
-    target_name=TARGET_LABEL,
-    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-    title=f"Latent correlations ({TARGET_LABEL}) – p-value heatmap",
-    value="pvalue",
-    output_path=overall_pval_heatmap_base,
-    correlations=overall_corr,
-    p_values=overall_pvals,
-)
-plt.close(overall_pval_fig)
-overall_pval_heatmap_path = overall_pval_heatmap_base.with_suffix(".png")
-
-feature_only_corr = overall_corr.drop(index=TARGET_LABEL, errors="ignore")
-has_latent_correlations = not feature_only_corr.empty
-if not has_latent_correlations:
-    print("Latent-clinical correlation heatmap could not be generated.")
-else:
-    top_correlated = (
-        feature_only_corr.abs().max(axis=1).sort_values(ascending=False).head(10)
-    )
-    render_dataframe(
-        top_correlated.rename("max_abs_correlation")
-        .reset_index()
-        .rename(columns={"index": "variable"}),
-        title="Top latent-clinical correlations (absolute)",
-        floatfmt=".3f",
-    )
-
-available_features = set(FEATURE_COLUMNS)
-latent_group_outputs: list[tuple[str, Path, Path, Path, Path, Path]] = []
-for group_name, candidate_columns in VAR_GROUP_DICT.items():
-    missing = sorted(set(candidate_columns) - available_features)
-    if missing:
-        print(f"Skipping unavailable variables for {group_name}: {', '.join(missing)}")
-    group_features = [
-        column for column in candidate_columns if column in available_features
-    ]
-    if not group_features:
-        continue
-
-    group_base = latent_correlation_base.with_name(
-        f"{latent_correlation_base.name}_{group_name}"
-    )
-    group_corr, group_pvals = compute_feature_latent_correlation(
-        model,
-        X_train_model,
-        targets=y_train_model,
-        target_name=TARGET_LABEL,
-        variables=group_features + [TARGET_LABEL],
-    )
-    corr_path = group_base.with_name(f"{group_base.name}_correlations.csv")
-    pval_path = group_base.with_name(f"{group_base.name}_pvalues.csv")
-    group_corr.to_csv(corr_path)
-    group_pvals.to_csv(pval_path)
-
-    bubble_base = group_base.with_name(f"{group_base.name}_bubble")
-    corr_heatmap_base = group_base.with_name(f"{group_base.name}_corr_heatmap")
-    pval_heatmap_base = group_base.with_name(f"{group_base.name}_pvalue_heatmap")
-
-    bubble_fig, _bubble_ax = plot_feature_latent_correlation_bubble(
-        model,
-        X_train_model,
-        targets=y_train_model,
-        target_name=TARGET_LABEL,
-        variables=group_features + [TARGET_LABEL],
-        title=(
-            f"Latent correlations ({TARGET_LABEL}) – "
-            f"{group_name.replace('_', ' ').title()} bubble"
-        ),
-        output_path=bubble_base,
-        correlations=group_corr,
-        p_values=group_pvals,
-    )
-    plt.close(bubble_fig)
-
-    corr_fig, _corr_ax = plot_feature_latent_correlation_heatmap(
-        model,
-        X_train_model,
-        targets=y_train_model,
-        target_name=TARGET_LABEL,
-        variables=group_features + [TARGET_LABEL],
-        title=(
-            f"Latent correlations ({TARGET_LABEL}) – "
-            f"{group_name.replace('_', ' ').title()} correlation"
-        ),
-        output_path=corr_heatmap_base,
-        correlations=group_corr,
-        p_values=group_pvals,
-    )
-    plt.close(corr_fig)
-
-    pval_fig, _pval_ax = plot_feature_latent_correlation_heatmap(
-        model,
-        X_train_model,
-        targets=y_train_model,
-        target_name=TARGET_LABEL,
-        variables=group_features + [TARGET_LABEL],
-        title=(
-            f"Latent correlations ({TARGET_LABEL}) – "
-            f"{group_name.replace('_', ' ').title()} p-values"
-        ),
-        value="pvalue",
-        output_path=pval_heatmap_base,
-        correlations=group_corr,
-        p_values=group_pvals,
-    )
-    plt.close(pval_fig)
-
-    latent_group_outputs.append(
-        (
-            group_name,
-            bubble_base.with_suffix(".png"),
-            corr_heatmap_base.with_suffix(".png"),
-            pval_heatmap_base.with_suffix(".png"),
-            corr_path,
-            pval_path,
-        )
-    )
-
-
-# %% [markdown]
-# ## Latent space interpretation
-#
-# Project latent representations using PCA for qualitative assessment of class
-# separation across cohorts.
-
-# %%
-
-latent_features = {
-    name: features for name, (features, _) in evaluation_datasets.items()
-}
-latent_labels = {name: labels for name, (_, labels) in evaluation_datasets.items()}
-latent_path = VISUALISATIONS_DIR / f"latent_{TARGET_LABEL}.png"
-plot_latent_space(
-    model,
-    latent_features,
-    latent_labels,
-    target_name=TARGET_LABEL,
-    output_path=latent_path,
-)
 
 
 # %% [markdown]
@@ -2573,6 +2583,9 @@ if has_latent_correlations:
     summary_lines.append(
         f"Latent-clinical p-values: {overall_pval_path.relative_to(OUTPUT_DIR)}"
     )
+    summary_lines.append(
+        f"Latent-clinical path graph: {overall_path_graph_path.relative_to(OUTPUT_DIR)}"
+    )
     if latent_group_outputs:
         summary_lines.append("Latent-clinical group artefacts:")
         for (
@@ -2591,7 +2604,7 @@ if has_latent_correlations:
                 f"p_values={pval_path.relative_to(OUTPUT_DIR)}"
             )
 else:
-    summary_lines.append("Latent-clinical visualisations: unavailable")
+    summary_lines.append("Latent-clinical interpretation assets: unavailable")
 summary_lines.append(f"Latent projection: {latent_path.relative_to(OUTPUT_DIR)}")
 summary_lines.append("")
 

@@ -67,7 +67,7 @@
 - **执行要点**：
   1. 确定训练集、内部验证集、测试集与外部验证集的来源及纳入标准，保持与配置文件一致。
   2. 保留原始列名与数据类型，必要时在日志中记录转换或派生字段。
-  3. 按章节编号划分输出目录（默认 `01` 至 `12`），所有 Artefact（缓存、模型、图表、报告）写入对应子目录。
+  3. 按章节编号划分输出目录（默认 `01_data_and_schema/` → … → `12_privacy_assessment/`），其中 `09_interpretation/` 存放解释性 artefact，`10_tstr_trtr_transfer/`、`11_distribution_shift/` 与 `12_privacy_assessment/` 分别记录迁移、分布漂移与隐私分析。
 
 ### 3. 准备阶段
 - **目的**：初始化实验配置、输出目录、环境变量，保证流程可重入。
@@ -83,11 +83,12 @@
 - **目的**：验证列名、类型、取值范围，为特征工程建立可信输入。
 - **结果解读**：校验通过说明数据与预期一致；若发现冲突需在日志中说明并修复。
 - **输入**：`01_data_and_schema/` 中的 TSV/CSV 或原始数据集。
-- **输出**：schema DataFrame、Markdown 报告、可选可视化。
+- **输出**：`schema_{label}.xlsx`、`evaluation_datasets_{label}.joblib` 及相关可视化。
 - **执行要点**：
   1. 使用 `load_dataset` 读取训练/验证/测试/外部集，确保列齐全。
   2. 调用 `define_schema(..., mode="interactive")` 生成 schema，必要时手动调整数值范围或类别映射。
-  3. 借助 `schema_to_dataframe`、`render_dataframe` 导出摘要并保存到输出目录。
+  3. 借助 `schema_to_dataframe`、`render_dataframe` 导出列摘要，同时在 `01_data_and_schema/` 落盘 `schema_{label}.xlsx`。
+  4. 将评估阶段实际使用的 `evaluation_datasets` 序列化为 `evaluation_datasets_{label}.joblib`，方便复核训练/验证/外部集的特征矩阵与标签。
 
 ### 5. 特征构建与内部验证划分
 - **目的**：在统一流程下生成模型输入，并构建稳定的内部验证集。
@@ -130,36 +131,45 @@
   2. 使用 `evaluate_predictions` 对所有数据集执行 Bootstrap，生成 CSV/Excel 以及抽样记录。
   3. 将校准曲线、指标图表保存为多种格式，便于报告引用。
 
-### 9. 合成数据 TSTR/TRTR 评估
+### 9. 潜空间相关性与解释
+- **目的**：在执行迁移评估前审视 SUAVE 潜空间与临床特征、结局之间的耦合关系，为报告准备可追溯的解释性 artefact。
+- **结果解读**：相关矩阵与 `p` 值识别潜变量与关键特征的关联强度，路径图揭示潜在因果结构，潜空间投影用于比较不同数据集的分布差异。
+- **输入**：`VAR_GROUP_DICT` 定义的特征分组、训练集潜空间嵌入、`evaluation_datasets` 缓存。
+- **输出**：`09_interpretation/` 下的 `latent_clinical_correlation_{label}` 系列 CSV/图像，以及 `latent_{label}.png` 潜空间投影。
+- **执行要点**：
+  1. 使用 `compute_feature_latent_correlation` 生成整体相关矩阵与 `p` 值，同时导出泡泡图、相关性热图、`p` 值热图与路径图。
+  2. 依照 `VAR_GROUP_DICT` 分组重复相关性分析，若特征缺失脚本会打印 `Skipping unavailable variables` 以提醒补齐或记录。
+  3. 调用 `plot_latent_space` 比较训练、验证、测试及外部验证集的潜空间分布，图像保存在 `latent_{label}.png`。
+
+### 10. 合成数据 TSTR/TRTR 评估
 - **目的**：评估生成数据对监督任务的迁移能力，与真实数据训练的基线做比较。
 - **结果解读**：关注真实 vs. 合成训练的指标差异；差距越小，说明生成器迁移价值越高。
 - **输入**：`build_tstr_training_sets` 生成的训练方案、迭代插补特征、基线模型工厂。
-- **输出**：`09_tstr_trtr_transfer/` 下的结果缓存与 Excel/图表。
+- **输出**：`10_tstr_trtr_transfer/` 下的结果缓存与 Excel/图表。
 - **执行要点**：
   1. 按既定方案（真实训练、合成训练、平衡/增广等）构建训练集。
   2. 统一使用 `evaluate_transfer_baselines` 计算 accuracy、roc_auc 及置信区间。
   3. 需要纳入 SUAVE 迁移评估时，确保已有最优 Trial 并设置相关环境变量。
 
-### 10. 合成数据分布漂移分析
+### 11. 合成数据分布漂移分析
 - **目的**：量化生成数据与真实数据的分布差异，定位潜在失真。
 - **结果解读**：C2ST ROC-AUC 接近 0.5 表示难以区分；MMD、能量距离与互信息提供全局/逐列视角。
 - **输入**：TSTR/TRTR 数据拆分、基线模型工厂、分布漂移评估函数。
-- **输出**：`10_distribution_shift/` 下的 `c2st_metrics.xlsx`、`distribution_metrics.xlsx`（`overall` 与 `per_feature` 工作表尾部附有判读提示，内容与 `_interpret_global_shift` / `_interpret_feature_shift` 保持一致）以及相关图表。
+- **输出**：`11_distribution_shift/` 下的 `c2st_metrics.xlsx`、`distribution_metrics.xlsx`（`overall` 与 `per_feature` 工作表尾部附有判读提示，内容与 `_interpret_global_shift` / `_interpret_feature_shift` 保持一致）以及相关图表。
 - **执行要点**：
   1. 使用 `classifier_two_sample_test` 评估多种分类器的区分能力。
   2. 结合 `rbf_mmd`、`energy_distance`、`mutual_information_feature` 获取全局与逐列指标。
   3. 将所有结果导出为 Excel/图像，并在研究日志记录关键信息。
 
-### 11. 潜空间可视化、报告生成与归档
-- **目的**：整合模型性能与解释性结果，形成可交付的研究报告与可视化资产。
-- **结果解读**：潜空间图用于定性评估生成特征区分度，相关性分析揭示潜变量与临床特征之间的联系。
-- **输入**：`04_suave_training/`、`05_calibration_uncertainty/`、`06_evaluation_metrics/` 中的 Artefact。
-- **输出**：`12_visualizations/` 中的图像、`evaluation_summary_{label}.md` 等总结文档。
+### 12. 报告生成与归档
+- **目的**：整合模型性能、潜空间解释（参见第 9 节）与迁移评估结果，形成最终的 Markdown 报告与归档材料。
+- **结果解读**：`evaluation_summary_{label}.md` 汇总最优 Trial、关键指标及主要 artefact 路径，方便撰写技术报告或提交审计。
+- **输入**：`06_evaluation_metrics/` 指标表、`07_bootstrap_analysis/` 区间统计、`09_interpretation/` 解释性输出、`10_tstr_trtr_transfer/` 与 `11_distribution_shift/` 的迁移评估结果。
+- **输出**：输出根目录下的 `evaluation_summary_{label}.md` 与关联 CSV/图像。
 - **执行要点**：
-  1. 使用 `plot_latent_space` 生成潜空间投影，对比不同数据集的分布。
-  2. 借助 `dataframe_to_markdown`、`render_dataframe`、`write_results_to_excel_unique` 汇总指标并生成报告草稿。
-  3. 调用 `compute_feature_latent_correlation`、`plot_feature_latent_*` 等函数量化潜变量与特征/结局的相关性，导出 CSV 与可视化。
-  4. 归档所有模型、插补缓存、图表、日志与数据引用，确保第三方可复现。
+  1. 使用 `dataframe_to_markdown`、`render_dataframe`、`write_results_to_excel_unique` 汇总评估指标，并在 `06_evaluation_metrics/` 保留 Excel/Markdown 副本。
+  2. 执行脚本末尾的汇总逻辑，将 Optuna trial、校准曲线、潜空间解释 artefact 以及 TSTR/分布漂移路径写入 `evaluation_summary_{label}.md`。
+  3. 在归档目录保留模型权重、插补缓存、解释性 CSV/图像、TSTR/TRTR 工作簿与运行日志，确保第三方复核可追溯。
 
 该模板保持数据集无关性，只要在 `analysis_config.py` 中完成适配，即可在新的临床研究任务上复用完整流程。
 
@@ -168,10 +178,10 @@
 ### 缓存判定信息
 
 - `07_bootstrap_analysis/`：主分析脚本会将每个“模型 × 数据集”的 bootstrap 结果保存为 `*_bootstrap.joblib`，其中包含总体/分层指标与抽样记录。命中缓存时直接读取；若 `FORCE_UPDATE_BOOTSTRAP=True` 则重新计算。
-- `09_tstr_trtr_transfer/training_sets/`：`build_tstr_training_sets` 会生成 TSV 与 `manifest_{label}.json`，manifest 记录特征列、生成时间以及 SUAVE manifest 的 SHA256。若签名与当前配置不一致或启用了 `FORCE_UPDATE_SYNTHETIC_DATA`，训练集会被重建，后续依赖同一签名的缓存也会失效。
-- `09_tstr_trtr_transfer/tstr_results_{label}.joblib`、`trtr_results_{label}.joblib`：存储真实/合成训练下的基线预测结果与指标，并携带 `training_manifest_signature`、`data_generator_signature` 等元数据。只有当签名匹配且未启用 `FORCE_UPDATE_TSTR_MODEL` / `FORCE_UPDATE_TRTR_MODEL` 时才会复用。
-- `09_tstr_trtr_transfer/bootstrap_cache/`：`evaluate_transfer_baselines` 在完成一次 bootstrap 后立即写入缓存，校验字段包括 `training_manifest_signature`、`data_generator_signature`、`prediction_signature` 与 `bootstrap_n`。当预测发生变化或启用 `FORCE_UPDATE_TSTR_BOOTSTRAP`、`FORCE_UPDATE_TRTR_BOOTSTRAP` 时会重新采样。
-- `10_distribution_shift/`：两类缓存分别存放在 `c2st_metrics_{label}.joblib` 与 `distribution_metrics_{label}.joblib` 中，记录特征列、模型顺序及统计结果。若配置改变或设置了 `FORCE_UPDATE_C2ST_MODEL`、`FORCE_UPDATE_DISTRIBUTION_SHIFT`，脚本会放弃缓存并重新计算。
+- `10_tstr_trtr_transfer/training_sets/`：`build_tstr_training_sets` 会生成 TSV 与 `manifest_{label}.json`，manifest 记录特征列、生成时间以及 SUAVE manifest 的 SHA256。若签名与当前配置不一致或启用了 `FORCE_UPDATE_SYNTHETIC_DATA`，训练集会被重建，后续依赖同一签名的缓存也会失效。
+- `10_tstr_trtr_transfer/tstr_results_{label}.joblib`、`trtr_results_{label}.joblib`：存储真实/合成训练下的基线预测结果与指标，并携带 `training_manifest_signature`、`data_generator_signature` 等元数据。只有当签名匹配且未启用 `FORCE_UPDATE_TSTR_MODEL` / `FORCE_UPDATE_TRTR_MODEL` 时才会复用。
+- `10_tstr_trtr_transfer/bootstrap_cache/`：`evaluate_transfer_baselines` 在完成一次 bootstrap 后立即写入缓存，校验字段包括 `training_manifest_signature`、`data_generator_signature`、`prediction_signature` 与 `bootstrap_n`。当预测发生变化或启用 `FORCE_UPDATE_TSTR_BOOTSTRAP`、`FORCE_UPDATE_TRTR_BOOTSTRAP` 时会重新采样。
+- `11_distribution_shift/`：两类缓存分别存放在 `c2st_metrics_{label}.joblib` 与 `distribution_metrics_{label}.joblib` 中，记录特征列、模型顺序及统计结果。若配置改变或设置了 `FORCE_UPDATE_C2ST_MODEL`、`FORCE_UPDATE_DISTRIBUTION_SHIFT`，脚本会放弃缓存并重新计算。
 - SUAVE 生成器 artefact：默认读取 `04_suave_training/` 下的 `suave_best_{label}.pt` 与 manifest。当需要覆盖旧模型时，可启用 `FORCE_UPDATE_SUAVE` 强制重新训练（前提是 Optuna artefact 不可用或显式请求刷新）。
 
 ### FORCE_UPDATE 参数对照
