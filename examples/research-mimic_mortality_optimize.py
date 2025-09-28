@@ -457,7 +457,13 @@ if IS_INTERACTIVE and manual_config:
     manual_action = prompt_manual_override_action()
 
     if manual_action == "train":
-        manual_overrides = load_manual_tuning_overrides(manual_config, SUAVE_MODEL_DIR)
+        try:
+            manual_overrides = load_manual_tuning_overrides(
+                manual_config, SUAVE_MODEL_DIR
+            )
+        except Exception as error:
+            print(f"Manual override loading failed: {error}")
+            raise SystemExit(1) from error
         _base_info, base_params = load_optuna_results(
             OPTUNA_DIR,
             TARGET_LABEL,

@@ -1442,7 +1442,24 @@ def summarise_pareto_trials(
 def load_manual_tuning_overrides(
     manual_config: Mapping[str, Any], manual_dir: Path
 ) -> Dict[str, Any]:
-    """Return manual hyper-parameter overrides defined by ``manual_config``."""
+    """Return manual hyper-parameter overrides defined by ``manual_config``.
+
+    Parameters
+    ----------
+    manual_config
+        Manual tuning configuration specifying the module and attribute to
+        import.
+    manual_dir
+        Directory searched for a ``<module>.py`` file that contains the manual
+        overrides.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the configured module cannot be imported from disk.
+    RuntimeError
+        If the configured attribute is missing or does not provide a mapping.
+    """
 
     if not isinstance(manual_config, Mapping):
         return {}
@@ -1452,37 +1469,36 @@ def load_manual_tuning_overrides(
     if not module_name:
         return {}
 
-    overrides: Dict[str, Any] = {}
+    module_path = manual_dir / f"{module_name}.py"
 
-    try:
-        module: Any
-        module_path = manual_dir / f"{module_name}.py"
-        if module_path.exists():
-            spec = importlib.util.spec_from_file_location(module_name, module_path)
-            if spec is None or spec.loader is None:  # pragma: no cover - defensive
-                raise ImportError(
-                    f"Could not load manual overrides from {module_path!s}"
-                )
-            module = importlib.util.module_from_spec(spec)
-            sys.modules.setdefault(module_name, module)
-            spec.loader.exec_module(module)
-        else:
+    module: Any
+    if module_path.exists():
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:  # pragma: no cover - defensive
+            raise ImportError(f"Could not load manual overrides from {module_path!s}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules.setdefault(module_name, module)
+        spec.loader.exec_module(module)
+    else:
+        try:
             module = importlib.import_module(module_name)
-        raw_overrides = getattr(module, attribute_name)
-        if isinstance(raw_overrides, Mapping):
-            overrides = dict(raw_overrides)
-        else:
-            print(
-                f"Manual override attribute '{attribute_name}' on module '{module_name}' "
-                "is not a mapping; ignoring overrides."
-            )
-    except Exception as error:  # pragma: no cover - diagnostic logging only
-        print(
-            f"Failed to load manual overrides from {module_name}.{attribute_name}: {error}"
-        )
-        return {}
+        except ModuleNotFoundError as error:
+            raise FileNotFoundError(
+                f"Manual override module '{module_name}' was not found at {module_path!s}."
+            ) from error
 
-    return overrides
+    if not hasattr(module, attribute_name):
+        raise RuntimeError(
+            f"Manual override attribute '{attribute_name}' was not found in module '{module_name}'."
+        )
+
+    raw_overrides = getattr(module, attribute_name)
+    if not isinstance(raw_overrides, Mapping):
+        raise RuntimeError(
+            f"Manual override attribute '{attribute_name}' on module '{module_name}' must be a mapping."
+        )
+
+    return dict(raw_overrides)
 
 
 def prompt_manual_override_action(
