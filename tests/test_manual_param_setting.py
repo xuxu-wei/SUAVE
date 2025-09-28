@@ -77,6 +77,83 @@ def test_prepare_analysis_output_directories_initialises_manual_script(
         "research_template.analysis_utils",
     ],
 )
+def test_load_manual_tuning_overrides_missing_module(
+    tmp_path: Path, module_path: str
+) -> None:
+    """Missing manual override modules should raise ``FileNotFoundError``."""
+
+    module = importlib.import_module(module_path)
+    manual_config = {
+        "module": "nonexistent_manual_module",
+        "attribute": "manual_param_setting",
+    }
+
+    with pytest.raises(FileNotFoundError):
+        module.load_manual_tuning_overrides(manual_config, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "module_path",
+    [
+        "examples.mimic_mortality_utils",
+        "research_template.analysis_utils",
+    ],
+)
+def test_load_manual_tuning_overrides_missing_attribute(
+    tmp_path: Path, module_path: str
+) -> None:
+    """Missing manual override attributes should raise ``RuntimeError``."""
+
+    module = importlib.import_module(module_path)
+    module_name = "manual_override_missing_attribute"
+    script_path = tmp_path / f"{module_name}.py"
+    script_path.write_text("""# empty manual overrides module\n""", encoding="utf-8")
+
+    manual_config = {"module": module_name, "attribute": "manual_param_setting"}
+
+    try:
+        with pytest.raises(RuntimeError):
+            module.load_manual_tuning_overrides(manual_config, tmp_path)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.parametrize(
+    "module_path",
+    [
+        "examples.mimic_mortality_utils",
+        "research_template.analysis_utils",
+    ],
+)
+def test_load_manual_tuning_overrides_requires_mapping(
+    tmp_path: Path, module_path: str
+) -> None:
+    """Non-mapping manual override attributes should raise ``RuntimeError``."""
+
+    module = importlib.import_module(module_path)
+    module_name = "manual_override_not_mapping"
+    script_path = tmp_path / f"{module_name}.py"
+    script_path.write_text(
+        "manual_param_setting = ['not', 'a', 'mapping']\n",
+        encoding="utf-8",
+    )
+
+    manual_config = {"module": module_name, "attribute": "manual_param_setting"}
+
+    try:
+        with pytest.raises(RuntimeError):
+            module.load_manual_tuning_overrides(manual_config, tmp_path)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.parametrize(
+    "module_path",
+    [
+        "examples.mimic_mortality_utils",
+        "research_template.analysis_utils",
+    ],
+)
 def test_manual_manifest_round_trip(tmp_path: Path, module_path: str) -> None:
     """Manual manifest helpers should normalise paths and persist params."""
 
