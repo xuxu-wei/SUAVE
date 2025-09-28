@@ -923,6 +923,7 @@ def record_manual_model_manifest(
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z"),
         "source": "manual",
+        "trial_number": "manual",
     }
     if calibrator_path is not None:
         manifest["calibrator_path"] = _normalise_manifest_path(
