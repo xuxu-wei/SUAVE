@@ -8,24 +8,24 @@
    - [x] 分类头：冻结解码器 → 训练 head → **轻联合微调**（warm-start → head → light joint FT）
    - [x] 温度缩放校准 + 基础可视化（ROC/PR、可靠性图、`plot_feature_latent_correlation_bubble` 潜变量-特征气泡图，p 值由 statsmodels 校正）
 
-2. **低成本增强** ✅
+2. **小成本，大增强** ✅
    - [x] 追加似然头
    - [x] 自动化：自动化识别数据类型和生成schema（`suave.schema_inference` + `suave.interactive.schema_builder`）
    - [x] 启发式超参推荐与序列化（`suave.defaults`），覆盖 latent_dim/hidden_dim/batch_size/epoch 调度
-
-   - [x] 条件生成（CVAE 开关 `conditional=True`）：`fit(..., y=...)` 时启用可控采样
-
+- [x] 条件生成（CVAE 开关 `conditional=True`）：`fit(..., y=...)` 时启用可控采样
    - [x] 可解释性：beta-VAE
-
-   - [x] 类不平衡处理：`class_weight/focal` + 条件过采样（已支持 `class_weight`，**`focal` 与条件过采样待补充**）
-
+- [x] 类不平衡处理：`class_weight/focal` + 条件过采样（已支持 `class_weight`，**`focal` 与条件过采样待补充**）
+   - [x] 分类损失权重自动调节
+- [x] Schema自动推断
+   
 3. **可能需要大幅修改的增强**
    - [ ] 添加 SUAVE 半监督支持（Warmup 阶段无监督允许无标签样本、分类训练和联合微调阶段仅接受有标签样本）
    - [x] 无监督模式下的`predict()/predict_proba()`方法实现，参考HIVAE论文（通过 `attr=` 指定要推断的属性）
-  - [ ] 显式建模缺失模式，并允许生成带缺失的数据
-  
+   - [ ] 显式建模缺失模式，并允许生成带缺失的数据
+- [ ] 添加回归任务支持
+   
 4. **评测闭环** ✅
-   - [x] **TSTR/TRTR** 脚手架（独立评测器）
+   - [x] **TSTR/TRTR** 评测
    - [x] 简单 **MIA**（membership inference）基线（影子模型/置信阈值法）
    - [x] 结果打包与示例 notebook（研究作 example）
    - [x] 研究级 MIMIC/eICU 分析脚本整合：Optuna 最优试验、基线模型、SUAVE 校准、TSTR/TRTR、分布漂移与报告导出（`examples/research-mimic_mortality_supervised.py`）
@@ -169,11 +169,3 @@ reloaded = SUAVE.load("path/to/ckpt")
 - 目标：补全用户文档、示例脚本与 schema 工具集成，突出条件生成与评测流程。
 - 交付：完善 docstring、`examples/sepsis_minimal.py` 的端到端流程、schema dump/load 辅助工具、README 中的使用指南。
 - 验收：文档示例可直接运行生成校准曲线与潜变量可视化，用户可按 README 指引完成条件生成与 TSTR 评测。
-
-
-## 3) 重要 feature 更新
-
-- **分类损失权重自动调节**：`fit()` 会在联合微调阶段根据 warm-up ELBO 与验证集交叉熵自动推导分类损失权重，并在用户未显式传入时完成裁剪与回填，兼顾稳定性与易用性。【F:suave/model.py†L574-L604】【F:suave/model.py†L1188-L1228】
-- **超参启发式自动推荐**：默认设置会根据输入维度、样本规模与类别统计调用 `recommend_hyperparameters`，动态更新潜变量维度、隐藏层、dropout、学习率及训练日程等关键超参，并记录到 `auto_hyperparameters_` 便于排查。【F:suave/model.py†L619-L760】
-- **合成数据评估闭环**：`evaluate_tstr`/`evaluate_trtr`、`rbf_mmd`/`energy_distance` 以及 `simple_membership_inference` 覆盖 TSTR/TRTR 指标、按维度归一的 MMD/能量距离（含置换检验）、Brier/ECE 计算与隐私攻击基线，满足真实与合成数据的性能诊断需求。【F:suave/evaluate.py†L288-L370】【F:suave/evaluate.py†L1032-L1566】
-- **研究级 MIMIC/eICU 流水线**：`examples/research-mimic_mortality_supervised.py` 集成 Optuna 最优试验回放、特征工程缓存、基线模型、SUAVE 校准、TSTR/TRTR 与报告导出，支持住院死亡率等关键任务的全流程复现。【F:examples/research-mimic_mortality_supervised.py†L1-L200】
