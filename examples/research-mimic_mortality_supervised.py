@@ -193,13 +193,9 @@ TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
 configure_plot_theme(analysis_config.get("plot_theme", DEFAULT_PLOT_THEME))
-TSTR_METRIC_LABELS: Dict[str, str] = dict(
-    analysis_config.get("tstr_metric_labels", {})
-)
+TSTR_METRIC_LABELS: Dict[str, str] = dict(analysis_config.get("tstr_metric_labels", {}))
 TSTR_BASELINE_MODELS: Optional[Sequence[str]] = analysis_config.get("tstr_models")
-TRAINING_COLOR_PALETTE: Optional[Sequence[str] | str] = analysis_config.get(
-    "training_color_palette"
-)
+TRAINING_COLOR_PALETTE: Optional[Sequence[str] | str] = analysis_config.get("training_color_palette")
 LATENT_CORRELATION_FORMATS: Tuple[str, ...] = ("jpg", "svg", "pdf", "png")
 IS_INTERACTIVE = is_interactive_session()
 
@@ -671,8 +667,8 @@ render_dataframe(
 # Retrieve the best Optuna trial information saved by the optimisation script.
 
 # %%
-
 optuna_trials_path = OPTUNA_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
+manual_model_manifest: Dict[str, Any] = dict(model_loading_plan.manual_model_manifest)
 
 if IS_INTERACTIVE and pareto_trials:
     pareto_summary = summarise_pareto_trials(

@@ -639,8 +639,8 @@ render_dataframe(
 # Retrieve the best Optuna trial information saved by the optimisation script.
 
 # %%
-
 optuna_trials_path = OPTUNA_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
+manual_model_manifest: Dict[str, Any] = dict(model_loading_plan.manual_model_manifest)
 
 if IS_INTERACTIVE and pareto_trials:
     pareto_summary = summarise_pareto_trials(
