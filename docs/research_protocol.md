@@ -142,7 +142,7 @@ print(train_labels.head())</code></pre>
 2. 依照 `VAR_GROUP_DICT` 为每个临床分组重复相关性分析，输出分组级别的 CSV 与配套图像；若特征缺失，脚本会打印 `Skipping unavailable variables` 以提醒补齐或记录。
 3. 调用 `plot_latent_space` 将训练、验证、测试与 eICU 数据集的潜空间嵌入投影到统一图像，留存于 `latent_{label}.png` 以支持质性审查。
 
-### 10. 合成数据 - TSTR/TRTR
+### 10. 合成数据 - Data synthesis / TSTR/TRTR / Distribution shift / Privacy
 
 **目的**：评估 SUAVE 生成数据对下游监督任务的实用性，并对比真实数据训练的基线表现。
 **结果解读**：重点关注 `roc_auc` 与 `accuracy` 的差异；若合成数据与真实数据性能接近，说明生成器具备迁移价值。

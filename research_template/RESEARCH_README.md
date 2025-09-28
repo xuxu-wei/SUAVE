@@ -146,7 +146,7 @@
   2. 依照 `VAR_GROUP_DICT` 分组重复相关性分析，若特征缺失脚本会打印 `Skipping unavailable variables` 以提醒补齐或记录。
   3. 调用 `plot_latent_space` 比较训练、验证、测试及外部验证集的潜空间分布，图像保存在 `latent_{label}.png`。
 
-### 10. 合成数据 TSTR/TRTR 评估
+### 10. 合成数据评估（Data synthesis / TSTR/TRTR / Distribution shift / Privacy）
 - **目的**：评估生成数据对监督任务的迁移能力，与真实数据训练的基线做比较。
 - **结果解读**：关注真实 vs. 合成训练的指标差异；差距越小，说明生成器迁移价值越高。
 - **输入**：`build_tstr_training_sets` 生成的训练方案、迭代插补特征、基线模型工厂。
