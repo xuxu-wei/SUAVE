@@ -1,3 +1,20 @@
+# ---
+# jupyter:
+#   jupytext:
+#     cell_metadata_filter: -all
+#     formats: ipynb,py:percent
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.17.3
+#   kernelspec:
+#     display_name: ai_exp
+#     language: python
+#     name: python3
+# ---
+
+# %%
 """MIMIC mortality evaluation workflow.
 
 Usage
@@ -17,7 +34,6 @@ Script mode (command line execution)
       trains the preferred Pareto-front trial or falls back to stored best
       parameters.
 """
-
 # %% [markdown]
 # # MIMIC mortality (evaluation)
 #

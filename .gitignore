@@ -2,6 +2,8 @@
 /examples/research_outputs_*/
 /examples/analysis_outputs_*/
 /examples/*local_test.*
+/examples/research-mimic_mortality_supervised.ipynb
+/examples/.
 /task_list.md
 
 # Byte-compiled / optimized / DLL files
