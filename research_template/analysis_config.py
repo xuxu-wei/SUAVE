@@ -137,6 +137,14 @@ HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
     "deep": (128, 64, 32),
 }
 
+# 🟡 Caution: only update this hook when you need to override the manual tuning
+#     script and fully understand the downstream impact. Blind edits may break
+#     batch workflows.
+INTERACTIVE_MANUAL_TUNING: Dict[str, str] = {
+    "module": "manual_param_setting",
+    "attribute": "manual_param_setting",
+}
+
 # 🟡 Default configuration passed to :func:`build_analysis_config`.
 DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
     "optuna_trials": 5,
@@ -153,6 +161,7 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
         "delta_roc_auc": "ΔAUROC",
     },
     "training_color_palette": None,
+    "interactive_manual_tuning": INTERACTIVE_MANUAL_TUNING,
 }
 
 # 🟡 Script-mode defaults that force regeneration of cached artefacts。
@@ -398,6 +407,7 @@ __all__ = [
     "DATA_DIR",
     "DATASET_FILENAMES",
     "DEFAULT_ANALYSIS_CONFIG",
+    "INTERACTIVE_MANUAL_TUNING",
     "FORCE_UPDATE_FLAG_DEFAULTS",
     "HEAD_HIDDEN_DIMENSION_OPTIONS",
     "HIDDEN_DIMENSION_OPTIONS",

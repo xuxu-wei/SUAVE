@@ -5,15 +5,17 @@ Usage
 Interactive sessions (e.g. IPython, Jupyter)
     * Detect the active Optuna study and render the Pareto front for manual
       inspection.
-    * Prompt for a trial identifier; pressing Enter reuses the most recently
-      saved model when available, otherwise the chosen Pareto trial is trained.
+    * Prompt for a trial identifier; entering ``manual`` loads the manual
+      override when available, pressing Enter reuses the most recently saved
+      artefacts or trains the chosen Pareto trial.
 
 Script mode (command line execution)
     * Accepts an optional ``trial_id`` positional argument (or ``--trial-id``)
-      to force loading/training a specific Optuna trial.
-    * Without an argument, attempts to load the most recent saved model; if
-      absent, automatically trains the preferred Pareto-front trial or falls
-      back to stored best parameters.
+      to force loading/training a specific Optuna trial or ``manual`` override.
+    * Without an argument, attempts to load the manual override when present,
+      otherwise reuses the most recent saved model; if absent, automatically
+      trains the preferred Pareto-front trial or falls back to stored best
+      parameters.
 """
 
 # %% [markdown]
@@ -32,7 +34,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
 import joblib
@@ -113,7 +115,9 @@ from mimic_mortality_utils import (  # noqa: E402
     schema_to_dataframe,
     to_numeric_frame,
     load_model_manifest,
+    load_manual_model_manifest,
     record_model_manifest,
+    record_manual_model_manifest,
     _interpret_feature_shift,
     _interpret_global_shift,
 )
@@ -165,7 +169,7 @@ TRAINING_COLOR_PALETTE: Optional[Sequence[str] | str] = analysis_config.get(
 LATENT_CORRELATION_FORMATS: Tuple[str, ...] = ("jpg", "svg", "pdf", "png")
 IS_INTERACTIVE = is_interactive_session()
 
-CLI_REQUESTED_TRIAL_ID: Optional[int] = None
+CLI_REQUESTED_TRIAL_ID: Optional[Union[str, int]] = None
 if not IS_INTERACTIVE:
     CLI_REQUESTED_TRIAL_ID = parse_script_arguments(sys.argv[1:])
 
@@ -641,6 +645,7 @@ if IS_INTERACTIVE and pareto_trials:
         pareto_trials,
         manifest=model_manifest,
         model_dir=SUAVE_MODEL_DIR,
+        manual_manifest=manual_model_manifest,
     )
     render_dataframe(
         pareto_summary,
@@ -669,17 +674,39 @@ selected_model_path = model_loading_plan.selected_model_path
 selected_calibrator_path = model_loading_plan.selected_calibrator_path
 selected_params: Dict[str, Any] = dict(model_loading_plan.selected_params)
 
+manual_model_manifest: Dict[str, Any] = dict(
+    model_loading_plan.manual_model_manifest
+)
+manual_identifier = manual_model_manifest.get("trial_number")
+if manual_identifier is None and manual_model_manifest.get("model_path"):
+    manual_identifier = "manual"
+manual_selection = bool(
+    manual_model_manifest
+    and selected_trial_number in {manual_identifier, "manual"}
+)
+
 if not selected_params and optuna_best_params:
     selected_params = dict(optuna_best_params)
+if (
+    manual_selection
+    and not selected_params
+    and isinstance(manual_model_manifest.get("params"), Mapping)
+):
+    selected_params = dict(manual_model_manifest["params"])
 
 model: Optional[SUAVE] = model_loading_plan.preloaded_model
 calibrator: Optional[Any] = None
 
 if model is not None and selected_model_path and selected_model_path.exists():
     if selected_trial_number is not None:
-        print(
-            f"Reusing cached SUAVE model for Optuna trial #{selected_trial_number} from {selected_model_path}."
-        )
+        if manual_selection:
+            print(
+                f"Reusing manually specified SUAVE model from {selected_model_path}."
+            )
+        else:
+            print(
+                f"Reusing cached SUAVE model for Optuna trial #{selected_trial_number} from {selected_model_path}."
+            )
     else:
         print(f"Reusing cached SUAVE model from {selected_model_path}.")
     if missing_optuna:
@@ -693,9 +720,14 @@ if selected_calibrator_path and selected_calibrator_path.exists():
     if embedded is not None:
         model = embedded
         if selected_trial_number is not None:
-            print(
-                f"Loaded isotonic calibrator for Optuna trial #{selected_trial_number} from {selected_calibrator_path}."
-            )
+            if manual_selection:
+                print(
+                    f"Loaded isotonic calibrator for the manual override from {selected_calibrator_path}."
+                )
+            else:
+                print(
+                    f"Loaded isotonic calibrator for Optuna trial #{selected_trial_number} from {selected_calibrator_path}."
+                )
         else:
             print(f"Loaded isotonic calibrator from {selected_calibrator_path}.")
     else:
@@ -705,9 +737,14 @@ if selected_calibrator_path and selected_calibrator_path.exists():
 if model is None and selected_model_path and selected_model_path.exists():
     model = SUAVE.load(selected_model_path)
     if selected_trial_number is not None:
-        print(
-            f"Loaded SUAVE model for Optuna trial #{selected_trial_number} from {selected_model_path}."
-        )
+        if manual_selection:
+            print(
+                f"Loaded manually specified SUAVE model from {selected_model_path}."
+            )
+        else:
+            print(
+                f"Loaded SUAVE model for Optuna trial #{selected_trial_number} from {selected_model_path}."
+            )
     else:
         print(f"Loaded SUAVE model from {selected_model_path}.")
     if missing_optuna:
@@ -723,7 +760,11 @@ if model is None:
         print(
             "Warning: Optuna tuning artefacts were not found; falling back to default SUAVE hyperparameters."
         )
-    if selected_trial_number is not None:
+    if manual_selection:
+        print(
+            "Training SUAVE for the manual override because no saved artefacts were available…"
+        )
+    elif selected_trial_number is not None:
         print(
             f"Training SUAVE for Optuna trial #{selected_trial_number} because no saved model artefacts were available…"
         )
@@ -753,7 +794,9 @@ if model_was_trained:
     model_output_path.parent.mkdir(parents=True, exist_ok=True)
     model.save(model_output_path)
     selected_model_path = model_output_path
-    if selected_trial_number is not None:
+    if manual_selection:
+        print(f"Saved SUAVE model for the manual override to {model_output_path}.")
+    elif selected_trial_number is not None:
         print(
             f"Saved SUAVE model for Optuna trial #{selected_trial_number} to {model_output_path}."
         )
@@ -784,7 +827,11 @@ if calibrator_was_fitted:
     calibrator_output_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(calibrator, calibrator_output_path)
     selected_calibrator_path = calibrator_output_path
-    if selected_trial_number is not None:
+    if manual_selection:
+        print(
+            f"Saved isotonic calibrator for the manual override to {calibrator_output_path}."
+        )
+    elif selected_trial_number is not None:
         print(
             "Saved isotonic calibrator for Optuna trial "
             f"#{selected_trial_number} to {calibrator_output_path}."
@@ -797,45 +844,59 @@ if (
     and selected_model_path is not None
     and selected_calibrator_path is not None
 ):
-    manifest_values: List[float] = []
-
-    if selected_trial_number is not None:
-        matching_trial = next(
-            (trial for trial in pareto_trials if trial.number == selected_trial_number),
-            None,
+    if manual_selection:
+        manifest_path = record_manual_model_manifest(
+            SUAVE_MODEL_DIR,
+            TARGET_LABEL,
+            model_path=selected_model_path,
+            calibrator_path=selected_calibrator_path,
+            params=selected_params,
         )
-        if matching_trial is not None and matching_trial.values is not None:
-            manifest_values = [float(value) for value in matching_trial.values]
+        print(f"Updated manual SUAVE model manifest at {manifest_path}.")
+        manual_model_manifest = load_manual_model_manifest(
+            SUAVE_MODEL_DIR, TARGET_LABEL
+        )
+        model_manifest = load_model_manifest(SUAVE_MODEL_DIR, TARGET_LABEL)
+    else:
+        manifest_values: List[float] = []
 
-    if not manifest_values:
-        previous_values = model_loading_plan.model_manifest.get("values")
-        if isinstance(previous_values, Sequence) and not isinstance(
-            previous_values, (str, bytes)
-        ):
-            manifest_values = [float(value) for value in previous_values]
+        if isinstance(selected_trial_number, int):
+            matching_trial = next(
+                (trial for trial in pareto_trials if trial.number == selected_trial_number),
+                None,
+            )
+            if matching_trial is not None and matching_trial.values is not None:
+                manifest_values = [float(value) for value in matching_trial.values]
 
-    if not manifest_values:
-        best_info_values = optuna_best_info.get("values")
-        if isinstance(best_info_values, Sequence) and not isinstance(
-            best_info_values, (str, bytes)
-        ):
-            manifest_values = [float(value) for value in best_info_values]
+        if not manifest_values:
+            previous_values = model_loading_plan.model_manifest.get("values")
+            if isinstance(previous_values, Sequence) and not isinstance(
+                previous_values, (str, bytes)
+            ):
+                manifest_values = [float(value) for value in previous_values]
 
-    manifest_path = record_model_manifest(
-        SUAVE_MODEL_DIR,
-        TARGET_LABEL,
-        trial_number=selected_trial_number,
-        values=manifest_values,
-        params=selected_params,
-        model_path=selected_model_path,
-        calibrator_path=selected_calibrator_path,
-        study_name=make_study_name(
-            analysis_config.get("optuna_study_prefix"), TARGET_LABEL
-        ),
-        storage=analysis_config.get("optuna_storage"),
-    )
-    print(f"Updated SUAVE model manifest at {manifest_path}.")
-    model_manifest = load_model_manifest(SUAVE_MODEL_DIR, TARGET_LABEL)
+        if not manifest_values:
+            best_info_values = optuna_best_info.get("values")
+            if isinstance(best_info_values, Sequence) and not isinstance(
+                best_info_values, (str, bytes)
+            ):
+                manifest_values = [float(value) for value in best_info_values]
+
+        manifest_path = record_model_manifest(
+            SUAVE_MODEL_DIR,
+            TARGET_LABEL,
+            trial_number=selected_trial_number,
+            values=manifest_values,
+            params=selected_params,
+            model_path=selected_model_path,
+            calibrator_path=selected_calibrator_path,
+            study_name=make_study_name(
+                analysis_config.get("optuna_study_prefix"), TARGET_LABEL
+            ),
+            storage=analysis_config.get("optuna_storage"),
+        )
+        print(f"Updated SUAVE model manifest at {manifest_path}.")
+        model_manifest = load_model_manifest(SUAVE_MODEL_DIR, TARGET_LABEL)
 
 
 # %% [markdown]

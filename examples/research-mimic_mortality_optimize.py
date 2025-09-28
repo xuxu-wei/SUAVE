@@ -46,18 +46,25 @@ from mimic_mortality_utils import (  # noqa: E402
     VALIDATION_SIZE,
     Schema,
     build_suave_model,
-    compute_binary_metrics,
+    collect_manual_and_optuna_overview,
     define_schema,
+    evaluate_candidate_model_performance,
     fit_isotonic_calibrator,
+    is_interactive_session,
     load_dataset,
+    load_manual_model_manifest,
+    load_manual_tuning_overrides,
+    load_optuna_results,
     make_logistic_pipeline,
     prepare_features,
     prepare_analysis_output_directories,
+    prompt_manual_override_action,
     resolve_analysis_output_root,
     render_dataframe,
     schema_to_dataframe,
     to_numeric_frame,
     record_model_manifest,
+    run_manual_override_training,
     _save_figure_multiformat,
     make_study_name,
     resolve_suave_fit_kwargs,
@@ -86,6 +93,8 @@ except ImportError as exc:  # pragma: no cover - optuna provided via requirement
 TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
+
+IS_INTERACTIVE = is_interactive_session()
 
 
 # %% [markdown]
@@ -286,71 +295,40 @@ def run_optuna_search(
             **fit_kwargs,
         )
         fit_seconds = time.perf_counter() - start_time
-        validation_probs = model.predict_proba(X_validation)
-        validation_metrics = compute_binary_metrics(validation_probs, y_validation)
-        trial.set_user_attr("validation_metrics", validation_metrics)
-        trial.set_user_attr("fit_seconds", fit_seconds)
-
-        roauc = validation_metrics.get("ROAUC", float("nan"))
-        if not np.isfinite(roauc):
-            raise optuna.exceptions.TrialPruned("Non-finite validation ROAUC")
-
         try:
-            numeric_train = to_numeric_frame(X_train.loc[:, feature_columns])
-            numeric_validation = to_numeric_frame(X_validation.loc[:, feature_columns])
-
-            rng = np.random.default_rng(random_state + trial.number)
-            synthetic_labels = rng.choice(y_train, size=len(y_train), replace=True)
-            synthetic_samples = model.sample(
-                len(synthetic_labels), conditional=True, y=synthetic_labels
+            evaluation = evaluate_candidate_model_performance(
+                model,
+                feature_columns=feature_columns,
+                X_train=X_train,
+                y_train=y_train,
+                X_validation=X_validation,
+                y_validation=y_validation,
+                random_state=random_state + trial.number,
             )
-            if not isinstance(synthetic_samples, pd.DataFrame):
-                synthetic_features = pd.DataFrame(
-                    synthetic_samples, columns=feature_columns
-                )
-            else:
-                synthetic_features = synthetic_samples.loc[:, feature_columns].copy()
-            numeric_synthetic = to_numeric_frame(synthetic_features)
-
-            tstr_metrics = evaluate_tstr(
-                (
-                    numeric_synthetic.to_numpy(),
-                    np.asarray(synthetic_labels),
-                ),
-                (
-                    numeric_validation.to_numpy(),
-                    y_validation.to_numpy(),
-                ),
-                make_logistic_pipeline,
-            )
-            trtr_metrics = evaluate_trtr(
-                (
-                    numeric_train.to_numpy(),
-                    y_train.to_numpy(),
-                ),
-                (
-                    numeric_validation.to_numpy(),
-                    y_validation.to_numpy(),
-                ),
-                make_logistic_pipeline,
-            )
-            trial.set_user_attr("tstr_metrics", tstr_metrics)
-            trial.set_user_attr("trtr_metrics", trtr_metrics)
-
-            delta_auc = abs(
-                float(trtr_metrics.get("auroc", float("nan")))
-                - float(tstr_metrics.get("auroc", float("nan")))
-            )
-            if not np.isfinite(delta_auc):
-                raise ValueError("Non-finite TSTR/TRTR delta AUC")
         except Exception as error:
             trial.set_user_attr("tstr_trtr_error", repr(error))
             raise optuna.exceptions.TrialPruned(
-                f"Failed to compute TSTR/TRTR delta AUC: {error}"
+                f"Failed to evaluate candidate model: {error}"
             ) from error
 
+        validation_metrics = evaluation["validation_metrics"]
+        tstr_metrics = evaluation["tstr_metrics"]
+        trtr_metrics = evaluation["trtr_metrics"]
+        delta_auc = evaluation["delta_auc"]
+        values = evaluation["values"]
+
+        trial.set_user_attr("validation_metrics", validation_metrics)
+        trial.set_user_attr("fit_seconds", fit_seconds)
+        trial.set_user_attr("tstr_metrics", tstr_metrics)
+        trial.set_user_attr("trtr_metrics", trtr_metrics)
         trial.set_user_attr("tstr_trtr_delta_auc", delta_auc)
-        return roauc, delta_auc
+
+        if not np.isfinite(values[0]):
+            raise optuna.exceptions.TrialPruned("Non-finite validation ROAUC")
+        if not np.isfinite(values[1]):
+            raise optuna.exceptions.TrialPruned("Non-finite TSTR/TRTR delta AUC")
+
+        return float(values[0]), float(values[1])
 
     study = optuna.create_study(
         directions=("maximize", "minimize"),
@@ -445,6 +423,106 @@ y_validation = y_validation.reset_index(drop=True)
 # ## Execute Optuna search
 
 # %%
+
+manual_config = analysis_config.get("interactive_manual_tuning", {})
+manual_action = "optuna"
+
+if IS_INTERACTIVE and manual_config:
+    try:
+        manual_summary, manual_ranked = collect_manual_and_optuna_overview(
+            target_label=TARGET_LABEL,
+            model_dir=SUAVE_MODEL_DIR,
+            optuna_dir=OPTUNA_DIR,
+            study_prefix=analysis_config.get("optuna_study_prefix"),
+            storage=analysis_config.get("optuna_storage"),
+        )
+    except Exception as error:  # pragma: no cover - diagnostic aid
+        print(f"Failed to prepare manual tuning overview: {error}")
+        manual_summary = pd.DataFrame()
+        manual_ranked = pd.DataFrame()
+
+    if not manual_summary.empty:
+        render_dataframe(
+            manual_summary,
+            title="Manual override and Pareto summary",
+            floatfmt=".4f",
+        )
+    if not manual_ranked.empty:
+        render_dataframe(
+            manual_ranked,
+            title="Manual/Pareto candidates (top 50)",
+            floatfmt=".4f",
+        )
+
+    manual_action = prompt_manual_override_action()
+
+    if manual_action == "train":
+        manual_overrides = load_manual_tuning_overrides(manual_config, SUAVE_MODEL_DIR)
+        _base_info, base_params = load_optuna_results(
+            OPTUNA_DIR,
+            TARGET_LABEL,
+            study_prefix=analysis_config.get("optuna_study_prefix"),
+            storage=analysis_config.get("optuna_storage"),
+        )
+        if not manual_overrides and not base_params:
+            print(
+                "Manual overrides were empty and no Optuna parameters were found; "
+                "continuing with Optuna search."
+            )
+            manual_action = "optuna"
+        else:
+            try:
+                manual_result = run_manual_override_training(
+                    target_label=TARGET_LABEL,
+                    manual_overrides=manual_overrides,
+                    base_params=base_params,
+                    schema=schema,
+                    feature_columns=FEATURE_COLUMNS,
+                    X_train=X_train_model,
+                    y_train=y_train_model,
+                    X_validation=X_validation,
+                    y_validation=y_validation,
+                    model_dir=SUAVE_MODEL_DIR,
+                    calibration_dir=CALIBRATION_DIR,
+                    random_state=RANDOM_STATE,
+                )
+            except Exception as error:  # pragma: no cover - diagnostic path
+                print(f"Manual override training failed: {error}")
+                manual_action = "optuna"
+            else:
+                validation_value, delta_value = manual_result["values"]
+                print(
+                    "\nManual override training summary:"
+                    f"\n  Validation ROAUC: {validation_value:.4f}"
+                    f"\n  TSTR/TRTR ΔAUC: {delta_value:.4f}"
+                )
+                if manual_result["params"]:
+                    print("Applied hyper-parameters:")
+                    for key, value in sorted(manual_result["params"].items()):
+                        print(f"  - {key}: {value}")
+                print(
+                    f"Saved manual SUAVE model to {manual_result['model_path']}."
+                )
+                print(
+                    "Saved manual calibrator to"
+                    f" {manual_result['calibrator_path']}."
+                )
+                print(
+                    f"Updated manual manifest at {manual_result['manifest_path']}."
+                )
+                raise SystemExit(0)
+
+    if manual_action == "reuse":
+        manual_manifest = load_manual_model_manifest(SUAVE_MODEL_DIR, TARGET_LABEL)
+        if manual_manifest:
+            print(
+                "Manual SUAVE artefacts detected on disk; Optuna search will be skipped. "
+                "Run the evaluation script to load the manual override."
+            )
+            raise SystemExit(0)
+        print(
+            "Manual manifest was not found; continuing with Optuna search."
+        )
 
 study_name = make_study_name(analysis_config["optuna_study_prefix"], TARGET_LABEL)
 
