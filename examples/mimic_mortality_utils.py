@@ -2026,7 +2026,7 @@ def run_manual_override_training(
         raise ValueError("Manual overrides and baseline parameters are empty.")
 
     model = build_suave_model(merged_params, schema, random_state=random_state)
-    model.fit(X_train, y_train, **resolve_suave_fit_kwargs(merged_params))
+    model.fit(X_train, y_train, plot_monitor=is_interactive_session(), **resolve_suave_fit_kwargs(merged_params))
 
     calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
 

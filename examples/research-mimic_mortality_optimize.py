@@ -647,7 +647,6 @@ else:
 
 # %%
 
-
 def _json_ready(value: object) -> object:
     if isinstance(value, (np.floating, np.integer)):
         return value.item()
