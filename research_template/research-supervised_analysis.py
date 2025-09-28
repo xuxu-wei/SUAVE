@@ -124,6 +124,7 @@ from cls_eval import (  # noqa: E402
     export_three_line_tables,
     _format_three_line_ci,
     _write_three_line_workbook,
+    _make_three_line_sheet_name,
 )
 
 from suave.evaluate import (  # noqa: E402
@@ -982,46 +983,6 @@ def _format_metric_with_ci(
         return f"{val:.3f} ({float(low):.3f}, {float(high):.3f})"
     except (TypeError, ValueError):
         return f"{val:.3f}"
-
-
-def _make_three_line_sheet_name(
-    dataset: str, metric: str, suffix: Optional[int] = None
-) -> str:
-    """Return an Excel-safe sheet name for three-line summary tables."""
-
-    safe_dataset = re.sub(r"[:\\/?*\[\]]", " ", dataset).strip()
-    safe_metric = re.sub(r"[:\\/?*\[\]]", " ", metric).strip()
-
-    if suffix is not None and safe_dataset:
-        safe_dataset = f"{safe_dataset} {suffix}"
-
-    metric_part = f" ({safe_metric})" if safe_metric else ""
-    if not safe_dataset and not metric_part:
-        safe_name = "Summary"
-    else:
-        safe_name = f"{safe_dataset}{metric_part}" if safe_dataset else safe_metric
-
-    if len(safe_name) <= 31:
-        return safe_name
-
-    if metric_part:
-        max_dataset_len = max(0, 31 - len(metric_part))
-        if safe_dataset and len(safe_dataset) > max_dataset_len:
-            if suffix is not None:
-                suffix_str = f" {suffix}" if safe_dataset else str(suffix)
-                base_without_suffix = safe_dataset[: -len(suffix_str)]
-                head_len = max(0, max_dataset_len - len(suffix_str))
-                trimmed_head = base_without_suffix[:head_len].rstrip()
-                safe_dataset = (trimmed_head + suffix_str).strip()
-            else:
-                safe_dataset = safe_dataset[:max_dataset_len].rstrip()
-            safe_name = f"{safe_dataset}{metric_part}" if safe_dataset else metric_part
-
-    safe_name = safe_name[:31]
-    if not safe_name:
-        fallback = safe_metric[:31] if safe_metric else "Summary"
-        return fallback or "Summary"
-    return safe_name
 
 
 model_prediction_frames: Dict[str, Dict[str, pd.DataFrame]] = {}
