@@ -112,7 +112,11 @@ from mimic_mortality_utils import (  # noqa: E402
     _interpret_feature_shift,
     _interpret_global_shift,
 )
-from cls_eval import evaluate_predictions, write_results_to_excel_unique  # noqa: E402
+from cls_eval import (  # noqa: E402
+    evaluate_predictions,
+    write_results_to_excel_unique,
+    export_three_line_tables,
+)
 
 from suave.evaluate import (  # noqa: E402
     classifier_two_sample_test,
@@ -1451,6 +1455,37 @@ with pd.ExcelWriter(benchmark_excel_path) as writer:
     bootstrap_warning_df.to_excel(writer, sheet_name="Warnings", index=False)
 
 print("Saved consolidated bootstrap benchmark workbook to", benchmark_excel_path)
+
+three_line_benchmark_path = benchmark_excel_path.with_name(
+    f"{benchmark_excel_path.stem}_three_line.xlsx"
+)
+
+perclass_index_columns = ["Model"]
+if "class" in bootstrap_per_class_df.columns:
+    perclass_index_columns.append("class")
+elif "Class" in bootstrap_per_class_df.columns:
+    perclass_index_columns.append("Class")
+
+export_three_line_tables(
+    {
+        "Summary": bootstrap_summary_df,
+        "overall": bootstrap_overall_df,
+        "Perclass": bootstrap_per_class_df,
+    },
+    three_line_benchmark_path,
+    index_columns={
+        "Summary": ["Model"],
+        "overall": ["Model"],
+        "Perclass": perclass_index_columns,
+    },
+    dataset_column="Dataset",
+    dataset_order=required_datasets,
+    drop_columns=("Target",),
+    decimals=3,
+    ci_label_text="95%",
+)
+
+print("Saved formatted three-line benchmark workbook to", three_line_benchmark_path)
 # %% [markdown]
 # ## Synthetic data – TSTR/TRTR, distribution shift, and privacy
 #
