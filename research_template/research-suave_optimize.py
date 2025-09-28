@@ -32,7 +32,7 @@ if not EXAMPLES_DIR.exists():
 if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
-from mimic_mortality_utils import (  # noqa: E402
+from analysis_utils import (  # noqa: E402
     HIDDEN_DIMENSION_OPTIONS,
     HEAD_HIDDEN_DIMENSION_OPTIONS,
     PARETO_MAX_ABS_DELTA_AUC,
