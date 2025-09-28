@@ -31,6 +31,7 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Patch
 from tabulate import tabulate
 from tqdm.auto import tqdm
+import seaborn as sns
 
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
@@ -81,6 +82,9 @@ DISTRIBUTION_SHIFT_PER_FEATURE_NOTE = (
 
 
 RANDOM_STATE: int = 20201021
+DEFAULT_PLOT_THEME: Optional[str] = "paper"
+PLOT_LATIN_FONT_FAMILY: str = "Times New Roman"
+PLOT_CHINESE_FONT_FAMILY: Optional[str] = "Microsoft YaHei"
 TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
 BENCHMARK_COLUMNS = (
     "APS_III",
@@ -129,6 +133,7 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
     "optuna_study_prefix": "supervised",
     "optuna_storage": None,
     "output_dir_name": "research_outputs_supervised",
+    "plot_theme": DEFAULT_PLOT_THEME,
 }
 
 #: Default script-mode flags that determine whether cached artefacts should be
@@ -158,11 +163,41 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "evaluation_reports": "06_evaluation_metrics",
     "bootstrap_analysis": "07_bootstrap_analysis",
     "baseline_models": "08_baseline_models",
-    "tstr_trtr": "09_tstr_trtr_transfer",
-    "distribution_shift": "10_distribution_shift",
-    "privacy_assessment": "11_privacy_assessment",
-    "visualisations": "12_visualizations",
+    "interpretation": "09_interpretation",
+    "tstr_trtr": "10_tstr_trtr_transfer",
+    "distribution_shift": "11_distribution_shift",
+    "privacy_assessment": "12_privacy_assessment",
 }
+
+
+# =============================================================================
+# === Plot theming utilities ==================================================
+# =============================================================================
+
+
+def configure_plot_theme(
+    theme: Optional[str] = DEFAULT_PLOT_THEME,
+    *,
+    base_font: str = PLOT_LATIN_FONT_FAMILY,
+    chinese_font: Optional[str] = PLOT_CHINESE_FONT_FAMILY,
+) -> None:
+    """Apply a consistent plotting theme across evaluation figures."""
+
+    plt.rcdefaults()
+    if theme is not None:
+        sns.set_theme(context=theme)
+    else:
+        plt.style.use("default")
+
+    font_families: List[str] = [base_font]
+    if chinese_font and chinese_font not in font_families:
+        font_families.append(chinese_font)
+    plt.rcParams["font.family"] = font_families
+    plt.rcParams["font.sans-serif"] = font_families
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+configure_plot_theme()
 
 
 # =============================================================================
@@ -2647,11 +2682,7 @@ def plot_calibration_curves(
 ) -> None:
     """Generate calibration curves with Brier scores annotated in the legend."""
 
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(
-        [0, 1], [0, 1], linestyle="--", color="tab:gray", label="Perfect calibration"
-    )
-
+    calibration_records: List[Tuple[str, np.ndarray, np.ndarray, float]] = []
     for dataset_name, probs in probability_map.items():
         labels = label_map[dataset_name]
         pos_probs = extract_positive_probabilities(probs)
@@ -2660,15 +2691,42 @@ def plot_calibration_curves(
         except ValueError:
             continue
         brier = brier_score_loss(labels, pos_probs)
-        ax.plot(
-            mean_pred,
-            frac_pos,
-            marker="o",
-            label=f"{dataset_name} (Brier={brier:.3f})",
-        )
+        calibration_records.append((dataset_name, mean_pred, frac_pos, brier))
 
-    ax.set_xlabel("Predicted probability")
-    ax.set_ylabel("Observed frequency")
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_aspect("equal", adjustable="box")
+
+    if not calibration_records:
+        ax.text(0.5, 0.5, "Insufficient variation", ha="center", va="center")
+        axis_min, axis_max = 0.0, 1.0
+    else:
+        x_values = np.concatenate([record[1] for record in calibration_records])
+        y_values = np.concatenate([record[2] for record in calibration_records])
+        combined = np.concatenate([x_values, y_values])
+        axis_min = float(np.nanmin(combined))
+        axis_max = float(np.nanmax(combined))
+        if axis_min == axis_max:
+            axis_min -= 0.05
+            axis_max += 0.05
+        padding = max((axis_max - axis_min) * 0.05, 1e-3)
+        axis_min -= padding
+        axis_max += padding
+
+        reference = np.linspace(axis_min, axis_max, 2)
+        ax.plot(reference, reference, linestyle="--", color="tab:gray", label="Perfect calibration")
+
+        for dataset_name, mean_pred, frac_pos, brier in calibration_records:
+            ax.plot(
+                mean_pred,
+                frac_pos,
+                marker="o",
+                label=f"{dataset_name} (Brier={brier:.3f})",
+            )
+
+    ax.set_xlim(axis_min, axis_max)
+    ax.set_ylim(axis_min, axis_max)
+    ax.set_xlabel("Mean predicted probability")
+    ax.set_ylabel("Observed probability")
     ax.set_title(f"Calibration: {target_name}")
     ax.legend()
     fig.tight_layout()
@@ -2749,25 +2807,22 @@ def plot_benchmark_curves(
     target_label: str,
     abbreviation_lookup: Optional[Mapping[str, str]] = None,
     n_bins: int = 10,
-) -> Optional[Path]:
-    """Plot ROC and calibration curves for the supplied dataset."""
+) -> Optional[Mapping[str, Path]]:
+    """Plot benchmark ROC and calibration curves for the supplied dataset."""
 
     unique_labels = np.unique(y_true)
     if unique_labels.size < 2:
         print(f"Skipping {dataset_name} curves because only one class is present.")
         return None
 
-    fig, (roc_ax, cal_ax) = plt.subplots(1, 2, figsize=(12, 5))
-
+    roc_fig, roc_ax = plt.subplots(figsize=(6, 6))
+    roc_ax.set_aspect("equal", adjustable="box")
     roc_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Chance")
     roc_ax.set_title(f"ROC – {dataset_name}")
     roc_ax.set_xlabel("False positive rate")
     roc_ax.set_ylabel("True positive rate")
 
-    cal_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect")
-    cal_ax.set_title(f"Calibration – {dataset_name}")
-    cal_ax.set_xlabel("Mean predicted probability")
-    cal_ax.set_ylabel("Fraction of positives")
+    calibration_records: List[Tuple[str, np.ndarray, np.ndarray]] = []
 
     for model_name, probs in model_probability_lookup.items():
         abbrev = (
@@ -2788,19 +2843,63 @@ def plot_benchmark_curves(
                 f"Calibration curve for {model_name} on {dataset_name} skipped due to insufficient variation."
             )
         else:
-            cal_ax.plot(mean_pred, frac_pos, marker="o", label=abbrev)
+            calibration_records.append((abbrev, mean_pred, frac_pos))
 
     roc_ax.legend(loc="lower right")
-    cal_ax.legend(loc="upper left")
-    fig.suptitle(f"Benchmark ROC & calibration – {dataset_name}")
-    fig.tight_layout()
+    roc_fig.tight_layout()
 
     dataset_slug = dataset_name.lower().replace(" ", "_")
-    figure_path = output_dir / f"benchmark_curves_{dataset_slug}_{target_label}.png"
-    _save_figure_multiformat(fig, figure_path.with_suffix(""), use_tight_layout=True)
-    plt.close(fig)
-    print(f"Saved benchmark curves for {dataset_name} to {figure_path}")
-    return figure_path
+    roc_path = output_dir / f"benchmark_roc_{dataset_slug}_{target_label}.png"
+    _save_figure_multiformat(roc_fig, roc_path.with_suffix(""), use_tight_layout=True)
+    plt.close(roc_fig)
+    print(f"Saved benchmark ROC curves for {dataset_name} to {roc_path}")
+
+    calibration_paths: Optional[Path] = None
+    if calibration_records:
+        cal_fig, cal_ax = plt.subplots(figsize=(6, 6))
+        cal_ax.set_aspect("equal", adjustable="box")
+
+        x_values = np.concatenate([record[1] for record in calibration_records])
+        y_values = np.concatenate([record[2] for record in calibration_records])
+        combined = np.concatenate([x_values, y_values])
+        axis_min = float(np.nanmin(combined))
+        axis_max = float(np.nanmax(combined))
+        if axis_min == axis_max:
+            axis_min -= 0.05
+            axis_max += 0.05
+        padding = max((axis_max - axis_min) * 0.05, 1e-3)
+        axis_min -= padding
+        axis_max += padding
+
+        reference = np.linspace(axis_min, axis_max, 2)
+        cal_ax.plot(reference, reference, linestyle="--", color="tab:gray", label="Perfect calibration")
+
+        for abbrev, mean_pred, frac_pos in calibration_records:
+            cal_ax.plot(mean_pred, frac_pos, marker="o", label=abbrev)
+
+        cal_ax.set_xlim(axis_min, axis_max)
+        cal_ax.set_ylim(axis_min, axis_max)
+        cal_ax.set_title(f"Calibration – {dataset_name}")
+        cal_ax.set_xlabel("Mean predicted probability")
+        cal_ax.set_ylabel("Observed probability")
+        cal_ax.legend(loc="best")
+        cal_fig.tight_layout()
+
+        calibration_paths = (
+            output_dir / f"benchmark_calibration_{dataset_slug}_{target_label}.png"
+        )
+        _save_figure_multiformat(
+            cal_fig, calibration_paths.with_suffix(""), use_tight_layout=True
+        )
+        plt.close(cal_fig)
+        print(
+            f"Saved benchmark calibration curves for {dataset_name} to {calibration_paths}"
+        )
+
+    result: Dict[str, Path] = {"roc": roc_path}
+    if calibration_paths is not None:
+        result["calibration"] = calibration_paths
+    return result
 
 
 def plot_transfer_metric_boxes(
