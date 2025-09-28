@@ -165,7 +165,7 @@ render_dataframe(schema_df, title="Schema overview", floatfmt=None)
 # %% [markdown]
 # ## Optuna study helper
 
-
+# %%
 def _target_accessor(index: int) -> Callable[["optuna.trial.FrozenTrial"], float]:
     """Return a safe accessor for the multi-objective study targets."""
 

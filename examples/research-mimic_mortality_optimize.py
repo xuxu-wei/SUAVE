@@ -180,254 +180,254 @@ render_dataframe(schema_df, title="Schema overview", floatfmt=None)
 
 # %% [markdown]
 # ## Optuna study helper
-#
-#
-# def _target_accessor(index: int) -> Callable[["optuna.trial.FrozenTrial"], float]:
-#     """Return a safe accessor for the multi-objective study targets."""
-#
-#     def _target(trial: "optuna.trial.FrozenTrial") -> float:
-#         if trial.values is None or index >= len(trial.values):
-#             raise optuna.exceptions.TrialPruned(
-#                 "Trial lacks the requested objective value"
-#             )
-#         value = trial.values[index]
-#         if value is None or not np.isfinite(value):
-#             raise optuna.exceptions.TrialPruned("Objective value is not finite")
-#         return float(value)
-#
-#     return _target
-#
-#
-# def _save_optuna_figure(figure_or_axes: "plt.Figure", output_path: Path) -> Path:
-#     """Persist Optuna diagnostic figures in multiple formats."""
-#
-#     # Optuna's Matplotlib helpers return ``Axes`` instances while our utility
-#     # expects a ``Figure``. Normalise the object so saving succeeds regardless
-#     # of the exact return type.
-#     figure = getattr(figure_or_axes, "figure", figure_or_axes)
-#     if not hasattr(figure, "savefig"):
-#         raise TypeError(
-#             "Unsupported Matplotlib object returned from Optuna visualisation"
-#         )
-#
-#     _save_figure_multiformat(figure, output_path.with_suffix(""))
-#     plt.close(figure)
-#     return output_path.with_suffix(".jpg")
-#
-#
-# def _generate_optuna_diagnostics(
-#     study: "optuna.study.Study",
-#     *,
-#     target_label: str,
-#     output_dir: Path,
-# ) -> Mapping[str, Path]:
-#     """Create Optuna diagnostic plots summarising the optimisation dynamics."""
-#
-#     output_dir.mkdir(parents=True, exist_ok=True)
-#     diagnostics: Dict[str, Path] = {}
-#
-#     objective_specs = [
-#         ("validation_roauc", _target_accessor(0), "Validation ROAUC"),
-#         ("tstr_trtr_delta_auc", _target_accessor(1), "TSTR/TRTR ΔAUC"),
-#     ]
-#
-#     for suffix, target_fn, display_name in objective_specs:
-#         try:
-#             importance_fig = optuna_visualisation.plot_param_importances(
-#                 study, target=target_fn, target_name=display_name
-#             )
-#         except Exception as error:
-#             print(f"Skipping parameter importance for {display_name}: {error}")
-#         else:
-#             base_path = output_dir / f"param_importance_{suffix}_{target_label}"
-#             diagnostics[f"param_importance_{suffix}"] = _save_optuna_figure(
-#                 importance_fig, base_path
-#             )
-#
-#         try:
-#             history_fig = optuna_visualisation.plot_optimization_history(
-#                 study, target=target_fn, target_name=display_name
-#             )
-#         except Exception as error:
-#             print(f"Skipping optimisation history for {display_name}: {error}")
-#         else:
-#             base_path = output_dir / f"optimization_history_{suffix}_{target_label}"
-#             diagnostics[f"optimization_history_{suffix}"] = _save_optuna_figure(
-#                 history_fig, base_path
-#             )
-#
-#     try:
-#         pareto_fig = optuna_visualisation.plot_pareto_front(
-#             study, target_names=[spec[2] for spec in objective_specs]
-#         )
-#     except Exception as error:
-#         print(f"Skipping Pareto front plot: {error}")
-#     else:
-#         base_path = output_dir / f"pareto_front_{target_label}"
-#         diagnostics["pareto_front"] = _save_optuna_figure(pareto_fig, base_path)
-#
-#     return diagnostics
-#
-#
-# def run_optuna_search(
-#     X_train: pd.DataFrame,
-#     y_train: pd.Series,
-#     X_validation: pd.DataFrame,
-#     y_validation: pd.Series,
-#     *,
-#     feature_columns: Sequence[str],
-#     schema: Schema,
-#     random_state: int,
-#     n_trials: Optional[int],
-#     timeout: Optional[int],
-#     study_name: Optional[str] = None,
-#     storage: Optional[str] = None,
-#     target_label: str,
-#     diagnostics_dir: Path,
-# ) -> tuple[
-#     "optuna.study.Study",
-#     Dict[str, object],
-#     list[Dict[str, object]],
-#     Mapping[str, Path],
-# ]:
-#     """Perform Optuna hyperparameter optimisation for :class:`SUAVE`."""
-#
-#     if n_trials is not None and n_trials <= 0:
-#         n_trials = None
-#     if timeout is not None and timeout <= 0:
-#         timeout = None
-#
-#     def objective(trial: "optuna.trial.Trial") -> Tuple[float, float]:
-#         trial.suggest_categorical("latent_dim", [6, 8, 16, 24, 32, 48, 64])
-#         trial.suggest_categorical("n_components", [1, 2, 3, 4, 5, 6, 7, 8])
-#         trial.suggest_categorical("hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys()))
-#         trial.suggest_categorical(
-#             "head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys())
-#         )
-#         trial.suggest_float("beta", 0.5, 6.0)
-#         trial.suggest_categorical("use_classification_loss_weight", [True, False])
-#         if trial.params.get("use_classification_loss_weight"):
-#             trial.suggest_float("classification_loss_weight", 1.0, 1000.0, log=True)
-#         trial.suggest_float("dropout", 0.0, 0.5)
-#         trial.suggest_float("learning_rate", 1e-5, 5e-2, log=True)
-#         trial.suggest_categorical("batch_size", [64, 128, 256, 512, 1024])
-#         trial.suggest_int("warmup_epochs", 2, 60)
-#         trial.suggest_int("kl_warmup_epochs", 0, 20)
-#         trial.suggest_int("head_epochs", 10, 80)
-#         trial.suggest_int("finetune_epochs", 1, 30)
-#         trial.suggest_int("early_stop_patience", 3, 8)
-#         trial.suggest_float("joint_decoder_lr_scale", 1e-3, 0.3, log=True)
-#
-#         model = build_suave_model(trial.params, schema, random_state=random_state)
-#
-#         start_time = time.perf_counter()
-#         fit_kwargs = resolve_suave_fit_kwargs(trial.params)
-#         model.fit(
-#             X_train,
-#             y_train,
-#             **fit_kwargs,
-#         )
-#         fit_seconds = time.perf_counter() - start_time
-#         try:
-#             evaluation = evaluate_candidate_model_performance(
-#                 model,
-#                 feature_columns=feature_columns,
-#                 X_train=X_train,
-#                 y_train=y_train,
-#                 X_validation=X_validation,
-#                 y_validation=y_validation,
-#                 random_state=random_state + trial.number,
-#             )
-#         except Exception as error:
-#             trial.set_user_attr("tstr_trtr_error", repr(error))
-#             raise optuna.exceptions.TrialPruned(
-#                 f"Failed to evaluate candidate model: {error}"
-#             ) from error
-#
-#         validation_metrics = evaluation["validation_metrics"]
-#         tstr_metrics = evaluation["tstr_metrics"]
-#         trtr_metrics = evaluation["trtr_metrics"]
-#         delta_auc = evaluation["delta_auc"]
-#         values = evaluation["values"]
-#
-#         trial.set_user_attr("validation_metrics", validation_metrics)
-#         trial.set_user_attr("fit_seconds", fit_seconds)
-#         trial.set_user_attr("tstr_metrics", tstr_metrics)
-#         trial.set_user_attr("trtr_metrics", trtr_metrics)
-#         trial.set_user_attr("tstr_trtr_delta_auc", delta_auc)
-#
-#         if not np.isfinite(values[0]):
-#             raise optuna.exceptions.TrialPruned("Non-finite validation ROAUC")
-#         if not np.isfinite(values[1]):
-#             raise optuna.exceptions.TrialPruned("Non-finite TSTR/TRTR delta AUC")
-#
-#         return float(values[0]), float(values[1])
-#
-#     study = optuna.create_study(
-#         directions=("maximize", "minimize"),
-#         study_name=study_name,
-#         storage=storage,
-#         load_if_exists=bool(storage and study_name),
-#     )
-#     study.optimize(objective, n_trials=n_trials, timeout=timeout)
-#
-#     diagnostics = _generate_optuna_diagnostics(
-#         study, target_label=target_label, output_dir=diagnostics_dir
-#     )
-#
-#     feasible_trials = [trial for trial in study.trials if trial.values is not None]
-#     if not feasible_trials:
-#         raise RuntimeError("Optuna search did not produce any completed trials")
-#
-#     pareto_trials = [trial for trial in study.best_trials if trial.values is not None]
-#     if not pareto_trials:
-#         pareto_trials = feasible_trials
-#
-#     def _trial_objectives(trial: "optuna.trial.FrozenTrial") -> Tuple[float, float]:
-#         values = trial.values or (float("nan"), float("nan"))
-#         primary = float(values[0])
-#         secondary = float(values[1]) if len(values) > 1 else float("nan")
-#         return primary, secondary
-#
-#     best_trial = choose_preferred_pareto_trial(
-#         pareto_trials,
-#         min_validation_roauc=PARETO_MIN_VALIDATION_ROAUC,
-#         max_abs_delta_auc=PARETO_MAX_ABS_DELTA_AUC,
-#     )
-#     if best_trial is None:
-#         best_trial = max(pareto_trials, key=lambda trial: _trial_objectives(trial)[0])
-#
-#     def _trial_metadata(trial: "optuna.trial.FrozenTrial") -> Dict[str, object]:
-#         metadata: Dict[str, object] = {
-#             "trial_number": trial.number,
-#             "values": tuple(trial.values or ()),
-#             "params": dict(trial.params),
-#             "validation_metrics": trial.user_attrs.get("validation_metrics", {}),
-#             "fit_seconds": trial.user_attrs.get("fit_seconds"),
-#             "tstr_metrics": trial.user_attrs.get("tstr_metrics", {}),
-#             "trtr_metrics": trial.user_attrs.get("trtr_metrics", {}),
-#             "tstr_trtr_delta_auc": trial.user_attrs.get("tstr_trtr_delta_auc"),
-#         }
-#         if "tstr_trtr_error" in trial.user_attrs:
-#             metadata["tstr_trtr_error"] = trial.user_attrs["tstr_trtr_error"]
-#         return metadata
-#
-#     pareto_metadata = [_trial_metadata(trial) for trial in pareto_trials]
-#     best_metadata = next(
-#         (
-#             metadata
-#             for metadata in pareto_metadata
-#             if metadata.get("trial_number") == best_trial.number
-#         ),
-#         _trial_metadata(best_trial),
-#     )
-#     best_metadata["diagnostic_paths"] = {
-#         name: str(path) for name, path in diagnostics.items()
-#     }
-#     if best_metadata not in pareto_metadata:
-#         pareto_metadata.append(best_metadata)
-#
-#     return study, best_metadata, pareto_metadata, diagnostics
+
+# %%
+def _target_accessor(index: int) -> Callable[["optuna.trial.FrozenTrial"], float]:
+    """Return a safe accessor for the multi-objective study targets."""
+
+    def _target(trial: "optuna.trial.FrozenTrial") -> float:
+        if trial.values is None or index >= len(trial.values):
+            raise optuna.exceptions.TrialPruned(
+                "Trial lacks the requested objective value"
+            )
+        value = trial.values[index]
+        if value is None or not np.isfinite(value):
+            raise optuna.exceptions.TrialPruned("Objective value is not finite")
+        return float(value)
+
+    return _target
+
+
+def _save_optuna_figure(figure_or_axes: "plt.Figure", output_path: Path) -> Path:
+    """Persist Optuna diagnostic figures in multiple formats."""
+
+    # Optuna's Matplotlib helpers return ``Axes`` instances while our utility
+    # expects a ``Figure``. Normalise the object so saving succeeds regardless
+    # of the exact return type.
+    figure = getattr(figure_or_axes, "figure", figure_or_axes)
+    if not hasattr(figure, "savefig"):
+        raise TypeError(
+            "Unsupported Matplotlib object returned from Optuna visualisation"
+        )
+
+    _save_figure_multiformat(figure, output_path.with_suffix(""))
+    plt.close(figure)
+    return output_path.with_suffix(".jpg")
+
+
+def _generate_optuna_diagnostics(
+    study: "optuna.study.Study",
+    *,
+    target_label: str,
+    output_dir: Path,
+) -> Mapping[str, Path]:
+    """Create Optuna diagnostic plots summarising the optimisation dynamics."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics: Dict[str, Path] = {}
+
+    objective_specs = [
+        ("validation_roauc", _target_accessor(0), "Validation ROAUC"),
+        ("tstr_trtr_delta_auc", _target_accessor(1), "TSTR/TRTR ΔAUC"),
+    ]
+
+    for suffix, target_fn, display_name in objective_specs:
+        try:
+            importance_fig = optuna_visualisation.plot_param_importances(
+                study, target=target_fn, target_name=display_name
+            )
+        except Exception as error:
+            print(f"Skipping parameter importance for {display_name}: {error}")
+        else:
+            base_path = output_dir / f"param_importance_{suffix}_{target_label}"
+            diagnostics[f"param_importance_{suffix}"] = _save_optuna_figure(
+                importance_fig, base_path
+            )
+
+        try:
+            history_fig = optuna_visualisation.plot_optimization_history(
+                study, target=target_fn, target_name=display_name
+            )
+        except Exception as error:
+            print(f"Skipping optimisation history for {display_name}: {error}")
+        else:
+            base_path = output_dir / f"optimization_history_{suffix}_{target_label}"
+            diagnostics[f"optimization_history_{suffix}"] = _save_optuna_figure(
+                history_fig, base_path
+            )
+
+    try:
+        pareto_fig = optuna_visualisation.plot_pareto_front(
+            study, target_names=[spec[2] for spec in objective_specs]
+        )
+    except Exception as error:
+        print(f"Skipping Pareto front plot: {error}")
+    else:
+        base_path = output_dir / f"pareto_front_{target_label}"
+        diagnostics["pareto_front"] = _save_optuna_figure(pareto_fig, base_path)
+
+    return diagnostics
+
+
+def run_optuna_search(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_validation: pd.DataFrame,
+    y_validation: pd.Series,
+    *,
+    feature_columns: Sequence[str],
+    schema: Schema,
+    random_state: int,
+    n_trials: Optional[int],
+    timeout: Optional[int],
+    study_name: Optional[str] = None,
+    storage: Optional[str] = None,
+    target_label: str,
+    diagnostics_dir: Path,
+) -> tuple[
+    "optuna.study.Study",
+    Dict[str, object],
+    list[Dict[str, object]],
+    Mapping[str, Path],
+]:
+    """Perform Optuna hyperparameter optimisation for :class:`SUAVE`."""
+
+    if n_trials is not None and n_trials <= 0:
+        n_trials = None
+    if timeout is not None and timeout <= 0:
+        timeout = None
+
+    def objective(trial: "optuna.trial.Trial") -> Tuple[float, float]:
+        trial.suggest_categorical("latent_dim", [6, 8, 16, 24, 32, 48, 64])
+        trial.suggest_categorical("n_components", [1, 2, 3, 4, 5, 6, 7, 8])
+        trial.suggest_categorical("hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys()))
+        trial.suggest_categorical(
+            "head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys())
+        )
+        trial.suggest_float("beta", 0.5, 6.0)
+        trial.suggest_categorical("use_classification_loss_weight", [True, False])
+        if trial.params.get("use_classification_loss_weight"):
+            trial.suggest_float("classification_loss_weight", 1.0, 1000.0, log=True)
+        trial.suggest_float("dropout", 0.0, 0.5)
+        trial.suggest_float("learning_rate", 1e-5, 5e-2, log=True)
+        trial.suggest_categorical("batch_size", [64, 128, 256, 512, 1024])
+        trial.suggest_int("warmup_epochs", 2, 60)
+        trial.suggest_int("kl_warmup_epochs", 0, 20)
+        trial.suggest_int("head_epochs", 10, 80)
+        trial.suggest_int("finetune_epochs", 1, 30)
+        trial.suggest_int("early_stop_patience", 3, 8)
+        trial.suggest_float("joint_decoder_lr_scale", 1e-3, 0.3, log=True)
+
+        model = build_suave_model(trial.params, schema, random_state=random_state)
+
+        start_time = time.perf_counter()
+        fit_kwargs = resolve_suave_fit_kwargs(trial.params)
+        model.fit(
+            X_train,
+            y_train,
+            **fit_kwargs,
+        )
+        fit_seconds = time.perf_counter() - start_time
+        try:
+            evaluation = evaluate_candidate_model_performance(
+                model,
+                feature_columns=feature_columns,
+                X_train=X_train,
+                y_train=y_train,
+                X_validation=X_validation,
+                y_validation=y_validation,
+                random_state=random_state + trial.number,
+            )
+        except Exception as error:
+            trial.set_user_attr("tstr_trtr_error", repr(error))
+            raise optuna.exceptions.TrialPruned(
+                f"Failed to evaluate candidate model: {error}"
+            ) from error
+
+        validation_metrics = evaluation["validation_metrics"]
+        tstr_metrics = evaluation["tstr_metrics"]
+        trtr_metrics = evaluation["trtr_metrics"]
+        delta_auc = evaluation["delta_auc"]
+        values = evaluation["values"]
+
+        trial.set_user_attr("validation_metrics", validation_metrics)
+        trial.set_user_attr("fit_seconds", fit_seconds)
+        trial.set_user_attr("tstr_metrics", tstr_metrics)
+        trial.set_user_attr("trtr_metrics", trtr_metrics)
+        trial.set_user_attr("tstr_trtr_delta_auc", delta_auc)
+
+        if not np.isfinite(values[0]):
+            raise optuna.exceptions.TrialPruned("Non-finite validation ROAUC")
+        if not np.isfinite(values[1]):
+            raise optuna.exceptions.TrialPruned("Non-finite TSTR/TRTR delta AUC")
+
+        return float(values[0]), float(values[1])
+
+    study = optuna.create_study(
+        directions=("maximize", "minimize"),
+        study_name=study_name,
+        storage=storage,
+        load_if_exists=bool(storage and study_name),
+    )
+    study.optimize(objective, n_trials=n_trials, timeout=timeout)
+
+    diagnostics = _generate_optuna_diagnostics(
+        study, target_label=target_label, output_dir=diagnostics_dir
+    )
+
+    feasible_trials = [trial for trial in study.trials if trial.values is not None]
+    if not feasible_trials:
+        raise RuntimeError("Optuna search did not produce any completed trials")
+
+    pareto_trials = [trial for trial in study.best_trials if trial.values is not None]
+    if not pareto_trials:
+        pareto_trials = feasible_trials
+
+    def _trial_objectives(trial: "optuna.trial.FrozenTrial") -> Tuple[float, float]:
+        values = trial.values or (float("nan"), float("nan"))
+        primary = float(values[0])
+        secondary = float(values[1]) if len(values) > 1 else float("nan")
+        return primary, secondary
+
+    best_trial = choose_preferred_pareto_trial(
+        pareto_trials,
+        min_validation_roauc=PARETO_MIN_VALIDATION_ROAUC,
+        max_abs_delta_auc=PARETO_MAX_ABS_DELTA_AUC,
+    )
+    if best_trial is None:
+        best_trial = max(pareto_trials, key=lambda trial: _trial_objectives(trial)[0])
+
+    def _trial_metadata(trial: "optuna.trial.FrozenTrial") -> Dict[str, object]:
+        metadata: Dict[str, object] = {
+            "trial_number": trial.number,
+            "values": tuple(trial.values or ()),
+            "params": dict(trial.params),
+            "validation_metrics": trial.user_attrs.get("validation_metrics", {}),
+            "fit_seconds": trial.user_attrs.get("fit_seconds"),
+            "tstr_metrics": trial.user_attrs.get("tstr_metrics", {}),
+            "trtr_metrics": trial.user_attrs.get("trtr_metrics", {}),
+            "tstr_trtr_delta_auc": trial.user_attrs.get("tstr_trtr_delta_auc"),
+        }
+        if "tstr_trtr_error" in trial.user_attrs:
+            metadata["tstr_trtr_error"] = trial.user_attrs["tstr_trtr_error"]
+        return metadata
+
+    pareto_metadata = [_trial_metadata(trial) for trial in pareto_trials]
+    best_metadata = next(
+        (
+            metadata
+            for metadata in pareto_metadata
+            if metadata.get("trial_number") == best_trial.number
+        ),
+        _trial_metadata(best_trial),
+    )
+    best_metadata["diagnostic_paths"] = {
+        name: str(path) for name, path in diagnostics.items()
+    }
+    if best_metadata not in pareto_metadata:
+        pareto_metadata.append(best_metadata)
+
+    return study, best_metadata, pareto_metadata, diagnostics
 
 
 # %% [markdown]
