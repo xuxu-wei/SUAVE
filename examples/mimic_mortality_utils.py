@@ -1614,7 +1614,13 @@ def _build_manual_optuna_ranked_table(
             if identifier_key in seen_identifiers:
                 continue
             record_dict = record.to_dict()
-            validation, delta = _extract_trial_metrics(record_dict)
+            fallback_validation, fallback_delta = _extract_trial_metrics(record_dict)
+            validation = record.get("validation_roauc", fallback_validation)
+            if pd.isna(validation):
+                validation = fallback_validation
+            delta = record.get("tstr_trtr_delta_auc", fallback_delta)
+            if pd.isna(delta):
+                delta = fallback_delta
             row: Dict[str, object] = {
                 "Source": "Optuna study",
                 "Saved locally": "",
