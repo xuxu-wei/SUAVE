@@ -224,8 +224,16 @@ def test_collect_manual_and_optuna_overview(
     best_info_payload = {
         "preferred_trial_number": 1,
         "pareto_front": [
-            {"trial_number": 1, "values": [0.92, 0.02]},
-            {"trial_number": 2, "values": [0.91, 0.015]},
+            {
+                "trial_number": 1,
+                "values": [0.92, 0.02],
+                "params": {"latent_dim": 16},
+            },
+            {
+                "trial_number": 2,
+                "values": [0.91, 0.015],
+                "params": {"latent_dim": 12},
+            },
         ],
     }
     best_info_path.write_text(json.dumps(best_info_payload), encoding="utf-8")
@@ -236,7 +244,11 @@ def test_collect_manual_and_optuna_overview(
 
     trials_path = optuna_dir / "optuna_trials_mortality.csv"
     trials_path.write_text(
-        "trial_number,validation_roauc,tstr_trtr_delta_auc\n1,0.92,0.02\n3,0.89,0.01\n",
+        (
+            "trial_number,validation_roauc,tstr_trtr_delta_auc,dropout\n"
+            "1,0.92,0.02,0.1\n"
+            "3,0.89,0.01,0.2\n"
+        ),
         encoding="utf-8",
     )
 
@@ -256,8 +268,13 @@ def test_collect_manual_and_optuna_overview(
     assert not ranked_df.empty
     assert ranked_df.iloc[0]["Source"] == "Manual override"
     assert "Optuna study" in ranked_df["Source"].tolist()
-    assert "learning_rate" in ranked_df.columns
+    assert {"learning_rate", "latent_dim", "dropout"}.issubset(
+        set(ranked_df.columns)
+    )
     assert pytest.approx(ranked_df.iloc[0]["learning_rate"]) == 0.01
+    assert "Validation ROAUC" in ranked_df.columns
+    assert "TSTR/TRTR ΔAUC" in ranked_df.columns
+    assert pytest.approx(ranked_df.iloc[0]["Validation ROAUC"]) == 0.9
 
 
 @pytest.mark.parametrize(
