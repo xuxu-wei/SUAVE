@@ -34,7 +34,7 @@
    - 执行 `python research-suave_optimize.py` 生成帕累托前沿、最优 Trial JSON 与调参可视化。目录结构遵循 `analysis_config.py` 的 `ANALYSIS_SUBDIRECTORIES` 定义。
 
 5. **执行主分析**
-   - 运行 `python research-supervised_analysis.py [--trial-id N]` 以加载或训练目标模型、拟合校准器并完成下游评估。交互模式会提示选择 Trial，脚本模式可通过参数或环境变量控制缓存策略。使用 `--help` 查看命令行提示，可知传入 `manual` 可直接加载手动模型 manifest。
+   - 运行 `python research-supervised_analysis.py [--trial-id N]` 以加载或训练目标模型、拟合校准器并完成下游评估。交互模式会提示选择 Trial，脚本模式可通过参数或环境变量控制缓存策略。使用 `--help` 查看命令行提示，可知传入 `manual` 可直接加载手动模型 manifest；脚本会在渲染交互式 Pareto 摘要前复制当前的手动 manifest，使得即便跳过交互分支也能复用最新的手动配置。
    - 若需刷新缓存，可按需设置 `FORCE_UPDATE_BENCHMARK_MODEL`、`FORCE_UPDATE_SYNTHETIC_DATA`、`FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL`、`FORCE_UPDATE_C2ST_MODEL`、`FORCE_UPDATE_DISTRIBUTION_SHIFT`。脚本模式下这些变量默认开启（值为 `1`）以保证批处理稳定性，交互模式默认关闭（值为 `0`）以节省时间。
 
 6. **整理与归档**

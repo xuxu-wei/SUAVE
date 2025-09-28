@@ -642,6 +642,10 @@ render_dataframe(
 
 optuna_trials_path = OPTUNA_DIR / f"optuna_trials_{TARGET_LABEL}.csv"
 
+manual_model_manifest: Dict[str, Any] = dict(
+    model_loading_plan.manual_model_manifest
+)
+
 if IS_INTERACTIVE and pareto_trials:
     pareto_summary = summarise_pareto_trials(
         pareto_trials,
@@ -675,10 +679,6 @@ selected_trial_number = model_loading_plan.selected_trial_number
 selected_model_path = model_loading_plan.selected_model_path
 selected_calibrator_path = model_loading_plan.selected_calibrator_path
 selected_params: Dict[str, Any] = dict(model_loading_plan.selected_params)
-
-manual_model_manifest: Dict[str, Any] = dict(
-    model_loading_plan.manual_model_manifest
-)
 manual_identifier = manual_model_manifest.get("trial_number")
 if manual_identifier is None and manual_model_manifest.get("model_path"):
     manual_identifier = "manual"
