@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
+import importlib.util
 import math
 import os
 import sys
@@ -22,6 +24,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 
 import joblib
@@ -64,6 +67,7 @@ from analysis_config import (  # noqa: E402
     CLINICAL_SCORE_BENCHMARK_STRATEGY,
     DATA_DIR,
     DEFAULT_ANALYSIS_CONFIG,
+    INTERACTIVE_MANUAL_TUNING,
     FORCE_UPDATE_FLAG_DEFAULTS,
     HEAD_HIDDEN_DIMENSION_OPTIONS,
     HIDDEN_DIMENSION_OPTIONS,
@@ -87,6 +91,8 @@ from suave import Schema, SchemaInferencer, SUAVE  # noqa: E402
 from suave.evaluate import (  # noqa: E402
     compute_auroc,
     evaluate_classification,
+    evaluate_tstr,
+    evaluate_trtr,
     kolmogorov_smirnov_statistic,
     mutual_information_feature,
     rbf_mmd,
@@ -197,6 +203,7 @@ def build_analysis_config(**overrides: object) -> Dict[str, object]:
     config = dict(DEFAULT_ANALYSIS_CONFIG)
     config.update(overrides)
     config.setdefault("optuna_storage", None)
+    config.setdefault("interactive_manual_tuning", INTERACTIVE_MANUAL_TUNING)
     return config
 
 
@@ -214,7 +221,31 @@ def prepare_analysis_output_directories(
         path = output_root / subdir_name
         path.mkdir(parents=True, exist_ok=True)
         directories[key] = path
+        if subdir_name == ANALYSIS_SUBDIRECTORIES.get("suave_model"):
+            _initialise_manual_param_script(path)
     return directories
+
+
+def _initialise_manual_param_script(directory: Path) -> None:
+    """Ensure ``manual_param_setting.py`` exists with a default placeholder."""
+
+    script_path = directory / "manual_param_setting.py"
+    default_content = (
+        '"""Manual hyper-parameter overrides for SUAVE training.\n\n'
+        "Populate ``manual_param_setting`` with overrides when interactive tuning is enabled.\n"
+        '"""\n\n'
+        "manual_param_setting: dict = {}\n"
+    )
+
+    if script_path.exists():
+        try:
+            existing = script_path.read_text(encoding="utf-8")
+        except OSError:
+            existing = None
+        if existing and existing.strip():
+            return
+
+    script_path.write_text(default_content, encoding="utf-8")
 
 
 def resolve_analysis_output_root(
@@ -275,10 +306,17 @@ __all__ = [
     "PATH_GRAPH_NODE_COLORS",
     "choose_preferred_pareto_trial",
     "load_model_manifest",
+    "load_manual_model_manifest",
     "load_optuna_results",
     "manifest_artifact_paths",
     "manifest_artifacts_exist",
     "record_model_manifest",
+    "record_manual_model_manifest",
+    "collect_manual_and_optuna_overview",
+    "load_manual_tuning_overrides",
+    "prompt_manual_override_action",
+    "evaluate_candidate_model_performance",
+    "run_manual_override_training",
     "build_prediction_dataframe",
     "compute_auc",
     "compute_binary_metrics",
@@ -309,6 +347,7 @@ __all__ = [
     "rbf_mmd",
     "make_study_name",
     "DEFAULT_ANALYSIS_CONFIG",
+    "INTERACTIVE_MANUAL_TUNING",
     "ANALYSIS_SUBDIRECTORIES",
     "build_analysis_config",
     "prepare_analysis_output_directories",
@@ -546,7 +585,7 @@ def record_model_manifest(
     model_dir: Path,
     target_label: str,
     *,
-    trial_number: Optional[int],
+    trial_number: Optional[Union[str, int]],
     values: Sequence[float],
     params: Mapping[str, object],
     model_path: Path,
@@ -563,7 +602,7 @@ def record_model_manifest(
     target_label
         Prediction target associated with the artefacts.
     trial_number
-        Optuna trial identifier used to train the artefacts.
+        Optuna trial identifier or override label used to train the artefacts.
     values
         Objective values reported by Optuna for the selected trial.
     params
@@ -624,6 +663,152 @@ def record_model_manifest(
     return manifest_path
 
 
+def load_manual_model_manifest(model_dir: Path, target_label: str) -> Dict[str, object]:
+    """Load metadata describing manually managed SUAVE artefacts.
+
+    Parameters
+    ----------
+    model_dir
+        Directory storing SUAVE checkpoints and calibrators.
+    target_label
+        Name of the prediction target the artefacts correspond to.
+
+    Returns
+    -------
+    dict
+        Manifest metadata. An empty dictionary is returned when no manual
+        manifest is present on disk.
+
+    Examples
+    --------
+    >>> tmp = Path("/tmp/manual_manifest")
+    >>> _ = tmp.mkdir(parents=True, exist_ok=True)
+    >>> load_manual_model_manifest(tmp, "mortality")
+    {}
+    """
+
+    manifest_path = model_dir / f"suave_manual_manifest_{target_label}.json"
+    if not manifest_path.exists():
+        return {}
+    return json.loads(manifest_path.read_text())
+
+
+def record_manual_model_manifest(
+    model_dir: Path,
+    target_label: str,
+    *,
+    model_path: Path,
+    calibrator_path: Optional[Path] = None,
+    params: Optional[Mapping[str, object]] = None,
+    values: Optional[Sequence[float]] = None,
+    validation_metrics: Optional[Mapping[str, object]] = None,
+    tstr_metrics: Optional[Mapping[str, object]] = None,
+    trtr_metrics: Optional[Mapping[str, object]] = None,
+    description: Optional[str] = None,
+) -> Path:
+    """Persist metadata describing manually managed SUAVE artefacts.
+
+    Parameters
+    ----------
+    model_dir
+        Directory storing SUAVE checkpoints and calibrators.
+    target_label
+        Prediction target associated with the artefacts.
+    model_path
+        Filesystem path to the serialised SUAVE checkpoint.
+    calibrator_path
+        Optional filesystem path to an isotonic calibrator produced alongside
+        the manual model.
+    params
+        Optional hyperparameter mapping used to construct the manual artefacts.
+    values
+        Optional Optuna-style objective tuple ``(validation_roauc, delta_auc)``
+        describing the manual artefacts.
+    validation_metrics
+        Optional dictionary of validation metrics computed for the manual
+        artefacts.
+    tstr_metrics
+        Optional dictionary containing transfer-to-synthetic-to-real (TSTR)
+        evaluation metrics for the manual artefacts.
+    trtr_metrics
+        Optional dictionary containing transfer-to-real-to-real (TRTR)
+        evaluation metrics for the manual artefacts.
+    description
+        Optional free-form text describing the origin of the manual artefacts.
+
+    Returns
+    -------
+    Path
+        Location of the manual manifest file written to disk.
+
+    Examples
+    --------
+    >>> tmp = Path("/tmp/manual_manifest_example")
+    >>> _ = tmp.mkdir(parents=True, exist_ok=True)
+    >>> model = tmp / "manual_model.pt"
+    >>> calibrator = tmp / "manual_calibrator.joblib"
+    >>> _ = model.write_text("dummy")
+    >>> _ = calibrator.write_text("dummy")
+    >>> manifest = record_manual_model_manifest(
+    ...     tmp,
+    ...     "mortality",
+    ...     model_path=model,
+    ...     calibrator_path=calibrator,
+    ...     params={"lr": 1e-3},
+    ... )
+    >>> manifest.exists()
+    True
+    """
+
+    manifest_path = model_dir / f"suave_manual_manifest_{target_label}.json"
+    manifest: Dict[str, object] = {
+        "target_label": target_label,
+        "model_path": _normalise_manifest_path(model_path, model_dir),
+        "saved_at": datetime.now(tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+        "source": "manual",
+    }
+    if calibrator_path is not None:
+        manifest["calibrator_path"] = _normalise_manifest_path(
+            calibrator_path, model_dir
+        )
+    if params is not None:
+        manifest["params"] = dict(params)
+    if values is not None:
+        manifest["values"] = [float(value) for value in values]
+
+    def _serialise_metrics(
+        metrics: Optional[Mapping[str, object]]
+    ) -> Optional[Dict[str, float]]:
+        if not isinstance(metrics, Mapping):
+            return None
+        serialised: Dict[str, float] = {}
+        for key, raw_value in metrics.items():
+            try:
+                serialised[str(key)] = float(raw_value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+        return serialised or None
+
+    validation_payload = _serialise_metrics(validation_metrics)
+    if validation_payload is not None:
+        manifest["validation_metrics"] = validation_payload
+
+    tstr_payload = _serialise_metrics(tstr_metrics)
+    if tstr_payload is not None:
+        manifest["tstr_metrics"] = tstr_payload
+
+    trtr_payload = _serialise_metrics(trtr_metrics)
+    if trtr_payload is not None:
+        manifest["trtr_metrics"] = trtr_payload
+
+    if description:
+        manifest["description"] = description
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    return manifest_path
+
+
 # =============================================================================
 # === Optuna study discovery and selection utilities =========================
 # =============================================================================
@@ -637,7 +822,7 @@ def make_study_name(prefix: Optional[str], target_label: str) -> Optional[str]:
     return f"{prefix}_{target_label}"
 
 
-def parse_script_arguments(argv: Sequence[str]) -> Optional[int]:
+def parse_script_arguments(argv: Sequence[str]) -> Optional[Union[str, int]]:
     """Parse ``argv`` and return the requested Optuna trial identifier.
 
     Parameters
@@ -647,13 +832,16 @@ def parse_script_arguments(argv: Sequence[str]) -> Optional[int]:
 
     Returns
     -------
-    Optional[int]
-        The requested Optuna trial identifier, if provided.
+    Optional[Union[str, int]]
+        The requested Optuna trial identifier or ``"manual"`` override, if
+        provided.
 
     Examples
     --------
     >>> parse_script_arguments(["--trial-id", "12"])
     12
+    >>> parse_script_arguments(["manual"])
+    'manual'
     >>> parse_script_arguments([]) is None
     True
     """
@@ -661,16 +849,27 @@ def parse_script_arguments(argv: Sequence[str]) -> Optional[int]:
     parser = argparse.ArgumentParser(
         description="Select an Optuna trial for SUAVE model loading/training.",
     )
+
+    def _trial_argument(value: str) -> Union[str, int]:
+        if value.lower() == "manual":
+            return "manual"
+        try:
+            return int(value)
+        except ValueError as error:  # pragma: no cover - argparse normalises
+            raise argparse.ArgumentTypeError(
+                "Provide an integer Optuna trial ID or the keyword 'manual'."
+            ) from error
+
     parser.add_argument(
         "trial_id",
         nargs="?",
-        type=int,
+        type=_trial_argument,
         help="Optuna trial identifier to load or train.",
     )
     parser.add_argument(
         "--trial-id",
         dest="trial_id_flag",
-        type=int,
+        type=_trial_argument,
         help="Optuna trial identifier to load or train.",
     )
     args = parser.parse_args(list(argv))
@@ -921,36 +1120,605 @@ def load_optuna_results(
     return best_info, best_params
 
 
+def _coerce_float(value: object) -> float:
+    """Return ``value`` converted to ``float`` when possible."""
+
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _format_artifact_path(path: Optional[Path], base_dir: Path) -> str:
+    """Return ``path`` relative to ``base_dir`` when feasible."""
+
+    if path is None:
+        return ""
+    try:
+        return str(path.relative_to(base_dir))
+    except ValueError:
+        return str(path)
+
+
+def _extract_trial_metrics(trial: object) -> Tuple[float, float]:
+    """Return ``(validation_roauc, delta_auc)`` for ``trial`` or manifests."""
+
+    validation = float("nan")
+    delta = float("nan")
+
+    if hasattr(trial, "values"):
+        values = getattr(trial, "values")  # type: ignore[attr-defined]
+    elif isinstance(trial, Mapping):
+        raw_values = cast(Mapping[str, object], trial).get("values")
+        values = raw_values if isinstance(raw_values, Sequence) else None
+    else:
+        values = None
+
+    if values:
+        try:
+            numeric = [float(item) for item in values]
+        except (TypeError, ValueError):
+            numeric = []
+        if numeric:
+            validation = float(numeric[0])
+            if len(numeric) > 1:
+                delta = float(numeric[1])
+
+    if np.isnan(validation) and isinstance(trial, Mapping):
+        metrics = cast(Mapping[str, object], trial).get("validation_metrics")
+        if isinstance(metrics, Mapping):
+            for key in ("ROAUC", "roauc", "AUROC", "auroc"):
+                if key in metrics:
+                    validation = _coerce_float(metrics[key])
+                    break
+
+    if np.isnan(delta) and isinstance(trial, Mapping):
+        mapping = cast(Mapping[str, object], trial)
+        delta_value = mapping.get("tstr_trtr_delta_auc")
+        if delta_value is not None:
+            delta = _coerce_float(delta_value)
+        else:
+            tstr_metrics = mapping.get("tstr_metrics")
+            trtr_metrics = mapping.get("trtr_metrics")
+            if isinstance(tstr_metrics, Mapping) and isinstance(trtr_metrics, Mapping):
+                tstr_auc = _coerce_float(
+                    tstr_metrics.get("auroc", tstr_metrics.get("ROAUC"))
+                )
+                trtr_auc = _coerce_float(
+                    trtr_metrics.get("auroc", trtr_metrics.get("ROAUC"))
+                )
+                if np.isfinite(tstr_auc) and np.isfinite(trtr_auc):
+                    delta = abs(float(trtr_auc) - float(tstr_auc))
+
+    return validation, delta
+
+
+def _build_trial_summary_rows(
+    trials: Sequence[object],
+    *,
+    manifest: Mapping[str, Any],
+    manual_manifest: Mapping[str, Any],
+    model_dir: Path,
+) -> List[Dict[str, object]]:
+    """Return DataFrame-ready rows describing manual and Pareto artefacts."""
+
+    rows: List[Dict[str, object]] = []
+
+    if manual_manifest:
+        manual_identifier = manual_manifest.get("trial_number", "manual")
+        manual_paths = manifest_artifact_paths(manual_manifest, model_dir)
+        manual_model_path = manual_paths.get("model")
+        manual_saved = manifest_artifacts_exist(manual_manifest, model_dir)
+        validation, delta = _extract_trial_metrics(manual_manifest)
+        rows.append(
+            {
+                "Source": "Manual override",
+                "Saved locally": "✅" if manual_saved else "❌",
+                "Trial ID": manual_identifier,
+                "Model path": _format_artifact_path(manual_model_path, model_dir),
+                "Validation ROAUC": validation,
+                "TSTR/TRTR ΔAUC": delta,
+            }
+        )
+
+    saved_trial_number = manifest.get("trial_number") if manifest else None
+    manifest_paths = manifest_artifact_paths(manifest, model_dir) if manifest else {}
+    saved_model_path = manifest_paths.get("model") if manifest_paths else None
+
+    for trial in trials:
+        if trial is None:
+            continue
+        if hasattr(trial, "number"):
+            identifier: object = getattr(trial, "number")  # type: ignore[attr-defined]
+        elif isinstance(trial, Mapping):
+            identifier = cast(Mapping[str, object], trial).get("trial_number")
+        else:
+            identifier = None
+        validation, delta = _extract_trial_metrics(trial)
+        saved_locally = bool(
+            identifier is not None and saved_trial_number == identifier
+        )
+        rows.append(
+            {
+                "Source": "Optuna Pareto",
+                "Saved locally": "✅" if saved_locally else "❌",
+                "Trial ID": identifier if identifier is not None else "",
+                "Model path": _format_artifact_path(saved_model_path, model_dir)
+                if saved_locally
+                else "",
+                "Validation ROAUC": validation,
+                "TSTR/TRTR ΔAUC": delta,
+            }
+        )
+
+    return rows
+
+
+def _build_manual_optuna_ranked_table(
+    *,
+    manual_manifest: Mapping[str, Any],
+    pareto_candidates: Sequence[Mapping[str, Any]],
+    trials_df: pd.DataFrame,
+    model_dir: Path,
+) -> pd.DataFrame:
+    """Return a ranked table prioritising manual overrides then Pareto trials."""
+
+    rows = _build_trial_summary_rows(
+        list(pareto_candidates),
+        manifest={},
+        manual_manifest=manual_manifest,
+        model_dir=model_dir,
+    )
+
+    seen_identifiers = {
+        str(row.get("Trial ID")) for row in rows if row.get("Trial ID") not in {None, ""}
+    }
+    for candidate in pareto_candidates:
+        seen_identifiers.add(str(candidate.get("trial_number")))
+
+    if not trials_df.empty:
+        for _, record in trials_df.iterrows():
+            trial_identifier = record.get("trial_number")
+            identifier_key = str(trial_identifier)
+            if identifier_key in seen_identifiers:
+                continue
+            rows.append(
+                {
+                    "Source": "Optuna study",
+                    "Saved locally": "",
+                    "Trial ID": trial_identifier,
+                    "Model path": "",
+                    "Validation ROAUC": _coerce_float(
+                        record.get("validation_roauc")
+                    ),
+                    "TSTR/TRTR ΔAUC": _coerce_float(
+                        record.get("tstr_trtr_delta_auc")
+                    ),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=
+            [
+                "Source",
+                "Saved locally",
+                "Trial ID",
+                "Model path",
+                "Validation ROAUC",
+                "TSTR/TRTR ΔAUC",
+            ]
+        )
+
+    source_order = {"Manual override": 0, "Optuna Pareto": 1, "Optuna study": 2}
+
+    def _sort_key(entry: Dict[str, object]) -> Tuple[int, float, float]:
+        group = source_order.get(str(entry.get("Source")), 3)
+        validation = _coerce_float(entry.get("Validation ROAUC"))
+        delta = _coerce_float(entry.get("TSTR/TRTR ΔAUC"))
+        validation_key = -validation if np.isfinite(validation) else float("inf")
+        delta_key = abs(delta) if np.isfinite(delta) else float("inf")
+        return (group, validation_key, delta_key)
+
+    ranked_rows = sorted(rows, key=_sort_key)[:50]
+
+    return pd.DataFrame(
+        ranked_rows,
+        columns=
+        [
+            "Source",
+            "Saved locally",
+            "Trial ID",
+            "Model path",
+            "Validation ROAUC",
+            "TSTR/TRTR ΔAUC",
+        ],
+    )
+
+
+def collect_manual_and_optuna_overview(
+    *,
+    target_label: str,
+    model_dir: Path,
+    optuna_dir: Path,
+    study_prefix: Optional[str],
+    storage: Optional[str],
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return manual manifest and Optuna trial summaries as dataframes."""
+
+    manual_manifest = load_manual_model_manifest(model_dir, target_label)
+    model_manifest = load_model_manifest(model_dir, target_label)
+    best_info, _ = load_optuna_results(
+        optuna_dir,
+        target_label,
+        study_prefix=study_prefix,
+        storage=storage,
+    )
+
+    pareto_raw = best_info.get("pareto_front", [])
+    pareto_candidates: List[Mapping[str, Any]] = []
+    if isinstance(pareto_raw, Sequence):
+        for entry in pareto_raw:
+            if isinstance(entry, Mapping):
+                pareto_candidates.append(dict(entry))
+
+    summary_rows = _build_trial_summary_rows(
+        pareto_candidates,
+        manifest=model_manifest,
+        manual_manifest=manual_manifest,
+        model_dir=model_dir,
+    )
+    summary_df = pd.DataFrame(
+        summary_rows,
+        columns=
+        [
+            "Source",
+            "Saved locally",
+            "Trial ID",
+            "Model path",
+            "Validation ROAUC",
+            "TSTR/TRTR ΔAUC",
+        ],
+    )
+
+    trials_path = optuna_dir / f"optuna_trials_{target_label}.csv"
+    if trials_path.exists():
+        try:
+            trials_df = pd.read_csv(trials_path)
+        except Exception:
+            trials_df = pd.DataFrame()
+    else:
+        trials_df = pd.DataFrame()
+
+    ranked_df = _build_manual_optuna_ranked_table(
+        manual_manifest=manual_manifest,
+        pareto_candidates=pareto_candidates,
+        trials_df=trials_df,
+        model_dir=model_dir,
+    )
+
+    return summary_df, ranked_df
+
+
 def summarise_pareto_trials(
     trials: Sequence["optuna.trial.FrozenTrial"],
     *,
     manifest: Mapping[str, Any],
     model_dir: Path,
+    manual_manifest: Optional[Mapping[str, Any]] = None,
 ) -> pd.DataFrame:
     """Return a tidy summary of Pareto-optimal Optuna trials."""
 
-    if not trials:
-        return pd.DataFrame()
+    rows = _build_trial_summary_rows(
+        list(trials),
+        manifest=manifest,
+        manual_manifest=manual_manifest or {},
+        model_dir=model_dir,
+    )
+    return pd.DataFrame(
+        rows,
+        columns=
+        [
+            "Source",
+            "Saved locally",
+            "Trial ID",
+            "Model path",
+            "Validation ROAUC",
+            "TSTR/TRTR ΔAUC",
+        ],
+    )
 
-    saved_trial_number = None
-    if manifest and manifest_artifacts_exist(manifest, model_dir):
-        saved_trial_number = manifest.get("trial_number")
 
-    rows: List[Dict[str, object]] = []
-    for trial in trials:
-        values = trial.values or (float("nan"), float("nan"))
-        validation_roauc = float(values[0])
-        delta_auc = float(values[1]) if len(values) > 1 else float("nan")
-        saved_locally = bool(saved_trial_number == trial.number)
-        rows.append(
-            {
-                "Saved locally": "✅" if saved_locally else "❌",
-                "Trial ID": trial.number,
-                "Validation ROAUC": validation_roauc,
-                "TSTR/TRTR ΔAUC": delta_auc,
-            }
+def load_manual_tuning_overrides(
+    manual_config: Mapping[str, Any], manual_dir: Path
+) -> Dict[str, Any]:
+    """Return manual hyper-parameter overrides defined by ``manual_config``."""
+
+    if not isinstance(manual_config, Mapping):
+        return {}
+
+    module_name = manual_config.get("module")
+    attribute_name = str(manual_config.get("attribute", "manual_param_setting"))
+    if not module_name:
+        return {}
+
+    overrides: Dict[str, Any] = {}
+
+    try:
+        module: Any
+        module_path = manual_dir / f"{module_name}.py"
+        if module_path.exists():
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:  # pragma: no cover - defensive
+                raise ImportError(
+                    f"Could not load manual overrides from {module_path!s}"
+                )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules.setdefault(module_name, module)
+            spec.loader.exec_module(module)
+        else:
+            module = importlib.import_module(module_name)
+        raw_overrides = getattr(module, attribute_name)
+        if isinstance(raw_overrides, Mapping):
+            overrides = dict(raw_overrides)
+        else:
+            print(
+                f"Manual override attribute '{attribute_name}' on module '{module_name}' "
+                "is not a mapping; ignoring overrides."
+            )
+    except Exception as error:  # pragma: no cover - diagnostic logging only
+        print(
+            f"Failed to load manual overrides from {module_name}.{attribute_name}: {error}"
         )
-    return pd.DataFrame(rows)
+        return {}
+
+    return overrides
+
+
+def prompt_manual_override_action(
+    *, input_fn: Callable[[str], str] = input
+) -> str:
+    """Return the manual override action selected by the user.
+
+    Examples
+    --------
+    >>> prompt_manual_override_action(  # doctest: +SKIP
+    ...     input_fn=lambda prompt: "manual",
+    ... )
+    'reuse'
+    """
+
+    prompt = (
+        "Manual tuning is enabled. Enter 'y' to train using the manual overrides, "
+        "'manual' to reuse existing manual artefacts, 'n' to skip manual overrides, "
+        "or press Enter to continue with Optuna: "
+    )
+
+    while True:
+        try:
+            response = input_fn(prompt)
+        except EOFError:
+            return "optuna"
+        except KeyboardInterrupt:
+            print("\nManual override selection interrupted.")
+            try:
+                confirm = input_fn(
+                    "Cancel manual override selection and continue with Optuna? "
+                    "Enter 'y' to confirm or press Enter to resume selection: "
+                )
+            except (KeyboardInterrupt, EOFError):
+                print("\nContinuing with Optuna search.")
+                return "optuna"
+            if confirm.strip().lower() in {"y", "yes"}:
+                print("Continuing with Optuna search.")
+                return "optuna"
+            print("Resuming manual override prompt.")
+            continue
+
+        lowered = response.strip().lower()
+        if lowered in {"", "n", "no"}:
+            return "optuna"
+        if lowered in {"y", "yes"}:
+            return "train"
+        if lowered == "manual":
+            return "reuse"
+        print("Unrecognised response. Please enter 'y', 'n', 'manual', or press Enter.")
+
+
+def evaluate_candidate_model_performance(
+    model: SUAVE,
+    *,
+    feature_columns: Sequence[str],
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_validation: pd.DataFrame,
+    y_validation: pd.Series,
+    random_state: int,
+    probability_fn: Optional[Callable[[SUAVE, pd.DataFrame], np.ndarray]] = None,
+) -> Dict[str, Any]:
+    """Compute validation and transfer metrics for a trained SUAVE candidate.
+
+    Parameters
+    ----------
+    model
+        Fitted SUAVE model to be assessed.
+    feature_columns
+        List of feature names used to build numeric matrices.
+    X_train, y_train
+        Training split used for TRTR evaluation.
+    X_validation, y_validation
+        Validation split used for calibration and TSTR evaluation.
+    random_state
+        Seed governing the synthetic label bootstrap used for TSTR metrics.
+    probability_fn
+        Optional callable that returns class probabilities for ``X_validation``.
+        Defaults to ``model.predict_proba``.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing validation, TSTR, TRTR metrics alongside the
+        Optuna objective values (validation ROAUC and |ΔAUC|).
+
+    Examples
+    --------
+    >>> metrics = evaluate_candidate_model_performance(  # doctest: +SKIP
+    ...     model,
+    ...     feature_columns=["age", "apache"],
+    ...     X_train=X_train,
+    ...     y_train=y_train,
+    ...     X_validation=X_val,
+    ...     y_validation=y_val,
+    ...     random_state=0,
+    ... )
+    >>> sorted(metrics.keys())  # doctest: +SKIP
+    ['delta_auc', 'tstr_metrics', 'trtr_metrics', 'validation_metrics', 'values']
+    """
+
+    proba_fn = probability_fn or (lambda candidate, frame: candidate.predict_proba(frame))
+    validation_probabilities = np.asarray(proba_fn(model, X_validation))
+    validation_metrics = compute_binary_metrics(validation_probabilities, y_validation)
+
+    roauc = _coerce_float(
+        validation_metrics.get("ROAUC", validation_metrics.get("roauc", float("nan")))
+    )
+    if not np.isfinite(roauc):
+        raise ValueError("Non-finite validation ROAUC")
+
+    numeric_train = to_numeric_frame(X_train.loc[:, feature_columns])
+    numeric_validation = to_numeric_frame(X_validation.loc[:, feature_columns])
+
+    rng = np.random.default_rng(random_state)
+    synthetic_labels = rng.choice(y_train, size=len(y_train), replace=True)
+    synthetic_samples = model.sample(
+        len(synthetic_labels), conditional=True, y=synthetic_labels
+    )
+    if isinstance(synthetic_samples, pd.DataFrame):
+        synthetic_features = synthetic_samples.loc[:, feature_columns].copy()
+    else:
+        synthetic_features = pd.DataFrame(synthetic_samples, columns=feature_columns)
+    numeric_synthetic = to_numeric_frame(synthetic_features)
+
+    tstr_metrics = evaluate_tstr(
+        (
+            numeric_synthetic.to_numpy(),
+            np.asarray(synthetic_labels),
+        ),
+        (
+            numeric_validation.to_numpy(),
+            y_validation.to_numpy(),
+        ),
+        make_logistic_pipeline,
+    )
+    trtr_metrics = evaluate_trtr(
+        (
+            numeric_train.to_numpy(),
+            y_train.to_numpy(),
+        ),
+        (
+            numeric_validation.to_numpy(),
+            y_validation.to_numpy(),
+        ),
+        make_logistic_pipeline,
+    )
+
+    trtr_auc = _coerce_float(trtr_metrics.get("auroc", trtr_metrics.get("ROAUC")))
+    tstr_auc = _coerce_float(tstr_metrics.get("auroc", tstr_metrics.get("ROAUC")))
+    delta_auc = (
+        abs(float(trtr_auc) - float(tstr_auc))
+        if np.isfinite(trtr_auc) and np.isfinite(tstr_auc)
+        else float("nan")
+    )
+
+    return {
+        "validation_metrics": validation_metrics,
+        "tstr_metrics": tstr_metrics,
+        "trtr_metrics": trtr_metrics,
+        "delta_auc": delta_auc,
+        "values": (
+            roauc,
+            delta_auc,
+        ),
+    }
+
+
+def run_manual_override_training(
+    *,
+    target_label: str,
+    manual_overrides: Mapping[str, Any],
+    base_params: Optional[Mapping[str, Any]],
+    schema: Schema,
+    feature_columns: Sequence[str],
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_validation: pd.DataFrame,
+    y_validation: pd.Series,
+    model_dir: Path,
+    calibration_dir: Path,
+    random_state: int,
+) -> Dict[str, Any]:
+    """Train and persist a manual SUAVE model using ``manual_overrides``."""
+
+    merged_params: Dict[str, Any] = {}
+    if base_params:
+        merged_params.update(dict(base_params))
+    merged_params.update(dict(manual_overrides))
+
+    if not merged_params:
+        raise ValueError("Manual overrides and baseline parameters are empty.")
+
+    model = build_suave_model(merged_params, schema, random_state=random_state)
+    model.fit(X_train, y_train, **resolve_suave_fit_kwargs(merged_params))
+
+    calibrator = fit_isotonic_calibrator(model, X_validation, y_validation)
+
+    manual_model_path = model_dir / f"suave_manual_{target_label}.pt"
+    manual_calibrator_path = (
+        calibration_dir / f"isotonic_manual_calibrator_{target_label}.joblib"
+    )
+    manual_model_path.parent.mkdir(parents=True, exist_ok=True)
+    manual_calibrator_path.parent.mkdir(parents=True, exist_ok=True)
+    model.save(manual_model_path)
+    joblib.dump(calibrator, manual_calibrator_path)
+
+    evaluation = evaluate_candidate_model_performance(
+        model,
+        feature_columns=feature_columns,
+        X_train=X_train,
+        y_train=y_train,
+        X_validation=X_validation,
+        y_validation=y_validation,
+        random_state=random_state,
+        probability_fn=lambda _model, features: calibrator.predict_proba(features),
+    )
+    validation_metrics = evaluation["validation_metrics"]
+    tstr_metrics = evaluation["tstr_metrics"]
+    trtr_metrics = evaluation["trtr_metrics"]
+    values = evaluation["values"]
+
+    manifest_path = record_manual_model_manifest(
+        model_dir,
+        target_label,
+        model_path=manual_model_path,
+        calibrator_path=manual_calibrator_path,
+        params=merged_params,
+        values=values,
+        validation_metrics=validation_metrics,
+        tstr_metrics=tstr_metrics,
+        trtr_metrics=trtr_metrics,
+        description="Interactive manual tuning run",
+    )
+
+    return {
+        "model_path": manual_model_path,
+        "calibrator_path": manual_calibrator_path,
+        "manifest_path": manifest_path,
+        "validation_metrics": validation_metrics,
+        "tstr_metrics": tstr_metrics,
+        "trtr_metrics": trtr_metrics,
+        "values": values,
+        "params": merged_params,
+    }
 
 
 # =============================================================================
@@ -965,9 +1733,10 @@ class ModelLoadingPlan:
     optuna_best_info: Dict[str, Any]
     optuna_best_params: Dict[str, Any]
     model_manifest: Dict[str, Any]
+    manual_model_manifest: Dict[str, Any]
     optuna_study: Optional["optuna.study.Study"]
     pareto_trials: List["optuna.trial.FrozenTrial"]
-    selected_trial_number: Optional[int]
+    selected_trial_number: Optional[Union[str, int]]
     selected_model_path: Optional[Path]
     selected_calibrator_path: Optional[Path]
     selected_params: Dict[str, Any]
@@ -1045,7 +1814,7 @@ def resolve_model_loading_plan(
     optuna_dir: Path,
     schema: Schema,
     is_interactive: bool,
-    cli_requested_trial_id: Optional[int] = None,
+    cli_requested_trial_id: Optional[Union[str, int]] = None,
     force_update_suave: bool = False,
     pareto_min_validation_roauc: float = PARETO_MIN_VALIDATION_ROAUC,
     pareto_max_abs_delta_auc: float = PARETO_MAX_ABS_DELTA_AUC,
@@ -1071,7 +1840,8 @@ def resolve_model_loading_plan(
         interactively; otherwise command-line arguments and sensible defaults
         drive the selection.
     cli_requested_trial_id
-        Optional Optuna trial identifier supplied via command-line arguments.
+        Optional Optuna trial identifier or ``"manual"`` override supplied via
+        command-line arguments.
     force_update_suave
         Boolean flag indicating whether cached SUAVE artefacts should be
         retrained when Optuna outputs are unavailable. When Optuna metadata can
@@ -1111,6 +1881,7 @@ def resolve_model_loading_plan(
         storage=analysis_config.get("optuna_storage"),
     )
     model_manifest = load_model_manifest(model_dir, target_label)
+    manual_model_manifest = load_manual_model_manifest(model_dir, target_label)
 
     if not optuna_best_params:
         print(
@@ -1138,6 +1909,18 @@ def resolve_model_loading_plan(
     saved_calibrator_path = manifest_paths.get("calibrator")
     saved_trial_number = model_manifest.get("trial_number")
 
+    manual_manifest_paths = manifest_artifact_paths(manual_model_manifest, model_dir)
+    manual_model_path = manual_manifest_paths.get("model")
+    manual_calibrator_path = manual_manifest_paths.get("calibrator")
+    manual_identifier: Optional[Union[str, int]] = manual_model_manifest.get(
+        "trial_number"
+    )
+    if manual_identifier is None and manual_model_path is not None:
+        manual_identifier = "manual"
+    manual_model_available = bool(
+        manual_model_path is not None and manual_model_path.exists()
+    )
+
     legacy_model_path = model_dir / f"suave_best_{target_label}.pt"
     legacy_calibrator_path = model_dir / f"isotonic_calibrator_{target_label}.joblib"
 
@@ -1148,32 +1931,60 @@ def resolve_model_loading_plan(
         else {}
     )
 
-    selected_trial_number: Optional[int] = None
+    selected_trial_number: Optional[Union[str, int]] = None
     selected_model_path: Optional[Path] = None
     selected_calibrator_path: Optional[Path] = None
     selected_trial: Optional["optuna.trial.FrozenTrial"] = None
 
     requested_id = cli_requested_trial_id
     if requested_id is not None:
-        if (
-            saved_trial_number == requested_id
-            and saved_model_path
-            and saved_model_path.exists()
-        ):
-            selected_trial_number = requested_id
-            selected_model_path = saved_model_path
-            selected_calibrator_path = saved_calibrator_path
-        else:
-            selected_trial = all_trials_lookup.get(requested_id)
-            if selected_trial is None:
-                print(
-                    f"Requested Optuna trial #{requested_id} could not be located; proceeding with fallback selection."
-                )
+        if requested_id == "manual":
+            if manual_model_available:
+                selected_trial_number = manual_identifier or "manual"
+                selected_model_path = manual_model_path
+                selected_calibrator_path = manual_calibrator_path
+                if not (
+                    manual_calibrator_path is not None
+                    and manual_calibrator_path.exists()
+                ):
+                    print(
+                        "Manual override selected but calibrator artefacts were not found; an isotonic calibrator will be fitted."
+                    )
             else:
+                print(
+                    "Manual override requested but suave_manual_manifest was not found; proceeding with Optuna selection."
+                )
+        else:
+            if (
+                saved_trial_number == requested_id
+                and saved_model_path
+                and saved_model_path.exists()
+            ):
                 selected_trial_number = requested_id
+                selected_model_path = saved_model_path
+                selected_calibrator_path = saved_calibrator_path
+            else:
+                selected_trial = all_trials_lookup.get(requested_id)
+                if selected_trial is None:
+                    print(
+                        f"Requested Optuna trial #{requested_id} could not be located; proceeding with fallback selection."
+                    )
+                else:
+                    selected_trial_number = requested_id
 
     if selected_model_path is None and selected_trial is None:
-        if saved_model_path and saved_model_path.exists():
+        if manual_model_available:
+            selected_trial_number = manual_identifier or "manual"
+            selected_model_path = manual_model_path
+            selected_calibrator_path = manual_calibrator_path
+            if not (
+                manual_calibrator_path is not None
+                and manual_calibrator_path.exists()
+            ):
+                print(
+                    "Manual override manifest detected but calibrator artefacts were not found; an isotonic calibrator will be fitted."
+                )
+        elif saved_model_path and saved_model_path.exists():
             selected_trial_number = saved_trial_number
             selected_model_path = saved_model_path
             selected_calibrator_path = saved_calibrator_path
@@ -1209,6 +2020,7 @@ def resolve_model_loading_plan(
         selected_model_path = None
         selected_calibrator_path = None
 
+    manual_params = manual_model_manifest.get("params")
     selected_params: Dict[str, Any] = {}
     if selected_trial is not None:
         selected_params = dict(selected_trial.params)
@@ -1217,6 +2029,12 @@ def resolve_model_loading_plan(
         and isinstance(model_manifest.get("params"), Mapping)
     ):
         selected_params = dict(model_manifest["params"])
+    elif (
+        isinstance(manual_params, Mapping)
+        and selected_trial_number
+        in {manual_identifier, "manual"}
+    ):
+        selected_params = dict(manual_params)
     elif optuna_best_params:
         selected_params = dict(optuna_best_params)
 
@@ -1243,6 +2061,7 @@ def resolve_model_loading_plan(
         optuna_best_info=dict(optuna_best_info),
         optuna_best_params=dict(optuna_best_params),
         model_manifest=dict(model_manifest),
+        manual_model_manifest=dict(manual_model_manifest),
         optuna_study=optuna_study,
         pareto_trials=list(pareto_trials),
         selected_trial_number=selected_trial_number,
@@ -1282,6 +2101,7 @@ def confirm_model_loading_plan_selection(
     ...     optuna_best_info={},
     ...     optuna_best_params={},
     ...     model_manifest={},
+    ...     manual_model_manifest={},
     ...     optuna_study=None,
     ...     pareto_trials=[],
     ...     selected_trial_number=None,
@@ -1306,16 +2126,46 @@ def confirm_model_loading_plan_selection(
     saved_calibrator_path = manifest_paths.get("calibrator")
     saved_trial_number = plan.model_manifest.get("trial_number")
 
-    default_hint = (
-        f"trial #{saved_trial_number}"
-        if saved_trial_number is not None
+    manual_manifest_paths = manifest_artifact_paths(
+        plan.manual_model_manifest, model_dir
+    )
+    manual_model_path = manual_manifest_paths.get("model")
+    manual_calibrator_path = manual_manifest_paths.get("calibrator")
+    manual_identifier: Optional[Union[str, int]] = plan.manual_model_manifest.get(
+        "trial_number"
+    )
+    if manual_identifier is None and manual_model_path is not None:
+        manual_identifier = "manual"
+    manual_available = bool(
+        manual_model_path is not None and manual_model_path.exists()
+    )
+    manual_params: Dict[str, Any] = (
+        dict(plan.manual_model_manifest["params"])
+        if isinstance(plan.manual_model_manifest.get("params"), Mapping)
+        else {}
+    )
+
+    default_hint = "a new training run"
+    if manual_available and plan.selected_trial_number in {
+        manual_identifier,
+        "manual",
+    }:
+        default_hint = "the manual override"
+    elif (
+        saved_trial_number is not None
         and saved_model_path is not None
         and saved_model_path.exists()
-        else "a new training run"
+    ):
+        default_hint = f"trial #{saved_trial_number}"
+
+    manual_prompt = (
+        " or type 'manual' to load the manual override"
+        if manual_available
+        else ""
     )
     prompt = (
-        "Enter the Optuna trial ID from the Pareto front to load or train "
-        f"(press Enter to reuse {default_hint}): "
+        "Enter the Optuna trial ID from the Pareto front to load or train"
+        f"{manual_prompt} (press Enter to reuse {default_hint}): "
     )
 
     pareto_lookup = {trial.number: trial for trial in plan.pareto_trials}
@@ -1326,6 +2176,14 @@ def confirm_model_loading_plan_selection(
     selected_params = dict(plan.selected_params)
     preloaded_model = plan.preloaded_model
 
+    if (
+        manual_available
+        and selected_trial_number in {manual_identifier, "manual"}
+        and not selected_params
+        and manual_params
+    ):
+        selected_params = dict(manual_params)
+
     while True:
         try:
             response = input(prompt).strip()
@@ -1335,11 +2193,32 @@ def confirm_model_loading_plan_selection(
         if not response:
             break
 
+        lowered = response.lower()
+        if manual_available and lowered == "manual":
+            selected_trial = None
+            selected_trial_number = manual_identifier or "manual"
+            selected_model_path = manual_model_path
+            selected_calibrator_path = manual_calibrator_path
+            selected_params = dict(manual_params)
+            if not (
+                manual_calibrator_path is not None
+                and manual_calibrator_path.exists()
+            ):
+                print(
+                    "Manual override selected but calibrator artefacts were not found; an isotonic calibrator will be fitted."
+                )
+            if not (
+                manual_model_path is not None
+                and plan.selected_model_path == manual_model_path
+            ):
+                preloaded_model = None
+            break
+
         try:
             candidate_id = int(response)
         except ValueError:
             print(
-                "Please enter a valid integer trial identifier from the listed Pareto front."
+                "Please enter a valid integer trial identifier from the listed Pareto front or the keyword 'manual'."
             )
             continue
 
