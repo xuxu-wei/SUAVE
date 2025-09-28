@@ -200,3 +200,162 @@
 | `FORCE_UPDATE_SUAVE` | 当 Optuna 产物缺失或需要替换生成器时，强制放弃已有 `suave_best_{label}.pt`，触发重新训练。 |
 
 默认开关由脚本顶部或 `FORCE_UPDATE_FLAG_DEFAULTS` 控制：批处理流程通常将耗时步骤设为 `True` 以确保输出最新；交互式分析则倾向复用缓存以节省时间。调整参数时请在研究日志中记录原因与时间，便于后续审计与复现。
+
+## 预期输出
+
+下表罗列模板主流程在各阶段产生的核心 artefact、缓存位置及人工复现方法。在代码示例中，请先通过 `resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])` 计算得到 `OUTPUT_DIR`。
+
+| 分析流程 | 输出产物名称 | 类型（报表、图像） | 描述 | 原始数据 | 缓存的原始数据 | 缓存数据结构说明 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8. 分类/校准评估与不确定性量化（Bootstrap） | ROC曲线 | 图像 | 比较 SUAVE 与经典基线在 Train/Validation/MIMIC/eICU 各数据集的 ROC 表现 | 各数据集的预测概率与标签映射（`probability_map`、`baseline_probability_map`、`label_map`） | `OUTPUT_DIR / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib"`<br>`OUTPUT_DIR / "05_calibration_uncertainty" / f"isotonic_calibrator_{label}.joblib"`<br>`OUTPUT_DIR / "08_baseline_models" / f"baseline_estimators_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+cache_path = output_root / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib"
+payload = joblib.load(cache_path)
+datasets = payload["datasets"]
+calibrator = joblib.load(output_root / "05_calibration_uncertainty" / f"isotonic_calibrator_{label}.joblib")
+baselines = joblib.load(output_root / "08_baseline_models" / f"baseline_estimators_{label}.joblib")
+for name, (features, labels) in datasets.items():
+    suave_probs = calibrator.predict_proba(features)
+    print(name, suave_probs.shape, labels.shape)
+</code></pre> |
+| 8. 分类/校准评估与不确定性量化（Bootstrap） | 校准曲线 | 图像 | 展示 `plot_calibration_curves` 生成的各数据集校准关系 | 经过校准的预测概率与真实标签（`probability_map`、`label_map`） | `OUTPUT_DIR / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib"`<br>`OUTPUT_DIR / "05_calibration_uncertainty" / f"isotonic_calibrator_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+import joblib
+import numpy as np
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+payload = joblib.load(output_root / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib")
+datasets = payload["datasets"]
+calibrator = joblib.load(output_root / "05_calibration_uncertainty" / f"isotonic_calibrator_{label}.joblib")
+probability_map = {name: calibrator.predict_proba(features) for name, (features, _) in datasets.items()}
+label_map = {name: np.asarray(labels) for name, (_, labels) in datasets.items()}
+print(probability_map.keys(), label_map["Train"].shape)
+</code></pre> |
+| 8. 分类/校准评估与不确定性量化（Bootstrap） | bootstrap benchmark excel报表 | 报表 | 汇总各模型在 Train/Validation/MIMIC/eICU 的 bootstrap 置信区间、原始记录与告警 | `evaluate_predictions` 生成的 bootstrap 结果字典（`overall`、`per_class`、`bootstrap_*_records`） | `OUTPUT_DIR / "07_bootstrap_analysis" / "SUAVE"` 下的 `*_bootstrap.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+cache_dir = output_root / "07_bootstrap_analysis" / "SUAVE"
+for cache_path in sorted(cache_dir.glob("*_bootstrap.joblib")):
+    payload = joblib.load(cache_path)
+    print(cache_path.name, payload.keys())
+</code></pre> |
+| 10. 合成数据 - TSTR/TRTR | TSTR_TRTR箱线图 | 图像 | `plot_transfer_metric_boxes` 生成的 ACC/AUC 箱线图，对比 TSTR/TRTR 训练集在各评估集的表现 | TSTR/TRTR bootstrap 明细表（`combined_bootstrap_df`） | `OUTPUT_DIR / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib"`<br>`OUTPUT_DIR / "10_tstr_trtr_transfer" / f"trtr_results_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+tstr_payload = joblib.load(output_root / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib")
+trtr_payload = joblib.load(output_root / "10_tstr_trtr_transfer" / f"trtr_results_{label}.joblib")
+for name, payload in {"tstr": tstr_payload, "trtr": trtr_payload}.items():
+    bootstrap_df = payload.get("bootstrap_df")
+    if bootstrap_df is not None:
+        print(name, bootstrap_df.head())
+</code></pre> |
+| 10. 合成数据 - TSTR/TRTR | TSTR_TRTR_eval报表 | 报表 | `TSTR_TRTR_eval.xlsx` 汇总 TSTR/TRTR 指标长表、图表输入与 bootstrap 记录 | TSTR/TRTR 评估结果（`summary_df`、`plot_df`、`bootstrap_df`、`nested_results`） | `OUTPUT_DIR / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib"`<br>`OUTPUT_DIR / "10_tstr_trtr_transfer" / f"trtr_results_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+for stem in ("tstr_results", "trtr_results"):
+    payload = joblib.load(output_root / "10_tstr_trtr_transfer" / f"{stem}_{label}.joblib")
+    print(stem, payload.keys())
+</code></pre> |
+| 11. 合成数据 - 分布漂移分析 | c2st_metrics.xlsx报表 | 报表 | 记录 C2ST 分类器在真实 vs 合成特征上的 AUC 及置信区间 | C2ST 统计与明细（`metrics`、`results_df`） | `OUTPUT_DIR / "11_distribution_shift" / f"c2st_metrics_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+payload = joblib.load(output_root / "11_distribution_shift" / f"c2st_metrics_{label}.joblib")
+print(payload.keys())
+print(payload["results_df"].head())
+</code></pre> |
+| 11. 合成数据 - 分布漂移分析 | distribution_metrics.xlsx报表 | 报表 | 汇总全局/逐特征的 MMD、能量距离、互信息统计及判读备注 | 分布漂移结果（`overall_df`、`per_feature_df`） | `OUTPUT_DIR / "11_distribution_shift" / f"distribution_metrics_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+payload = joblib.load(output_root / "11_distribution_shift" / f"distribution_metrics_{label}.joblib")
+print(payload["overall_df"].head())
+print(payload["per_feature_df"].head())
+</code></pre> |
+| 11. 合成数据 - 分布漂移分析 | membership_inference.xlsx报表 | 报表 | 基于 SUAVE 训练/测试概率对比的成员推断基线指标 | 训练/测试概率向量与标签（`probability_map["Train"]`、`probability_map["MIMIC test"]`、`y_train_model`、`y_test`） | `OUTPUT_DIR / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib"`<br>`OUTPUT_DIR / "05_calibration_uncertainty" / f"isotonic_calibrator_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+payload = joblib.load(output_root / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib")
+datasets = payload["datasets"]
+calibrator = joblib.load(output_root / "05_calibration_uncertainty" / f"isotonic_calibrator_{label}.joblib")
+train_probs = calibrator.predict_proba(datasets["Train"][0])
+test_probs = calibrator.predict_proba(datasets["MIMIC test"][0])
+print(train_probs.shape, test_probs.shape)
+</code></pre> |
+| 9. 潜空间相关性与解释 | 潜空间投影比较图 | 图像 | `plot_latent_space` 输出的 SUAVE 潜空间可视化（PCA/UMAP 对比） | 各评估数据集的潜空间输入特征与标签字典（`latent_features`、`latent_labels`） | `OUTPUT_DIR / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib"`<br>`OUTPUT_DIR / "04_suave_training" / f"suave_model_manifest_{label}.json"` | <pre><code class="language-python">from pathlib import Path
+import joblib, json
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+manifest = json.loads((output_root / "04_suave_training" / f"suave_model_manifest_{label}.json").read_text())
+print(manifest.keys())
+payload = joblib.load(output_root / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib")
+print(payload["datasets"].keys())
+</code></pre> |
+| 9. 潜空间相关性与解释 | 特征-预测目标-潜空间相关性气泡图 | 图像 | `plot_feature_latent_correlation_bubble` 绘制的总体相关性气泡图 | 潜变量-特征-结局的相关矩阵与显著性矩阵（`overall_corr`、`overall_pvals`） | `OUTPUT_DIR / "09_interpretation" / f"latent_clinical_correlation_{label}_correlations.csv"`<br>`OUTPUT_DIR / "09_interpretation" / f"latent_clinical_correlation_{label}_pvalues.csv"` | <pre><code class="language-python">from pathlib import Path
+import pandas as pd
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+corr_path = output_root / "09_interpretation" / f"latent_clinical_correlation_{label}_correlations.csv"
+pval_path = output_root / "09_interpretation" / f"latent_clinical_correlation_{label}_pvalues.csv"
+print(pd.read_csv(corr_path, index_col=0).head())
+print(pd.read_csv(pval_path, index_col=0).head())
+</code></pre> |
+| 9. 潜空间相关性与解释 | 特征→潜变量→结局的多层次路径图 | 图像 | `plot_feature_latent_outcome_path_graph` 生成的多层次路径网络图 | SUAVE 模型与训练特征/标签（`model`、`X_train_model`、`y_train_model`） | `OUTPUT_DIR / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib"`<br>`OUTPUT_DIR / "04_suave_training" / f"suave_model_manifest_{label}.json"` | <pre><code class="language-python">from pathlib import Path
+import joblib, json
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+payload = joblib.load(output_root / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib")
+train_features, train_labels = payload["datasets"]["Train"]
+print(train_features.shape, train_labels.shape)
+manifest = json.loads((output_root / "04_suave_training" / f"suave_model_manifest_{label}.json").read_text())
+print(manifest["model_path"])
+</code></pre> |
