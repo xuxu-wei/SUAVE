@@ -122,7 +122,6 @@
   2. 记录每个训练阶段（预训练、分类头、联合微调）的轮数、早停标准与耗时。
   3. 导出参数重要性、收敛曲线、帕累托前沿图，并保存到 `03_optuna_search/figures/`。
   4. 模板会在 `04_suave_training/` 下生成 `manual_param_setting.py`，用于登记交互式手动调参的覆盖项；如需生效，请将 `build_analysis_config()` 返回的 `interactive_manual_tuning` 配置指向该模块并填写 `manual_param_setting` 字典。
-     > 🟡 提醒：`analysis_config.INTERACTIVE_MANUAL_TUNING` 仅为手动覆写钩子，不建议在不了解字段作用时修改，以免干扰批量流程的默认行为。
   5. 交互式运行可输入 `manual` 直接加载 `suave_manual_manifest_{label}.json` 中登记的模型与校准器；命令行同样支持 `--trial-id manual`。未指定 trial 时脚本会优先检查手动 manifest，再回退至最近保存的自动 trial，最后依据帕累托阈值自动挑选候选。
 
 ### 8. 分类、校准与不确定性分析
