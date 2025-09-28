@@ -144,12 +144,13 @@ print(train_labels.head())</code></pre>
 **输入**：使用 `build_tstr_training_sets` 生成的训练集缓存、`02_feature_engineering/` 中的迭代插补特征（`iterative_imputed_{dataset}_{label}.csv`）以及 `INCLUDE_SUAVE_TRANSFER` 环境变量。
 **输出**：在 `10_tstr_trtr_transfer/` 缓存 `tstr_trtr_results_{label}.joblib`、`TSTR_TRTR_eval.xlsx` 与可视化结果。
 
-1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR synthesis`、`TSTR synthesis-balance`、`TSTR synthesis-augment`、`TSTR synthesis-5x` 与 `TSTR synthesis-5x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
+1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR`、`TSTR balance`、`TSTR augment`、`TSTR 5x`、`TSTR 5x balance`、`TSTR 10x` 与 `TSTR 10x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
 2. 通过 `make_baseline_model_factories` 注册 `Logistic regression`、`Random forest` 与 `GBDT` 三类下游分类器，对每个训练方案分别拟合并在 `evaluate_transfer_baselines` 中统计 `accuracy` 与 `roc_auc`（含置信区间）。
-3. 若需将 SUAVE 纳入迁移评估，可在运行脚本前设置 `INCLUDE_SUAVE_TRANSFER=1`，前提是 Optuna 已产出可用的最优超参；默认行为仅评估传统基线模型，以避免在 TSTR/TRTR 分析阶段重复拟合 SUAVE。
+3. 若需将 SUAVE 纳入迁移评估，可在运行脚本前设置 `INCLUDE_SUAVE_TRANSFER=1`，前提是 Optuna 已产出可用的最优超参；默认行为仅评估 `analysis_config["tstr_models"]`（模板脚本同名配置项）列出的传统基线，以避免在 TSTR/TRTR 分析阶段重复拟合 SUAVE。配置项允许用户通过元组挑选参与 TSTR 的模型；当仅包含 1 个模型时，箱线图横轴展示训练数据集，若配置多个模型则横轴切换为模型名称、箱体按数据集着色。
 4. `build_tstr_training_sets` 会在 `10_tstr_trtr_transfer/training_sets/` 生成 TSV + JSON manifest（`manifest_{label}.json`），复用 SUAVE 采样得到的各类训练集；`evaluate_transfer_baselines` 则分别缓存 `tstr_results_{label}.joblib` 与 `trtr_results_{label}.joblib`，避免重复训练下游基线。脚本模式下默认强制重算（`FORCE_UPDATE_SYNTHETIC_DATA=1`、`FORCE_UPDATE_TSTR_MODEL=1`、`FORCE_UPDATE_TRTR_MODEL=1`），交互模式默认复用缓存（上述变量默认为 `0`）。如需刷新单独阶段，可将 `FORCE_UPDATE_SYNTHETIC_DATA` 置为 `1` 以重建 TSV 并自动失效旧的 TSTR/TRTR 结果，或分别设置 `FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL` 以重新拟合下游模型。
 
-5. 运行结束后会额外导出 bootstrap 抽样记录，并统一写入 `10_tstr_trtr_transfer/TSTR_TRTR_eval.xlsx`：`summary` 汇总各模型在所有训练方案下的 AUC/accuracy 与置信区间，`metrics` 保留长表结构以便绘图，`bootstrap` 存放逐次抽样的原始指标，`tstr_summary`/`trtr_summary` 按需拆分合成与真实训练集的结果，`bootstrap_overall` 与 `bootstrap_per_class` 则保留整体与分层自助采样明细。
+5. 运行结束后会额外导出 bootstrap 抽样记录，并统一写入 `10_tstr_trtr_transfer/TSTR_TRTR_eval.xlsx`：`summary` 汇总各模型在所有训练方案下的 Accuracy/AUROC 与置信区间，`metrics` 保留长表结构以便绘图，`bootstrap` 集成原始抽样指标与 ΔAccuracy/ΔAUROC 长表（相对 `TRTR (real)` 的差值），`bootstrap_delta` 独立存放差值明细，`tstr_summary`/`trtr_summary` 拆分合成与真实训练集的结果，`bootstrap_overall` 与 `bootstrap_per_class` 则保留整体与分层自助采样明细。
+6. `plot_transfer_metric_boxes` 在生成 Accuracy/AUROC/ΔAccuracy/ΔAUROC 箱线图时会按 `analysis_config["tstr_metric_labels"]`（模板项目改写 `analysis_config.TSTR_METRIC_LABELS`）设置纵轴标签，默认启用 0.1 间隔的主刻度、0.05 的次刻度并隐藏离群点；新增的 `plot_transfer_metric_bars` 则绘制无误差棒的绝对指标条形图，纵轴固定在 (0.5, 1)。
 6. `plot_transfer_metric_boxes` 会针对每个评估数据集绘制箱线图：横轴按模型分组，箱体颜色区分训练数据来源，当仅评估单个模型时横轴改为数据集标签。箱线图基于 bootstrap 样本的分布，更直观地展示生成数据对下游性能的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
 
 
@@ -160,7 +161,7 @@ print(train_labels.head())</code></pre>
 **输入**：复用 `10_tstr_trtr_transfer/` 中的训练数据拆分、`make_baseline_model_factories` 输出的下游模型以及 `suave.evaluate` 中的分布漂移函数。
 **输出**：在 `11_distribution_shift/` 保存 `c2st_metrics.xlsx` 与 `distribution_metrics.xlsx`，并在 `12_privacy_assessment/` 记录隐私攻击结果。
 
-1. 分布漂移的主要结局指标采用 `classifier_two_sample_test`：以 `TRTR (real)` 与 `TSTR synthesis` 作为两类样本，复用 `make_baseline_model_factories` 中的 Logistic、Random Forest 与 GBDT pipeline（保持默认超参）。其中 **GBDT ROC-AUC** 为首要指标，逻辑回归与随机森林的 ROC-AUC 作为敏感性补充。分析过程中会显示针对模型/特征的进度条，便于追踪耗时步骤。
+1. 分布漂移的主要结局指标采用 `classifier_two_sample_test`：以 `TRTR (real)` 与 `TSTR` 作为两类样本，复用 `make_baseline_model_factories` 中的 Logistic、Random Forest 与 GBDT pipeline（保持默认超参）。其中 **GBDT ROC-AUC** 为首要指标，逻辑回归与随机森林的 ROC-AUC 作为敏感性补充。分析过程中会显示针对模型/特征的进度条，便于追踪耗时步骤。
 2. 次要结局指标包括全局 `rbf_mmd` 与 `energy_distance`，均基于置换检验给出 `p` 值，用于量化生成数据与真实分布之间的整体偏移程度。
 3. `rbf_mmd`、`energy_distance` 与 `mutual_information_feature` 继续按特征逐列计算，定位非单调差异或潜在信息泄露风险的列，并与 C2ST 结果交叉验证。
 4. 分布相似性相关的所有产物分布在两个工作簿中：`11_distribution_shift/c2st_metrics.xlsx` 汇总所有模型的 C2ST ROC-AUC、置信区间、bootstrap 次数以及真实/合成样本量；`11_distribution_shift/distribution_metrics.xlsx` 的 `overall` 工作表报告全局 MMD、能量距离与互信息（附解释列），`per_feature` 工作表逐列列出 `rbf_mmd`、能量距离、互信息与对应解读。每个工作表尾部额外空一行，并写入指标判读提示（p 值阈值与特征级启发式），与 `analysis_utils._interpret_global_shift` / `_interpret_feature_shift` 中的逻辑保持一致。配套的分布漂移可视化图表需在同一目录以 PNG/SVG/PDF/JPG 四种格式保存，纳入附录及复现包。脚本模式默认重算 C2ST 和漂移统计（`FORCE_UPDATE_C2ST_MODEL=1`、`FORCE_UPDATE_DISTRIBUTION_SHIFT=1`），交互模式默认复用缓存（上述变量默认为 `0`）；如需刷新结果，可显式设置相应环境变量。
@@ -240,7 +241,7 @@ for cache_path in sorted(cache_dir.glob("*_bootstrap.joblib")):
     payload = joblib.load(cache_path)
     print(cache_path.name, payload.keys())
 </code></pre> |
-| 10. 合成数据 - TSTR/TRTR | TSTR_TRTR箱线图 | 图像 | `plot_transfer_metric_boxes` 生成的 ACC/AUC 箱线图，对比 TSTR/TRTR 训练集在各评估集的表现 | TSTR/TRTR bootstrap 明细表（`combined_bootstrap_df`） | `examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+| 10. 合成数据 - TSTR/TRTR | TSTR/TRTR箱线图 | 图像 | `plot_transfer_metric_boxes` 生成的 Accuracy/AUROC 与 ΔAccuracy/ΔAUROC 箱线图；单模型时按训练数据集排布，多模型时横轴展示模型、箱体按数据集着色 | TSTR/TRTR bootstrap 明细表（`combined_bootstrap_df`、`delta_bootstrap_df`） | `examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
 import joblib
 
 tstr_payload = joblib.load(Path("examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib"))
@@ -252,7 +253,14 @@ trtr_bootstrap = trtr_payload.get("bootstrap_df")
 if trtr_bootstrap is not None:
     print(trtr_bootstrap.head())
 </code></pre> |
-| 10. 合成数据 - TSTR/TRTR | TSTR_TRTR_eval报表 | 报表 | `TSTR_TRTR_eval.xlsx` 汇总 TSTR/TRTR 指标长表、图表输入与 bootstrap 记录 | TSTR/TRTR 评估结果（`summary_df`、`plot_df`、`bootstrap_df`、`nested_results`） | `examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+| 10. 合成数据 - TSTR/TRTR | TSTR/TRTR条形图 | 图像 | `plot_transfer_metric_bars` 生成的 Accuracy/AUROC 无误差棒条形图，纵轴固定在 (0.5, 1)，便于比较各训练方案的绝对表现 | TSTR/TRTR 指标摘要表（`combined_summary_df`） | `examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+payload = joblib.load(Path("examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib"))
+summary_df = payload.get("summary_df")
+print(summary_df[["training_dataset", "model", "accuracy", "roc_auc"]].head())
+</code></pre> |
+| 10. 合成数据 - TSTR/TRTR | TSTR_TRTR_eval报表 | 报表 | `TSTR_TRTR_eval.xlsx` 汇总 TSTR/TRTR 指标长表、图表输入与 bootstrap（含 `bootstrap_delta`）记录 | TSTR/TRTR 评估结果（`summary_df`、`plot_df`、`bootstrap_df`、`nested_results`） | `examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
 import joblib
 
 for path in [

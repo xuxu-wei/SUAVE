@@ -106,9 +106,11 @@ from analysis_utils import (  # noqa: E402
     plot_calibration_curves,
     plot_latent_space,
     plot_transfer_metric_boxes,
+    plot_transfer_metric_bars,
     load_tstr_training_sets_from_tsv,
     save_tstr_training_sets_to_tsv,
     collect_transfer_bootstrap_records,
+    compute_transfer_delta_bootstrap,
     prepare_features,
     render_dataframe,
     schema_to_dataframe,
@@ -158,6 +160,10 @@ TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
 configure_plot_theme(analysis_config.get("plot_theme", PLOT_THEME))
+TSTR_METRIC_LABELS: Dict[str, str] = dict(
+    analysis_config.get("tstr_metric_labels", {})
+)
+TSTR_BASELINE_MODELS: Optional[Sequence[str]] = analysis_config.get("tstr_models")
 IS_INTERACTIVE = is_interactive_session()
 
 DATASET_NAME_MAP = BASELINE_DATASET_LABELS
@@ -1825,7 +1831,11 @@ if external_features is not None and external_labels is not None:
         external_labels.reset_index(drop=True),
     )
 
-model_factories = dict(make_baseline_model_factories(RANDOM_STATE))
+model_factories = dict(
+    make_baseline_model_factories(
+        RANDOM_STATE, selected_models=TSTR_BASELINE_MODELS
+    )
+)
 if INCLUDE_SUAVE_TRANSFER and optuna_best_params:
     suave_fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
 
@@ -1845,6 +1855,10 @@ elif INCLUDE_SUAVE_TRANSFER and not optuna_best_params:
 
 training_order = list(training_sets_numeric.keys())
 model_order = list(model_factories.keys())
+cmap = plt.get_cmap("tab10")
+training_color_map = {
+    name: cmap(idx % cmap.N) for idx, name in enumerate(training_order)
+}
 
 
 def _is_trtr_dataset(name: str) -> bool:
@@ -2045,6 +2059,16 @@ combined_bootstrap_df = (
     if transfer_bootstrap_frames
     else pd.DataFrame()
 )
+delta_bootstrap_df = compute_transfer_delta_bootstrap(
+    combined_bootstrap_df,
+    baseline_training_dataset="TRTR (real)",
+    metrics=("accuracy", "roc_auc"),
+)
+augmented_bootstrap_df = (
+    pd.concat([combined_bootstrap_df, delta_bootstrap_df], ignore_index=True)
+    if not delta_bootstrap_df.empty
+    else combined_bootstrap_df
+)
 
 if not combined_summary_df.empty:
     render_dataframe(
@@ -2098,10 +2122,42 @@ if not combined_bootstrap_df.empty:
                 model_order=model_order,
                 output_dir=TSTR_TRTR_DIR,
                 target_label=TARGET_LABEL,
+                color_map=training_color_map,
+                metric_labels=TSTR_METRIC_LABELS,
             )
             if figure_path is not None:
                 tstr_figure_paths.append(figure_path)
                 tstr_plot_path = figure_path
+            bar_path = plot_transfer_metric_bars(
+                combined_summary_df,
+                metric=metric_name,
+                evaluation_dataset=evaluation_name,
+                training_order=training_order,
+                model_order=model_order,
+                output_dir=TSTR_TRTR_DIR,
+                target_label=TARGET_LABEL,
+                color_map=training_color_map,
+                metric_labels=TSTR_METRIC_LABELS,
+            )
+            if bar_path is not None:
+                tstr_figure_paths.append(bar_path)
+
+if not delta_bootstrap_df.empty:
+    for evaluation_name in evaluation_sets_numeric.keys():
+        for metric_name in ("delta_accuracy", "delta_roc_auc"):
+            figure_path = plot_transfer_metric_boxes(
+                delta_bootstrap_df,
+                metric=metric_name,
+                evaluation_dataset=evaluation_name,
+                training_order=training_order,
+                model_order=model_order,
+                output_dir=TSTR_TRTR_DIR,
+                target_label=TARGET_LABEL,
+                color_map=training_color_map,
+                metric_labels=TSTR_METRIC_LABELS,
+            )
+            if figure_path is not None:
+                tstr_figure_paths.append(figure_path)
 
 tstr_excel_path = TSTR_TRTR_DIR / "TSTR_TRTR_eval.xlsx"
 with pd.ExcelWriter(tstr_excel_path) as writer:
@@ -2109,8 +2165,12 @@ with pd.ExcelWriter(tstr_excel_path) as writer:
         combined_summary_df.to_excel(writer, sheet_name="summary", index=False)
     if not combined_plot_df.empty:
         combined_plot_df.to_excel(writer, sheet_name="metrics", index=False)
-    if not combined_bootstrap_df.empty:
-        combined_bootstrap_df.to_excel(writer, sheet_name="bootstrap", index=False)
+    if not augmented_bootstrap_df.empty:
+        augmented_bootstrap_df.to_excel(writer, sheet_name="bootstrap", index=False)
+    if not delta_bootstrap_df.empty:
+        delta_bootstrap_df.to_excel(
+            writer, sheet_name="bootstrap_delta", index=False
+        )
     if tstr_summary_df is not None and not tstr_summary_df.empty:
         tstr_summary_df.to_excel(writer, sheet_name="tstr_summary", index=False)
     if trtr_summary_df is not None and not trtr_summary_df.empty:
@@ -2215,7 +2275,7 @@ real_features_numeric = training_sets_numeric.get(
     "TRTR (real)", (pd.DataFrame(), pd.Series(dtype=float))
 )[0]
 synthesis_features_numeric = training_sets_numeric.get(
-    "TSTR synthesis", (pd.DataFrame(), pd.Series(dtype=float))
+    "TSTR", (pd.DataFrame(), pd.Series(dtype=float))
 )[0]
 
 c2st_model_factories = make_baseline_model_factories(RANDOM_STATE)

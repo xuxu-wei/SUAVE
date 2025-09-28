@@ -145,6 +145,13 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
     "optuna_storage": None,
     "output_dir_name": "research_outputs_supervised",
     "plot_theme": PLOT_THEME,
+    "tstr_models": ("Logistic regression",),
+    "tstr_metric_labels": {
+        "accuracy": "Accuracy",
+        "roc_auc": "AUROC",
+        "delta_accuracy": "ΔAccuracy",
+        "delta_roc_auc": "ΔAUROC",
+    },
 }
 
 # 🟡 Script-mode defaults that force regeneration of cached artefacts。

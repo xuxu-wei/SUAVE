@@ -148,9 +148,10 @@
 - **输入**：`build_tstr_training_sets` 生成的训练方案、迭代插补特征、基线模型工厂。
 - **输出**：`10_tstr_trtr_transfer/` 下的结果缓存与 Excel/图表。
 - **执行要点**：
-  1. 按既定方案（真实训练、合成训练、平衡/增广等）构建训练集。
-  2. 统一使用 `evaluate_transfer_baselines` 计算 accuracy、roc_auc 及置信区间。
-  3. 需要纳入 SUAVE 迁移评估时，确保已有最优 Trial 并设置相关环境变量。
+  1. 按既定方案构建 `TRTR (real)`、`TSTR`、`TSTR balance`、`TSTR augment`、`TSTR 5x`、`TSTR 5x balance`、`TSTR 10x`、`TSTR 10x balance` 等训练集。
+  2. 统一使用 `evaluate_transfer_baselines` 计算 Accuracy、ROC-AUC 及置信区间；默认仅使用 `analysis_config.TSTR_BASELINE_MODELS`（示例脚本为 `analysis_config["tstr_models"]`）列出的经典模型，当列表仅包含 1 个模型时，箱线图的横轴按训练数据集展开，若配置多个模型则横轴切换为模型名称、箱体按数据集着色。
+  3. `plot_transfer_metric_boxes` 按 `analysis_config.TSTR_METRIC_LABELS` 设置纵轴标签，默认隐藏离群点并启用 0.1/0.05 的主次刻度；`plot_transfer_metric_bars` 额外绘制 Accuracy/AUROC 无误差棒条形图（纵轴固定 (0.5, 1)），同时输出 ΔAccuracy/ΔAUROC 箱线图便于对比。
+  4. 需要纳入 SUAVE 迁移评估时，确保已有最优 Trial 并设置 `INCLUDE_SUAVE_TRANSFER=1`。
 
 ### 11. 合成数据分布漂移分析
 - **目的**：量化生成数据与真实数据的分布差异，定位潜在失真。
@@ -254,7 +255,7 @@ for cache_path in sorted(cache_dir.glob("*_bootstrap.joblib")):
     payload = joblib.load(cache_path)
     print(cache_path.name, payload.keys())
 </code></pre> |
-| 10. 合成数据 - TSTR/TRTR | TSTR_TRTR箱线图 | 图像 | `plot_transfer_metric_boxes` 生成的 ACC/AUC 箱线图，对比 TSTR/TRTR 训练集在各评估集的表现 | TSTR/TRTR bootstrap 明细表（`combined_bootstrap_df`） | `OUTPUT_DIR / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib"`<br>`OUTPUT_DIR / "10_tstr_trtr_transfer" / f"trtr_results_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+| 10. 合成数据 - TSTR/TRTR | TSTR/TRTR箱线图 | 图像 | `plot_transfer_metric_boxes` 生成的 Accuracy/AUROC 与 ΔAccuracy/ΔAUROC 箱线图；单模型时按训练数据集排布，多模型时横轴展示模型、箱体按数据集着色 | TSTR/TRTR bootstrap 明细表（`combined_bootstrap_df`、`delta_bootstrap_df`） | `OUTPUT_DIR / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib"`<br>`OUTPUT_DIR / "10_tstr_trtr_transfer" / f"trtr_results_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
 import joblib
 
 from analysis_config import DEFAULT_ANALYSIS_CONFIG
@@ -269,7 +270,18 @@ for name, payload in {"tstr": tstr_payload, "trtr": trtr_payload}.items():
     if bootstrap_df is not None:
         print(name, bootstrap_df.head())
 </code></pre> |
-| 10. 合成数据 - TSTR/TRTR | TSTR_TRTR_eval报表 | 报表 | `TSTR_TRTR_eval.xlsx` 汇总 TSTR/TRTR 指标长表、图表输入与 bootstrap 记录 | TSTR/TRTR 评估结果（`summary_df`、`plot_df`、`bootstrap_df`、`nested_results`） | `OUTPUT_DIR / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib"`<br>`OUTPUT_DIR / "10_tstr_trtr_transfer" / f"trtr_results_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+| 10. 合成数据 - TSTR/TRTR | TSTR/TRTR条形图 | 图像 | `plot_transfer_metric_bars` 生成的 Accuracy/AUROC 无误差棒条形图，纵轴固定在 (0.5, 1)，便于比较各训练方案的绝对表现 | TSTR/TRTR 指标摘要表（`combined_summary_df`） | `OUTPUT_DIR / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib"`<br>`OUTPUT_DIR / "10_tstr_trtr_transfer" / f"trtr_results_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+from analysis_config import DEFAULT_ANALYSIS_CONFIG
+from analysis_utils import resolve_analysis_output_root
+
+label = "in_hospital_mortality"
+output_root = resolve_analysis_output_root(DEFAULT_ANALYSIS_CONFIG["output_dir_name"])
+summary_df = joblib.load(output_root / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib").get("summary_df")
+print(summary_df[["training_dataset", "model", "accuracy", "roc_auc"]].head())
+</code></pre> |
+| 10. 合成数据 - TSTR/TRTR | TSTR_TRTR_eval报表 | 报表 | `TSTR_TRTR_eval.xlsx` 汇总 TSTR/TRTR 指标长表、图表输入与 bootstrap（含 `bootstrap_delta`）记录 | TSTR/TRTR 评估结果（`summary_df`、`plot_df`、`bootstrap_df`、`nested_results`） | `OUTPUT_DIR / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib"`<br>`OUTPUT_DIR / "10_tstr_trtr_transfer" / f"trtr_results_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
 import joblib
 
 from analysis_config import DEFAULT_ANALYSIS_CONFIG
