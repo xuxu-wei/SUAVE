@@ -251,10 +251,13 @@ def test_collect_manual_and_optuna_overview(
     assert not summary_df.empty
     assert summary_df.iloc[0]["Source"] == "Manual override"
     assert "manual.pt" in summary_df.iloc[0]["Model path"]
+    assert "Validation ROAUC" in summary_df.columns
 
     assert not ranked_df.empty
     assert ranked_df.iloc[0]["Source"] == "Manual override"
     assert "Optuna study" in ranked_df["Source"].tolist()
+    assert "learning_rate" in ranked_df.columns
+    assert pytest.approx(ranked_df.iloc[0]["learning_rate"]) == 0.01
 
 
 @pytest.mark.parametrize(
