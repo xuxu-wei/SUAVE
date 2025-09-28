@@ -354,6 +354,7 @@ __all__ = [
     "resolve_analysis_output_root",
     "parse_script_arguments",
     "load_optuna_study",
+    "render_optuna_parameter_grid",
     "ModelLoadingPlan",
     "summarise_pareto_trials",
     "resolve_model_loading_plan",
@@ -913,6 +914,90 @@ def load_optuna_study(
         return None
 
 
+def render_optuna_parameter_grid(
+    study: "optuna.study.Study",
+    *,
+    objective_targets: Sequence[tuple[str, Callable[["optuna.trial.FrozenTrial"], float]]],
+) -> None:
+    """Render slice, parallel, and importance plots for ``study`` objectives."""
+
+    if not objective_targets:
+        return
+
+    try:
+        from optuna.visualization import (
+            plot_param_importances,
+            plot_parallel_coordinate,
+            plot_slice,
+        )
+        import plotly.io as pio
+        from plotly.subplots import make_subplots
+    except ImportError as error:  # pragma: no cover - optional dependency guard
+        print(f"Optuna visualisations unavailable: {error}")
+        return
+
+    plot_specs: Sequence[tuple[str, Callable[..., "plotly.graph_objs.Figure"]]] = (
+        ("Parameter slice", plot_slice),
+        ("Parallel coordinate", plot_parallel_coordinate),
+        ("Parameter importance", plot_param_importances),
+    )
+
+    subplot_titles = [objective_name for objective_name, _ in objective_targets]
+
+    for row_title, plot_fn in plot_specs:
+        row_fig = make_subplots(
+            rows=1,
+            cols=len(objective_targets),
+            subplot_titles=subplot_titles,
+            horizontal_spacing=0.08,
+        )
+
+        for col_idx, (objective_name, target_fn) in enumerate(
+            objective_targets, start=1
+        ):
+            try:
+                subplot_fig = plot_fn(
+                    study, target=target_fn, target_name=objective_name
+                )
+            except Exception as error:  # pragma: no cover - diagnostic aid
+                row_fig.add_annotation(
+                    text=f"Unable to render:<br>{error}",
+                    row=1,
+                    col=col_idx,
+                    showarrow=False,
+                )
+                row_fig.update_xaxes(visible=False, row=1, col=col_idx)
+                row_fig.update_yaxes(visible=False, row=1, col=col_idx)
+                continue
+
+            for trace in subplot_fig.data:
+                trace.showlegend = False
+                row_fig.add_trace(trace, row=1, col=col_idx)
+
+            xaxis = getattr(subplot_fig.layout, "xaxis", None)
+            if xaxis and getattr(xaxis, "title", None):
+                row_fig.update_xaxes(
+                    title_text=xaxis.title.text,
+                    row=1,
+                    col=col_idx,
+                )
+            yaxis = getattr(subplot_fig.layout, "yaxis", None)
+            if yaxis and getattr(yaxis, "title", None):
+                row_fig.update_yaxes(
+                    title_text=yaxis.title.text,
+                    row=1,
+                    col=col_idx,
+                )
+
+        row_fig.update_layout(
+            title_text=row_title,
+            height=450,
+            width=520 * len(objective_targets),
+            showlegend=False,
+        )
+        pio.show(row_fig)
+
+
 def load_optuna_results(
     output_dir: Path,
     target_label: str,
@@ -1203,16 +1288,125 @@ def _extract_trial_metrics(trial: object) -> Tuple[float, float]:
     return validation, delta
 
 
+TRIAL_SUMMARY_BASE_COLUMNS = [
+    "Source",
+    "Saved locally",
+    "Trial ID",
+    "Model path",
+    "Validation ROAUC",
+    "TSTR/TRTR ΔAUC",
+]
+
+
+def _format_metric_column(prefix: str, metric_key: object) -> str:
+    """Return a human-readable column name for metric ``metric_key``."""
+
+    raw_key = str(metric_key)
+    if raw_key.isupper():
+        formatted_key = raw_key
+    else:
+        formatted_key = raw_key.replace("_", " ").upper()
+    prefix_label = prefix.strip()
+    if prefix_label:
+        return f"{prefix_label} {formatted_key}"
+    return formatted_key
+
+
+def _collect_metric_columns(source: object) -> Dict[str, float]:
+    """Return flattened metric columns stored on ``source``."""
+
+    metric_columns: Dict[str, float] = {}
+    containers: list[Mapping[str, object]] = []
+
+    if hasattr(source, "user_attrs"):
+        user_attrs = getattr(source, "user_attrs")  # type: ignore[attr-defined]
+        if isinstance(user_attrs, Mapping):
+            containers.append(cast(Mapping[str, object], user_attrs))
+
+    if isinstance(source, Mapping):
+        containers.append(cast(Mapping[str, object], source))
+
+    metric_prefixes = (
+        ("validation_metrics", "Validation"),
+        ("tstr_metrics", "TSTR"),
+        ("trtr_metrics", "TRTR"),
+    )
+
+    for container in containers:
+        for attr_name, prefix in metric_prefixes:
+            raw_metrics = container.get(attr_name)
+            if not isinstance(raw_metrics, Mapping):
+                continue
+            for metric_key, metric_value in raw_metrics.items():
+                column_name = _format_metric_column(prefix, metric_key)
+                metric_columns[column_name] = _coerce_float(metric_value)
+
+    return metric_columns
+
+
+def _collect_param_columns(source: object) -> Dict[str, object]:
+    """Return Optuna-style parameter columns stored on ``source``."""
+
+    if hasattr(source, "params"):
+        params = getattr(source, "params")  # type: ignore[attr-defined]
+        if isinstance(params, Mapping):
+            return {str(key): value for key, value in params.items()}
+
+    if isinstance(source, Mapping):
+        raw_params = cast(Mapping[str, object], source).get("params")
+        if isinstance(raw_params, Mapping):
+            return {str(key): value for key, value in raw_params.items()}
+
+    return {}
+
+
+def _append_unique(sequence: list[str], value: str) -> None:
+    """Append ``value`` to ``sequence`` if it has not been seen yet."""
+
+    if value not in sequence:
+        sequence.append(value)
+
+
+def _compose_trial_columns(
+    metric_columns: Sequence[str], param_columns: Sequence[str]
+) -> list[str]:
+    """Return ordered DataFrame columns without duplicates."""
+
+    columns = list(TRIAL_SUMMARY_BASE_COLUMNS)
+    for column_name in metric_columns:
+        if column_name not in columns:
+            columns.append(column_name)
+    for column_name in param_columns:
+        if column_name not in columns:
+            columns.append(column_name)
+    return columns
+
+
 def _build_trial_summary_rows(
     trials: Sequence[object],
     *,
     manifest: Mapping[str, Any],
     manual_manifest: Mapping[str, Any],
     model_dir: Path,
-) -> List[Dict[str, object]]:
+    capture_params: bool = False,
+) -> tuple[list[Dict[str, object]], list[str], list[str]]:
     """Return DataFrame-ready rows describing manual and Pareto artefacts."""
 
     rows: List[Dict[str, object]] = []
+    metric_columns: list[str] = []
+    param_columns: list[str] = []
+
+    def _attach_metrics(row: Dict[str, object], source: object) -> None:
+        for column_name, value in _collect_metric_columns(source).items():
+            row[column_name] = value
+            _append_unique(metric_columns, column_name)
+
+    def _attach_params(row: Dict[str, object], source: object) -> None:
+        if not capture_params:
+            return
+        for param_name, param_value in _collect_param_columns(source).items():
+            row[param_name] = param_value
+            _append_unique(param_columns, param_name)
 
     if manual_manifest:
         manual_identifier = manual_manifest.get("trial_number", "manual")
@@ -1220,16 +1414,17 @@ def _build_trial_summary_rows(
         manual_model_path = manual_paths.get("model")
         manual_saved = manifest_artifacts_exist(manual_manifest, model_dir)
         validation, delta = _extract_trial_metrics(manual_manifest)
-        rows.append(
-            {
-                "Source": "Manual override",
-                "Saved locally": "✅" if manual_saved else "❌",
-                "Trial ID": manual_identifier,
-                "Model path": _format_artifact_path(manual_model_path, model_dir),
-                "Validation ROAUC": validation,
-                "TSTR/TRTR ΔAUC": delta,
-            }
-        )
+        manual_row: Dict[str, object] = {
+            "Source": "Manual override",
+            "Saved locally": "✅" if manual_saved else "❌",
+            "Trial ID": manual_identifier,
+            "Model path": _format_artifact_path(manual_model_path, model_dir),
+            "Validation ROAUC": validation,
+            "TSTR/TRTR ΔAUC": delta,
+        }
+        _attach_metrics(manual_row, manual_manifest)
+        _attach_params(manual_row, manual_manifest)
+        rows.append(manual_row)
 
     saved_trial_number = manifest.get("trial_number") if manifest else None
     manifest_paths = manifest_artifact_paths(manifest, model_dir) if manifest else {}
@@ -1248,20 +1443,21 @@ def _build_trial_summary_rows(
         saved_locally = bool(
             identifier is not None and saved_trial_number == identifier
         )
-        rows.append(
-            {
-                "Source": "Optuna Pareto",
-                "Saved locally": "✅" if saved_locally else "❌",
-                "Trial ID": identifier if identifier is not None else "",
-                "Model path": _format_artifact_path(saved_model_path, model_dir)
-                if saved_locally
-                else "",
-                "Validation ROAUC": validation,
-                "TSTR/TRTR ΔAUC": delta,
-            }
-        )
+        pareto_row: Dict[str, object] = {
+            "Source": "Optuna Pareto",
+            "Saved locally": "✅" if saved_locally else "❌",
+            "Trial ID": identifier if identifier is not None else "",
+            "Model path": _format_artifact_path(saved_model_path, model_dir)
+            if saved_locally
+            else "",
+            "Validation ROAUC": validation,
+            "TSTR/TRTR ΔAUC": delta,
+        }
+        _attach_metrics(pareto_row, trial)
+        _attach_params(pareto_row, trial)
+        rows.append(pareto_row)
 
-    return rows
+    return rows, metric_columns, param_columns
 
 
 def _build_manual_optuna_ranked_table(
@@ -1273,11 +1469,12 @@ def _build_manual_optuna_ranked_table(
 ) -> pd.DataFrame:
     """Return a ranked table prioritising manual overrides then Pareto trials."""
 
-    rows = _build_trial_summary_rows(
+    rows, metric_columns, param_columns = _build_trial_summary_rows(
         list(pareto_candidates),
         manifest={},
         manual_manifest=manual_manifest,
         model_dir=model_dir,
+        capture_params=True,
     )
 
     seen_identifiers = {
@@ -1292,33 +1489,38 @@ def _build_manual_optuna_ranked_table(
             identifier_key = str(trial_identifier)
             if identifier_key in seen_identifiers:
                 continue
-            rows.append(
-                {
-                    "Source": "Optuna study",
-                    "Saved locally": "",
-                    "Trial ID": trial_identifier,
-                    "Model path": "",
-                    "Validation ROAUC": _coerce_float(
-                        record.get("validation_roauc")
-                    ),
-                    "TSTR/TRTR ΔAUC": _coerce_float(
-                        record.get("tstr_trtr_delta_auc")
-                    ),
-                }
-            )
+            row: Dict[str, object] = {
+                "Source": "Optuna study",
+                "Saved locally": "",
+                "Trial ID": trial_identifier,
+                "Model path": "",
+                "Validation ROAUC": _coerce_float(
+                    record.get("validation_roauc")
+                ),
+                "TSTR/TRTR ΔAUC": _coerce_float(
+                    record.get("tstr_trtr_delta_auc")
+                ),
+            }
+
+            for column_name, value in _collect_metric_columns(record.to_dict()).items():
+                row[column_name] = value
+                _append_unique(metric_columns, column_name)
+
+            for column_name in record.index:
+                if column_name in {
+                    "trial_number",
+                    "validation_roauc",
+                    "tstr_trtr_delta_auc",
+                }:
+                    continue
+                value = record.get(column_name)
+                row[column_name] = value
+                _append_unique(param_columns, str(column_name))
+
+            rows.append(row)
 
     if not rows:
-        return pd.DataFrame(
-            columns=
-            [
-                "Source",
-                "Saved locally",
-                "Trial ID",
-                "Model path",
-                "Validation ROAUC",
-                "TSTR/TRTR ΔAUC",
-            ]
-        )
+        return pd.DataFrame(columns=_compose_trial_columns(metric_columns, param_columns))
 
     source_order = {"Manual override": 0, "Optuna Pareto": 1, "Optuna study": 2}
 
@@ -1332,18 +1534,8 @@ def _build_manual_optuna_ranked_table(
 
     ranked_rows = sorted(rows, key=_sort_key)[:50]
 
-    return pd.DataFrame(
-        ranked_rows,
-        columns=
-        [
-            "Source",
-            "Saved locally",
-            "Trial ID",
-            "Model path",
-            "Validation ROAUC",
-            "TSTR/TRTR ΔAUC",
-        ],
-    )
+    columns = _compose_trial_columns(metric_columns, param_columns)
+    return pd.DataFrame(ranked_rows, columns=columns)
 
 
 def collect_manual_and_optuna_overview(
@@ -1372,23 +1564,17 @@ def collect_manual_and_optuna_overview(
             if isinstance(entry, Mapping):
                 pareto_candidates.append(dict(entry))
 
-    summary_rows = _build_trial_summary_rows(
+    summary_rows, summary_metric_columns, _ = _build_trial_summary_rows(
         pareto_candidates,
         manifest=model_manifest,
         manual_manifest=manual_manifest,
         model_dir=model_dir,
     )
-    summary_df = pd.DataFrame(
-        summary_rows,
-        columns=
-        [
-            "Source",
-            "Saved locally",
-            "Trial ID",
-            "Model path",
-            "Validation ROAUC",
-            "TSTR/TRTR ΔAUC",
-        ],
+    summary_columns = _compose_trial_columns(summary_metric_columns, [])
+    summary_df = (
+        pd.DataFrame(summary_rows, columns=summary_columns)
+        if summary_rows
+        else pd.DataFrame(columns=summary_columns)
     )
 
     trials_path = optuna_dir / f"optuna_trials_{target_label}.csv"
@@ -1419,24 +1605,14 @@ def summarise_pareto_trials(
 ) -> pd.DataFrame:
     """Return a tidy summary of Pareto-optimal Optuna trials."""
 
-    rows = _build_trial_summary_rows(
+    rows, metric_columns, _ = _build_trial_summary_rows(
         list(trials),
         manifest=manifest,
         manual_manifest=manual_manifest or {},
         model_dir=model_dir,
     )
-    return pd.DataFrame(
-        rows,
-        columns=
-        [
-            "Source",
-            "Saved locally",
-            "Trial ID",
-            "Model path",
-            "Validation ROAUC",
-            "TSTR/TRTR ΔAUC",
-        ],
-    )
+    columns = _compose_trial_columns(metric_columns, [])
+    return pd.DataFrame(rows, columns=columns)
 
 
 def load_manual_tuning_overrides(

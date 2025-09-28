@@ -88,12 +88,14 @@ from mimic_mortality_utils import (  # noqa: E402
     load_manual_model_manifest,
     load_manual_tuning_overrides,
     load_optuna_results,
+    load_optuna_study,
     make_logistic_pipeline,
     prepare_features,
     prepare_analysis_output_directories,
     prompt_manual_override_action,
     resolve_analysis_output_root,
     render_dataframe,
+    render_optuna_parameter_grid,
     schema_to_dataframe,
     to_numeric_frame,
     record_model_manifest,
@@ -486,6 +488,24 @@ if IS_INTERACTIVE and manual_config:
             title="Manual/Pareto candidates (top 50)",
             floatfmt=".4f",
         )
+
+        study_for_visuals = load_optuna_study(
+            study_prefix=analysis_config.get("optuna_study_prefix"),
+            target_label=TARGET_LABEL,
+            storage=analysis_config.get("optuna_storage"),
+        )
+        if study_for_visuals is not None:
+            render_optuna_parameter_grid(
+                study_for_visuals,
+                objective_targets=[
+                    ("Validation ROAUC", _target_accessor(0)),
+                    ("TSTR/TRTR ΔAUC", _target_accessor(1)),
+                ],
+            )
+        else:
+            print(
+                "Optuna study metadata unavailable; skipping interactive parameter visualisations."
+            )
 
     manual_action = prompt_manual_override_action()
 

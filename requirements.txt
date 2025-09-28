@@ -11,6 +11,7 @@ statsmodels>=0.14
 tqdm>=4.65
 scikit-learn>=1.4
 optuna>=3.4
+plotly>=5.18
 tabulate>=0.9
 
 # Optional extras for interactive schema builder (install separately)
