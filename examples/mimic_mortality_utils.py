@@ -23,6 +23,7 @@ from typing import (
     Union,
 )
 
+import joblib
 import numpy as np
 import pandas as pd
 from IPython.display import display
@@ -136,14 +137,16 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
 #: when Optuna artefacts are unavailable, allowing callers to refresh the
 #: locally persisted SUAVE model that otherwise acts as a fallback.
 FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
-    "FORCE_UPDATE_BENCHMARK_MODEL": True,
-    "FORCE_UPDATE_TSTR_MODEL": True,
-    "FORCE_UPDATE_TRTR_MODEL": True,
-    "FORCE_UPDATE_SYNTHETIC_DATA": True,
-    "FORCE_UPDATE_C2ST_MODEL": True,
-    "FORCE_UPDATE_DISTRIBUTION_SHIFT": True,
-    "FORCE_UPDATE_SUAVE": False,
-    "FORCE_UPDATE_BOOTSTRAP": True,
+    "FORCE_UPDATE_BENCHMARK_MODEL": True,  # Retrain cached classical baselines.
+    "FORCE_UPDATE_TSTR_MODEL": True,  # Refit downstream models on TSTR sets.
+    "FORCE_UPDATE_TRTR_MODEL": True,  # Refit downstream models on TRTR sets.
+    "FORCE_UPDATE_SYNTHETIC_DATA": True,  # Regenerate synthetic training TSV artefacts.
+    "FORCE_UPDATE_C2ST_MODEL": True,  # Retrain two-sample test discriminators.
+    "FORCE_UPDATE_DISTRIBUTION_SHIFT": True,  # Refresh distribution-shift analytics.
+    "FORCE_UPDATE_SUAVE": False,  # Reload the persisted SUAVE generator artefact.
+    "FORCE_UPDATE_BOOTSTRAP": True,  # Regenerate global bootstrap summaries.
+    "FORCE_UPDATE_TSTR_BOOTSTRAP": True,  # Recompute cached TSTR bootstrap replicates.
+    "FORCE_UPDATE_TRTR_BOOTSTRAP": True,  # Recompute cached TRTR bootstrap replicates.
 }
 
 ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
@@ -1486,6 +1489,101 @@ def slugify_identifier(value: str) -> str:
     return slug.strip("_")
 
 
+def _normalise_bootstrap_metadata(
+    metadata: Optional[Mapping[str, object]],
+) -> Dict[str, object]:
+    """Return a copy of ``metadata`` without ``None`` values sorted by key."""
+
+    normalised: Dict[str, object] = {}
+    if metadata is None:
+        return normalised
+    for key in sorted(metadata):
+        value = metadata[key]
+        if value is None:
+            continue
+        normalised[key] = value
+    return normalised
+
+
+def _build_bootstrap_cache_path(
+    cache_root: Path,
+    training_name: str,
+    model_name: str,
+    evaluation_name: str,
+) -> Path:
+    """Return the cache path for a bootstrap evaluation entry."""
+
+    return (
+        cache_root
+        / slugify_identifier(training_name)
+        / slugify_identifier(model_name)
+        / f"{slugify_identifier(evaluation_name)}.joblib"
+    )
+
+
+def _build_prediction_signature(
+    probabilities: np.ndarray, predictions: np.ndarray
+) -> str:
+    """Return a deterministic hash of ``probabilities`` and ``predictions``."""
+
+    prob_array = np.asarray(probabilities)
+    pred_array = np.asarray(predictions)
+    return joblib.hash((prob_array, pred_array))
+
+
+def _load_bootstrap_cache_entry(
+    cache_path: Path, expected_metadata: Mapping[str, object]
+) -> Optional[Dict[str, Any]]:
+    """Load cached bootstrap results when ``expected_metadata`` matches."""
+
+    try:
+        payload = joblib.load(cache_path)
+    except Exception:
+        return None
+
+    if not isinstance(payload, Mapping):
+        return None
+
+    cached_metadata = _normalise_bootstrap_metadata(payload.get("metadata"))
+    if cached_metadata != _normalise_bootstrap_metadata(expected_metadata):
+        return None
+
+    results = payload.get("results")
+    if not isinstance(results, Mapping):
+        return None
+
+    required_keys = {
+        "overall",
+        "per_class",
+        "overall_records",
+        "per_class_records",
+        "bootstrap_overall_records",
+        "bootstrap_per_class_records",
+        "warnings",
+    }
+    if not required_keys.issubset(results.keys()):
+        return None
+    return {key: results[key] for key in required_keys}
+
+
+def _save_bootstrap_cache_entry(
+    cache_path: Path,
+    *,
+    metadata: Mapping[str, object],
+    results: Mapping[str, pd.DataFrame],
+) -> None:
+    """Persist bootstrap evaluation artefacts to ``cache_path``."""
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(
+        {
+            "metadata": _normalise_bootstrap_metadata(metadata),
+            "results": {key: results.get(key) for key in results},
+        },
+        cache_path,
+    )
+
+
 def load_or_create_iteratively_imputed_features(
     feature_sets: Mapping[str, pd.DataFrame],
     *,
@@ -2174,6 +2272,9 @@ def evaluate_transfer_baselines(
     random_state: int,
     raw_training_sets: Optional[Mapping[str, Tuple[pd.DataFrame, pd.Series]]] = None,
     raw_evaluation_sets: Optional[Mapping[str, Tuple[pd.DataFrame, pd.Series]]] = None,
+    bootstrap_cache_dir: Optional[Path] = None,
+    bootstrap_cache_metadata: Optional[Mapping[str, object]] = None,
+    force_update_bootstrap: bool = False,
 ) -> Tuple[
     pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]]
 ]:
@@ -2195,11 +2296,24 @@ def evaluate_transfer_baselines(
         ``training_sets`` and ``evaluation_sets``. Estimators declaring the
         attribute ``requires_schema_aligned_features`` will be trained and
         evaluated using these raw frames.
+    bootstrap_cache_dir:
+        Directory used to persist per-dataset bootstrap artefacts. When
+        provided, cached entries are reused whenever ``force_update_bootstrap``
+        is ``False`` and the stored metadata matches ``bootstrap_cache_metadata``
+        together with the current prediction signature.
+    bootstrap_cache_metadata:
+        Additional provenance information recorded alongside each cache entry
+        (for example the TSTR manifest signature or the SUAVE model identifier).
+    force_update_bootstrap:
+        Skip cache reuse for this call when set to ``True``.
     """
 
     summary_rows: List[Dict[str, object]] = []
     long_rows: List[Dict[str, object]] = []
     nested_results: Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]] = {}
+
+    cache_root = Path(bootstrap_cache_dir) if bootstrap_cache_dir else None
+    cache_metadata = _normalise_bootstrap_metadata(bootstrap_cache_metadata)
 
     training_items = list(training_sets.items())
     training_progress = tqdm(
@@ -2282,19 +2396,56 @@ def evaluate_transfer_baselines(
                     class_names,
                 )
 
-                results = evaluate_predictions(
-                    prediction_df,
-                    label_col="label",
-                    pred_col="y_pred",
-                    positive_label=positive_label,
-                    bootstrap_n=bootstrap_n,
-                    random_state=random_state,
-                    show_progress=True,
-                    progress_desc=(
-                        f"Bootstrap | {model_name}"
-                        f" | {training_name}→{evaluation_name}"
-                    ),
+                prediction_signature = _build_prediction_signature(
+                    probabilities, predictions
                 )
+
+                metadata = dict(cache_metadata)
+                metadata.update(
+                    {
+                        "training_dataset": training_name,
+                        "evaluation_dataset": evaluation_name,
+                        "model": model_name,
+                        "bootstrap_n": int(bootstrap_n),
+                        "prediction_signature": prediction_signature,
+                    }
+                )
+
+                results: Dict[str, pd.DataFrame]
+                cache_path: Optional[Path] = None
+                cached_results: Optional[Dict[str, pd.DataFrame]] = None
+                if cache_root is not None:
+                    cache_path = _build_bootstrap_cache_path(
+                        cache_root,
+                        training_name,
+                        model_name,
+                        evaluation_name,
+                    )
+                    if cache_path.exists() and not force_update_bootstrap:
+                        cached_results = _load_bootstrap_cache_entry(
+                            cache_path, metadata
+                        )
+
+                if cached_results is None:
+                    results = evaluate_predictions(
+                        prediction_df,
+                        label_col="label",
+                        pred_col="y_pred",
+                        positive_label=positive_label,
+                        bootstrap_n=bootstrap_n,
+                        random_state=random_state,
+                        show_progress=True,
+                        progress_desc=(
+                            "Bootstrap | "
+                            f"{model_name} | {training_name}→{evaluation_name}"
+                        ),
+                    )
+                    if cache_path is not None:
+                        _save_bootstrap_cache_entry(
+                            cache_path, metadata=metadata, results=results
+                        )
+                else:
+                    results = dict(cached_results)
                 nested_results[training_name][model_name][evaluation_name] = results
 
                 overall_df = results.get("overall", pd.DataFrame())

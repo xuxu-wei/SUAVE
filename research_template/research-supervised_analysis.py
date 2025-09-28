@@ -27,6 +27,7 @@ Script mode (command line execution)
 # %%
 
 from __future__ import annotations
+import hashlib
 import json
 import re
 import sys
@@ -163,35 +164,47 @@ if not IS_INTERACTIVE:
     CLI_REQUESTED_TRIAL_ID = parse_script_arguments(sys.argv[1:])
 
 if IS_INTERACTIVE:
-    FORCE_UPDATE_BENCHMARK_MODEL = False
-    FORCE_UPDATE_TSTR_MODEL = False
-    FORCE_UPDATE_TRTR_MODEL = False
-    FORCE_UPDATE_SYNTHETIC_DATA = False
-    FORCE_UPDATE_C2ST_MODEL = False
-    FORCE_UPDATE_DISTRIBUTION_SHIFT = False
-    FORCE_UPDATE_SUAVE = False
+    FORCE_UPDATE_BENCHMARK_MODEL = False  # Retrain classical baseline models.
+    FORCE_UPDATE_TSTR_MODEL = False  # Refit downstream models on TSTR sets.
+    FORCE_UPDATE_TRTR_MODEL = False  # Refit downstream models on TRTR sets.
+    FORCE_UPDATE_SYNTHETIC_DATA = False  # Regenerate synthetic training TSV artefacts.
+    FORCE_UPDATE_C2ST_MODEL = False  # Retrain two-sample test discriminators.
+    FORCE_UPDATE_DISTRIBUTION_SHIFT = False  # Refresh distribution-shift analytics.
+    FORCE_UPDATE_SUAVE = False  # Reload the persisted SUAVE generator artefact.
+    FORCE_UPDATE_BOOTSTRAP = False  # Regenerate global bootstrap summaries.
+    FORCE_UPDATE_TSTR_BOOTSTRAP = False  # Recompute cached TSTR bootstrap replicates.
+    FORCE_UPDATE_TRTR_BOOTSTRAP = False  # Recompute cached TRTR bootstrap replicates.
 else:
     FORCE_UPDATE_BENCHMARK_MODEL = FORCE_UPDATE_FLAG_DEFAULTS.get(
         "FORCE_UPDATE_BENCHMARK_MODEL", False
-    )
+    )  # Retrain classical baseline models.
     FORCE_UPDATE_TSTR_MODEL = FORCE_UPDATE_FLAG_DEFAULTS.get(
         "FORCE_UPDATE_TSTR_MODEL", False
-    )
+    )  # Refit downstream models on TSTR sets.
     FORCE_UPDATE_TRTR_MODEL = FORCE_UPDATE_FLAG_DEFAULTS.get(
         "FORCE_UPDATE_TRTR_MODEL", False
-    )
+    )  # Refit downstream models on TRTR sets.
     FORCE_UPDATE_SYNTHETIC_DATA = FORCE_UPDATE_FLAG_DEFAULTS.get(
         "FORCE_UPDATE_SYNTHETIC_DATA", False
-    )
+    )  # Regenerate synthetic training TSV artefacts.
     FORCE_UPDATE_C2ST_MODEL = FORCE_UPDATE_FLAG_DEFAULTS.get(
         "FORCE_UPDATE_C2ST_MODEL", False
-    )
+    )  # Retrain two-sample test discriminators.
     FORCE_UPDATE_DISTRIBUTION_SHIFT = FORCE_UPDATE_FLAG_DEFAULTS.get(
         "FORCE_UPDATE_DISTRIBUTION_SHIFT", False
-    )
+    )  # Refresh distribution-shift analytics.
     FORCE_UPDATE_SUAVE = FORCE_UPDATE_FLAG_DEFAULTS.get(
         "FORCE_UPDATE_SUAVE", False
-    )
+    )  # Reload the persisted SUAVE generator artefact.
+    FORCE_UPDATE_BOOTSTRAP = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_BOOTSTRAP", False
+    )  # Regenerate global bootstrap summaries.
+    FORCE_UPDATE_TSTR_BOOTSTRAP = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_TSTR_BOOTSTRAP", False
+    )  # Recompute cached TSTR bootstrap replicates.
+    FORCE_UPDATE_TRTR_BOOTSTRAP = FORCE_UPDATE_FLAG_DEFAULTS.get(
+        "FORCE_UPDATE_TRTR_BOOTSTRAP", False
+    )  # Recompute cached TRTR bootstrap replicates.
 
 INCLUDE_SUAVE_TRANSFER = False
 
@@ -298,6 +311,14 @@ model_loading_plan: ModelLoadingPlan = resolve_model_loading_plan(
 optuna_best_info = model_loading_plan.optuna_best_info
 optuna_best_params = model_loading_plan.optuna_best_params
 model_manifest = model_loading_plan.model_manifest
+suave_manifest_signature: Optional[str] = None
+if isinstance(model_manifest, Mapping) and model_manifest:
+    try:
+        suave_manifest_signature = hashlib.sha256(
+            json.dumps(model_manifest, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError):
+        suave_manifest_signature = None
 pareto_trials = model_loading_plan.pareto_trials
 
 optuna_storage_uri = analysis_config.get("optuna_storage")
@@ -1456,6 +1477,8 @@ membership_path = PRIVACY_ASSESSMENT_DIR / "membership_inference.xlsx"
 
 training_cache_dir = TSTR_TRTR_DIR / "training_sets"
 training_cache_dir.mkdir(parents=True, exist_ok=True)
+bootstrap_cache_dir = TSTR_TRTR_DIR / "bootstrap_cache"
+bootstrap_cache_dir.mkdir(parents=True, exist_ok=True)
 training_sets_numeric: Optional[Dict[str, Tuple[pd.DataFrame, pd.Series]]] = None
 training_sets_raw: Optional[Dict[str, Tuple[pd.DataFrame, pd.Series]]] = None
 training_manifest_signature: Optional[str] = None
@@ -1605,6 +1628,11 @@ if tstr_training_sets_numeric:
         or tstr_nested_results is None
         or tstr_bootstrap_df is None
     ):
+        tstr_bootstrap_metadata = {
+            "transfer_mode": "TSTR",
+            "training_manifest_signature": training_manifest_signature,
+            "data_generator_signature": suave_manifest_signature,
+        }
         (
             tstr_summary_df,
             tstr_plot_df,
@@ -1617,6 +1645,9 @@ if tstr_training_sets_numeric:
             random_state=RANDOM_STATE,
             raw_training_sets=tstr_training_sets_raw,
             raw_evaluation_sets=evaluation_sets_raw,
+            bootstrap_cache_dir=bootstrap_cache_dir,
+            bootstrap_cache_metadata=tstr_bootstrap_metadata,
+            force_update_bootstrap=FORCE_UPDATE_TSTR_BOOTSTRAP,
         )
         tstr_bootstrap_df = collect_transfer_bootstrap_records(tstr_nested_results)
         joblib.dump(
@@ -1662,6 +1693,11 @@ if trtr_training_sets_numeric:
         or trtr_nested_results is None
         or trtr_bootstrap_df is None
     ):
+        trtr_bootstrap_metadata = {
+            "transfer_mode": "TRTR",
+            "training_manifest_signature": training_manifest_signature,
+            "data_generator_signature": suave_manifest_signature,
+        }
         (
             trtr_summary_df,
             trtr_plot_df,
@@ -1674,6 +1710,9 @@ if trtr_training_sets_numeric:
             random_state=RANDOM_STATE,
             raw_training_sets=trtr_training_sets_raw,
             raw_evaluation_sets=evaluation_sets_raw,
+            bootstrap_cache_dir=bootstrap_cache_dir,
+            bootstrap_cache_metadata=trtr_bootstrap_metadata,
+            force_update_bootstrap=FORCE_UPDATE_TRTR_BOOTSTRAP,
         )
         trtr_bootstrap_df = collect_transfer_bootstrap_records(trtr_nested_results)
         joblib.dump(

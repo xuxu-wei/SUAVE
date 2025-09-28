@@ -147,13 +147,16 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
 #     - ``FORCE_UPDATE_C2ST_MODEL`` 会重新训练 C2ST 分类器。
 #     - ``FORCE_UPDATE_DISTRIBUTION_SHIFT`` 会重新计算全局/逐特征漂移指标。
 FORCE_UPDATE_FLAG_DEFAULTS: Dict[str, bool] = {
-    "FORCE_UPDATE_BENCHMARK_MODEL": False,
-    "FORCE_UPDATE_TSTR_MODEL": True,
-    "FORCE_UPDATE_TRTR_MODEL": True,
-    "FORCE_UPDATE_SYNTHETIC_DATA": True,
-    "FORCE_UPDATE_C2ST_MODEL": True,
-    "FORCE_UPDATE_DISTRIBUTION_SHIFT": True,
-    "FORCE_UPDATE_SUAVE": False,
+    "FORCE_UPDATE_BENCHMARK_MODEL": False,  # Retrain cached classical baselines.
+    "FORCE_UPDATE_TSTR_MODEL": True,  # Refit downstream models on TSTR sets.
+    "FORCE_UPDATE_TRTR_MODEL": True,  # Refit downstream models on TRTR sets.
+    "FORCE_UPDATE_SYNTHETIC_DATA": True,  # Regenerate synthetic training TSV artefacts.
+    "FORCE_UPDATE_C2ST_MODEL": True,  # Retrain two-sample test discriminators.
+    "FORCE_UPDATE_DISTRIBUTION_SHIFT": True,  # Refresh distribution-shift analytics.
+    "FORCE_UPDATE_SUAVE": False,  # Reload the persisted SUAVE generator artefact.
+    "FORCE_UPDATE_BOOTSTRAP": True,  # Regenerate global bootstrap summaries.
+    "FORCE_UPDATE_TSTR_BOOTSTRAP": True,  # Recompute cached TSTR bootstrap replicates.
+    "FORCE_UPDATE_TRTR_BOOTSTRAP": True,  # Recompute cached TRTR bootstrap replicates.
 }
 
 # 🟡 Canonical sub-directory names for artefacts written during the analysis.
