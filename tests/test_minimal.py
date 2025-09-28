@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -14,6 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from suave import SUAVE, Schema
+import suave.model as model_module
 from suave.schema_inference import SchemaInferencer
 from suave.evaluate import (
     compute_auprc,
@@ -196,6 +198,36 @@ def test_predict_proba_refreshes_cache_for_new_frames():
     assert not np.shares_memory(model._cached_logits, previous_logits)
     assert not np.shares_memory(model._cached_probabilities, previous_probabilities)
     assert refreshed.shape == (len(X), 2)
+
+
+def test_load_retries_without_weights_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = Path("dummy.pt")
+    payload = {"metadata": {}, "modules": {}, "artefacts": {}}
+    call_count = {"value": 0}
+
+    def fake_torch_load(target_path, *args, **kwargs):
+        call_count["value"] += 1
+        assert Path(target_path) == path
+        assert kwargs.get("map_location") == "cpu"
+        if call_count["value"] == 1:
+            raise pickle.UnpicklingError("Weights only load failed: Unsupported global")
+        assert kwargs.get("weights_only") is False
+        return payload
+
+    monkeypatch.setattr(model_module.torch, "load", fake_torch_load, raising=False)
+
+    sentinel = object()
+
+    def fake_from_payload(cls, data):
+        assert data is payload
+        return sentinel
+
+    monkeypatch.setattr(SUAVE, "_load_from_payload", classmethod(fake_from_payload), raising=False)
+
+    restored = SUAVE.load(path)
+
+    assert restored is sentinel
+    assert call_count["value"] == 2
 
 
 def test_multilayer_classification_head_runs_end_to_end():
