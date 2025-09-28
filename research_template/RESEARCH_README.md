@@ -122,7 +122,6 @@
   2. 记录每个训练阶段（预训练、分类头、联合微调）的轮数、早停标准与耗时。
   3. 导出参数重要性、收敛曲线、帕累托前沿图，并保存到 `03_optuna_search/figures/`。
   4. 模板会在 `04_suave_training/` 下生成 `manual_param_setting.py`，用于登记交互式手动调参的覆盖项；如需生效，请将 `build_analysis_config()` 返回的 `interactive_manual_tuning` 配置指向该模块并填写 `manual_param_setting` 字典。
-     > 🟡 提醒：`analysis_config.INTERACTIVE_MANUAL_TUNING` 仅为手动覆写钩子，不建议在不了解字段作用时修改，以免干扰批量流程的默认行为。
   5. 交互式运行可输入 `manual` 直接加载 `suave_manual_manifest_{label}.json` 中登记的模型与校准器；命令行同样支持 `--trial-id manual`。未指定 trial 时脚本会优先检查手动 manifest，再回退至最近保存的自动 trial，最后依据帕累托阈值自动挑选候选。
 6. 启用 `interactive_manual_tuning` 并以交互模式运行优化脚本时，会在启动 Optuna 之前展示手动模型与历史帕累托解的摘要表；此时可输入 `y/yes` 依据 `manual_param_setting` 直接训练并登记手动模型，输入 `manual` 复用磁盘中的手动 artefact，或输入 `n/no`/回车继续自动搜索。若在提示期间触发键盘中断，脚本会提示是否直接回退至 Optuna 搜索。
 7. 手动调参训练与 Optuna trial 的评估逻辑统一封装在 `analysis_utils.evaluate_candidate_model_performance` 中，用于输出验证集指标、TSTR/TRTR 评估与 ΔAUC；如需调整评估流程，请更新该函数以保持两条路径一致。
