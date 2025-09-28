@@ -1824,12 +1824,11 @@ plot_latent_space(
     output_path=latent_path,
 )
 # %% [markdown]
-# ## TSTR/TRTR, distribution shift, and privacy checks
+# ## Data synthesis
 #
-# Compare models trained on synthetic versus real data while reproducing the
-# protocol's distribution shift diagnostics (C2ST, MMD, energy distance,
-# mutual information) and membership inference baseline. The workflow applies to
-# any configured target when the necessary resources are available.
+# Build and cache the TSTR/TRTR training cohorts so downstream transfer,
+# distribution shift, and privacy diagnostics can reuse identical synthetic
+# samples across runs.
 
 # %%
 
@@ -1896,6 +1895,15 @@ else:
         random_state=RANDOM_STATE,
     )
     print("Saved TSTR/TRTR training sets to", manifest_path)
+    
+# %% [markdown]
+# ## TSTR/TRTR
+#
+# Compare models trained on synthetic versus real data while reproducing the
+# protocol's transfer-learning baselines, bootstrap aggregations, and reporting
+# artefacts.
+
+# %%
 evaluation_sets_numeric: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
     INTERNAL_TEST_DATASET_NAME: (
         to_numeric_frame(X_test), y_test.reset_index(drop=True)
@@ -2356,6 +2364,14 @@ if summary_three_line_tables:
         summary_three_line_path,
     )
 
+# %% [markdown]
+# ## Distribution shift
+#
+# Quantify divergence between real and synthetic cohorts with C2ST, MMD,
+# energy distance, and mutual information metrics.
+
+# %%
+
 real_features_numeric = training_sets_numeric.get(
     "TRTR (real)", (pd.DataFrame(), pd.Series(dtype=float))
 )[0]
@@ -2626,6 +2642,13 @@ render_dataframe(
     title="Top distribution shift features (mutual information)",
     floatfmt=".3f",
 )
+
+# %% [markdown]
+# ## Privacy
+#
+# Audit baseline membership inference risk after training on synthetic data.
+
+# %%
 
 train_probabilities = probability_map[TRAIN_DATASET_NAME]
 test_probabilities = probability_map[INTERNAL_TEST_DATASET_NAME]

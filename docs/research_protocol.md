@@ -142,12 +142,14 @@ print(train_labels.head())</code></pre>
 2. 依照 `VAR_GROUP_DICT` 为每个临床分组重复相关性分析，输出分组级别的 CSV 与配套图像；若特征缺失，脚本会打印 `Skipping unavailable variables` 以提醒补齐或记录。
 3. 调用 `plot_latent_space` 将训练、验证、测试与 eICU 数据集的潜空间嵌入投影到统一图像，留存于 `latent_{label}.png` 以支持质性审查。
 
-### 10. 合成数据 - TSTR/TRTR
+### 10. 合成数据 - Data synthesis / TSTR/TRTR / Distribution shift / Privacy
 
 **目的**：评估 SUAVE 生成数据对下游监督任务的实用性，并对比真实数据训练的基线表现。
 **结果解读**：重点关注 `roc_auc` 与 `accuracy` 的差异；若合成数据与真实数据性能接近，说明生成器具备迁移价值。
 **输入**：使用 `build_tstr_training_sets` 生成的训练集缓存、`02_feature_engineering/` 中的迭代插补特征（`iterative_imputed_{dataset}_{label}.csv`）以及 `INCLUDE_SUAVE_TRANSFER` 环境变量。
 **输出**：在 `10_tstr_trtr_transfer/` 缓存 `tstr_trtr_results_{label}.joblib`、`TSTR_TRTR_eval.xlsx` 与可视化结果。
+
+> **结构更新**：脚本现将合成数据阶段拆分为四个小节，分别为 `Data synthesis`（生成并签名缓存 TSTR/TRTR 训练集）、`TSTR/TRTR`（迁移学习评估与 bootstrap 聚合）、`Distribution shift`（C2ST/MMD/能量距离/互信息对比）以及 `Privacy`（成员推断基线）。执行顺序不变，但每个阶段的缓存与报表位置在脚本中拥有独立标题，便于调试与审计定位。
 
 1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR`、`TSTR balance`、`TSTR augment`、`TSTR 5x`、`TSTR 5x balance`、`TSTR 10x` 与 `TSTR 10x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
 2. 通过 `make_baseline_model_factories` 注册 `Logistic regression`、`Random forest` 与 `GBDT` 三类下游分类器，对每个训练方案分别拟合并在 `evaluate_transfer_baselines` 中统计 `accuracy` 与 `roc_auc`（含置信区间）。

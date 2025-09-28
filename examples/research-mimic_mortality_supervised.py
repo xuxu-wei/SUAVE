@@ -1838,17 +1838,16 @@ plot_latent_space(
 )
 
 # %% [markdown]
-# ## Synthetic data – TSTR/TRTR, distribution shift, and privacy
+# ## Data synthesis
 #
-# Purpose: compare downstream classifiers trained on synthetic cohorts against
-# real-data baselines while running protocol-aligned distribution shift tests
-# (C2ST, MMD, energy distance, mutual information) and membership inference
-# checks.
-# Inputs: `build_tstr_training_sets` synthesis variants, cached feature
-# matrices, and optional SUAVE parameters toggled via `INCLUDE_SUAVE_TRANSFER`.
-# Outputs: cached bootstrap summaries, Excel workbooks, bar charts, distribution
-# shift diagnostics, and privacy reports stored under the dedicated analysis
-# directories for reporting.
+# Purpose: build and cache the TSTR/TRTR training cohorts that feed transfer,
+# distribution-shift, and privacy diagnostics without recomputing synthetic
+# samples on every run.
+# Inputs: `build_tstr_training_sets` synthesis variants alongside cached feature
+# matrices and SUAVE configuration toggles.
+# Outputs: manifest-signed TSV training sets written to
+# `10_tstr_trtr_transfer/training_sets/`, plus signatures used to validate all
+# downstream caches.
 
 # %%
 
@@ -1912,6 +1911,19 @@ else:
         random_state=RANDOM_STATE,
     )
     print("Saved TSTR/TRTR training sets to", manifest_path)
+
+# %% [markdown]
+# ## TSTR/TRTR
+#
+# Purpose: evaluate synthetic-versus-real training data via cached transfer
+# baselines, bootstrap aggregations, and reporting artefacts for protocol
+# compliance.
+# Inputs: cached training/evaluation sets, model factories (including optional
+# SUAVE transfer estimators), and bootstrap configuration.
+# Outputs: combined summary DataFrames, distribution-friendly plots, and Excel
+# workbooks persisted under `10_tstr_trtr_transfer/`.
+
+# %%
 evaluation_sets_numeric: Dict[str, Tuple[pd.DataFrame, pd.Series]] = {
     "MIMIC test": (to_numeric_frame(X_test), y_test.reset_index(drop=True)),
 }
@@ -2366,6 +2378,19 @@ if summary_three_line_tables:
         summary_three_line_path,
     )
 
+# %% [markdown]
+# ## Distribution shift
+#
+# Purpose: quantify divergence between real and synthetic cohorts through C2ST,
+# kernel MMD, energy distance, and mutual information to contextualise transfer
+# results.
+# Inputs: numeric training sets derived from the synthesis stage and cached
+# feature definitions.
+# Outputs: cached metric tables, interpretation notes, visual summaries, and
+# Excel reports stored under `11_distribution_shift/`.
+
+# %%
+
 real_features_numeric = training_sets_numeric.get(
     "TRTR (real)", (pd.DataFrame(), pd.Series(dtype=float))
 )[0]
@@ -2635,6 +2660,18 @@ render_dataframe(
     title="Top distribution shift features (mutual information)",
     floatfmt=".3f",
 )
+
+# %% [markdown]
+# ## Privacy
+#
+# Purpose: audit baseline membership inference risk after training on synthetic
+# data to ensure leakage remains within acceptable bounds.
+# Inputs: train/test probability maps produced earlier in the pipeline and true
+# labels for both cohorts.
+# Outputs: membership inference metrics cached under `12_privacy_assessment/`
+# alongside rendered summaries for reporting.
+
+# %%
 
 train_probabilities = probability_map["Train"]
 test_probabilities = probability_map["MIMIC test"]
