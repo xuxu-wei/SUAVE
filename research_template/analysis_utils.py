@@ -946,11 +946,18 @@ def render_optuna_parameter_grid(
     subplot_titles = [objective_name for objective_name, _ in objective_targets]
 
     for row_title, plot_fn in plot_specs:
+        # ``plot_parallel_coordinate`` returns ``parcoords`` traces that require ``domain``
+        # subplots; other rows keep the default ``xy`` type.
+        subplot_specs = None
+        if plot_fn is plot_parallel_coordinate:
+            subplot_specs = [[{"type": "domain"} for _ in objective_targets]]
+
         row_fig = make_subplots(
             rows=1,
             cols=len(objective_targets),
             subplot_titles=subplot_titles,
             horizontal_spacing=0.08,
+            specs=subplot_specs,
         )
 
         for col_idx, (objective_name, target_fn) in enumerate(
