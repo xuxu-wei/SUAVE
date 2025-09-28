@@ -847,7 +847,10 @@ def parse_script_arguments(argv: Sequence[str]) -> Optional[Union[str, int]]:
     """
 
     parser = argparse.ArgumentParser(
-        description="Select an Optuna trial for SUAVE model loading/training.",
+        description=(
+            "Select an Optuna trial for SUAVE model loading/training, or pass"
+            " 'manual' to load the manual tuning manifest."
+        ),
     )
 
     def _trial_argument(value: str) -> Union[str, int]:
@@ -864,13 +867,19 @@ def parse_script_arguments(argv: Sequence[str]) -> Optional[Union[str, int]]:
         "trial_id",
         nargs="?",
         type=_trial_argument,
-        help="Optuna trial identifier to load or train.",
+        help=(
+            "Optuna trial identifier to load or train; pass 'manual' to load the"
+            " manual tuning manifest."
+        ),
     )
     parser.add_argument(
         "--trial-id",
         dest="trial_id_flag",
         type=_trial_argument,
-        help="Optuna trial identifier to load or train.",
+        help=(
+            "Optuna trial identifier to load or train; pass 'manual' to load the"
+            " manual tuning manifest."
+        ),
     )
     args = parser.parse_args(list(argv))
     if args.trial_id_flag is not None:
