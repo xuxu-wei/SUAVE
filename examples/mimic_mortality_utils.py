@@ -575,7 +575,8 @@ def render_dataframe(
         print("(empty table)")
         return
     if is_interactive_session():
-        display(df)
+        with pd.option_context("display.max_columns", None):
+            display(df)
         return
     tabulate_kwargs = {"headers": "keys", "tablefmt": "github", "showindex": False}
     if floatfmt is not None:
@@ -1100,11 +1101,18 @@ def render_optuna_parameter_grid(
     subplot_titles = [objective_name for objective_name, _ in objective_targets]
 
     for row_title, plot_fn in plot_specs:
+        # ``plot_parallel_coordinate`` renders ``parcoords`` traces, which must live inside a
+        # ``domain`` subplot. Other visualisations continue to use the default ``xy`` layout.
+        subplot_specs = None
+        if plot_fn is plot_parallel_coordinate:
+            subplot_specs = [[{"type": "domain"} for _ in objective_targets]]
+
         row_fig = make_subplots(
             rows=1,
             cols=len(objective_targets),
             subplot_titles=subplot_titles,
             horizontal_spacing=0.08,
+            specs=subplot_specs,
         )
 
         for col_idx, (objective_name, target_fn) in enumerate(
@@ -1126,7 +1134,10 @@ def render_optuna_parameter_grid(
                 continue
 
             for trace in subplot_fig.data:
-                trace.showlegend = False
+                try:
+                    trace.showlegend = False
+                except ValueError:
+                    pass
                 row_fig.add_trace(trace, row=1, col=col_idx)
 
             # Attempt to propagate axis titles where available.
