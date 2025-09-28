@@ -181,6 +181,26 @@ print(train_labels.head())</code></pre>
 2. 执行脚本结尾的汇总逻辑，将 Optuna trial 信息、校准曲线、潜空间解释 artefact（`09_interpretation/`）以及 TSTR/分布漂移输出路径逐条写入 `evaluation_summary_{label}.md`。
 3. 在归档目录保留所有原始数据引用、模型权重（`.pt`/`.joblib`）、插补缓存、解释性 CSV/图像、TSTR/TRTR 工作簿以及运行日志，确保第三方复核可追溯。
 
+## 预期输出
+
+下表汇总各阶段在 `examples/research_outputs_supervised/` 下的主要产物，并记录缓存文件所保存的原始数据结构，便于审计时核对。
+
+| 阶段目录 | 主要输出产物 | 缓存数据结构说明 |
+| --- | --- | --- |
+| `01_data_and_schema/` | `mimic-mortality-*.tsv` 原始快照<br>`schema_{label}.csv`、`schema_summary_{label}.md` | TSV 文件保留原始列名及字符串/数值类型，按行顺序写入；schema CSV 含 `Column`、`Type`、`n_classes`、`y_dim` 四列描述字段属性，对应 Markdown 版本提供同样字段的表格文本。 |
+| `02_feature_engineering/` | `train_features_{label}.parquet`、`validation_features_{label}.parquet` 等特征帧<br>`baseline_feature_frames/` 与 `iterative_imputed_{dataset}_{label}.csv` | 特征帧以列名等于 `FEATURE_COLUMNS` 的 DataFrame 形式存储（Parquet/CSV 中保留浮点与类别编码）；`baseline_feature_frames/` 目录内的缓存按数据集划分子文件，记录分层划分后的索引列表；`iterative_imputed_*.csv` 继承原始特征列顺序并包含插补后的数值。 |
+| `03_optuna_search/` | `optuna_trials_{label}.csv`、`optuna_best_info_{label}.json`、`optuna_best_params_{label}.json`、`figures/` | CSV 汇总 trial 指标列（`trial_number`、`values[0]`、`values[1]`、`fit_seconds` 等）；`optuna_best_info` JSON 记录 `preferred_trial_number`、`preferred_trial`（含 `values`、`params`、`validation_metrics`、`tstr_metrics`、`trtr_metrics`、`diagnostic_paths`）及 `pareto_front` 列表；`optuna_best_params` JSON 聚合 `preferred_params` 与帕累托前沿各 trial 的参数字典。图像目录保存 Pareto、收敛曲线等静态文件。 |
+| `04_suave_training/` | `suave_best_{label}.pt`、`suave_model_manifest_{label}.json`、训练日志 | 模型权重以 PyTorch 序列化格式存储；manifest JSON 含 `target_label`、`trial_number`、`values`、`params`、`model_path`、`calibrator_path`、`study_name`、`storage` 与 `saved_at` 字段，用于指向对应 artefact。 |
+| `05_calibration_uncertainty/` | `isotonic_calibrator_{label}.joblib`、`calibration_curve_{dataset}_{label}.png/svg` | 校准器 joblib 保存拟合后的等渗回归对象及其内部参数；配套图像按照数据集名称输出曲线文件，不含额外脚本元信息。 |
+| `06_evaluation_metrics/` | `evaluation_metrics_{label}.csv`、`evaluation_metrics_{label}.xlsx`、`evaluation_summary_{label}.md` | CSV/Excel 均包含训练、验证、测试、外部验证四类数据集的指标列，工作簿含 `metrics` 主表及长表/抽样附表；Markdown 摘要列出对应文件路径与关键指标。 |
+| `07_bootstrap_analysis/` | `*_bootstrap.joblib` | 每个 joblib 载荷均为包含 `metadata` 与 `results` 的字典；`results` 内含 `overall`、`per_class`、`overall_records`、`per_class_records`、`bootstrap_overall_records`、`bootstrap_per_class_records`、`warnings` DataFrame，`metadata` 记录 `training_dataset`、`evaluation_dataset`、`model`、`bootstrap_n`、`prediction_signature` 等字段。 |
+| `08_baseline_models/` | `baseline_estimators_{label}.joblib`、`baseline_models_{label}.csv` | 模型缓存以字典形式保存 Pipeline 对象，键为基线模型名称；指标 CSV 列出各模型在不同数据集上的 `AUC`、`ACC`、`SPE`、`SEN`、`Brier` 与备注列。 |
+| `09_tstr_trtr_transfer/` | `training_sets/manifest_{label}.json` 与对应 TSV<br>`tstr_trtr_results_{label}.joblib`、`TSTR_TRTR_eval.xlsx`、`bootstrap_cache/` | Manifest JSON 含 `target_label`、`feature_columns`、`datasets`（名称与文件名映射）、可选 `random_state` 与时间戳；TSTR/TRTR joblib 存储 `summary_df`、`plot_df`、`nested_results`、`bootstrap_df` 及训练/评估顺序、特征列、训练 manifest 签名；Excel 汇总 `summary`、`metrics`、`bootstrap`、`tstr_summary`、`trtr_summary` 等工作表；`bootstrap_cache/` 目录内条目沿用 07 节描述的结构。 |
+| `10_distribution_shift/` | `c2st_metrics_{label}.joblib`、`c2st_metrics.xlsx`、`distribution_metrics_{label}.joblib`、`distribution_metrics.xlsx` | C2ST joblib 包含 `feature_columns`、`model_order`、`metrics`（按模型存储 ROC-AUC 及区间）与 `results_df`；对应 Excel 提供 `metrics` 工作表。分布漂移 joblib 保存 `overall_df` 与 `per_feature_df` DataFrame；Excel 的 `overall`、`per_feature` 工作表在表尾追加解释性注记。 |
+| `11_privacy_assessment/` | `membership_inference.xlsx` | 工作簿含 `summary`、`metrics`、`bootstrap` 等工作表，记录攻击 AUC、阈值及抽样明细。 |
+| `12_visualizations/` | 潜空间投影、基线曲线、箱线图等图像 | 图像以 PNG/SVG/PDF/JPG 四种格式落盘，文件名包含数据集与指标信息，便于报告引用。 |
+| 输出根目录 | `evaluation_summary_{label}.md`、运行日志 | Markdown 摘要罗列各阶段 artefact 路径与关键结论；日志文件记录脚本执行时间、环境变量与缓存命中信息。 |
+
 ## 缓存机制
 
 ### 缓存判定信息
