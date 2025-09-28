@@ -122,6 +122,9 @@ from cls_eval import (  # noqa: E402
     evaluate_predictions,
     write_results_to_excel_unique,
     export_three_line_tables,
+    _format_three_line_ci,
+    _write_three_line_workbook,
+    _make_three_line_sheet_name,
 )
 
 from suave.evaluate import (  # noqa: E402
@@ -1455,7 +1458,7 @@ with pd.ExcelWriter(benchmark_excel_path) as writer:
 print("Saved consolidated bootstrap benchmark workbook to", benchmark_excel_path)
 
 three_line_benchmark_path = benchmark_excel_path.with_name(
-    f"{benchmark_excel_path.stem}_three_line.xlsx"
+    f"report_{benchmark_excel_path.stem}.xlsx"
 )
 
 perclass_index_columns = ["Model"]
@@ -1877,6 +1880,92 @@ with pd.ExcelWriter(tstr_excel_path) as writer:
             writer, sheet_name="bootstrap_per_class", index=False
         )
 print("Saved TSTR/TRTR evaluation workbook to", tstr_excel_path)
+
+summary_three_line_tables: Dict[str, pd.DataFrame] = {}
+if not combined_summary_df.empty:
+    metric_triplets: List[Tuple[str, str, str]] = []
+    for metric in ("accuracy", "roc_auc"):
+        low_col = f"{metric}_ci_low"
+        high_col = f"{metric}_ci_high"
+        if (
+            metric in combined_summary_df.columns
+            and low_col in combined_summary_df.columns
+            and high_col in combined_summary_df.columns
+        ):
+            metric_triplets.append((metric, low_col, high_col))
+
+    metric_labels: Dict[str, Tuple[str, str]] = {
+        "accuracy": ("ACC", "ACC (95% CI)"),
+        "roc_auc": ("AUC", "AUC (95% CI)"),
+    }
+
+    evaluation_order = [
+        name
+        for name in combined_summary_df["evaluation_dataset"].dropna().unique()
+        if isinstance(name, str)
+    ]
+
+    for evaluation_name in evaluation_order:
+        evaluation_subset = combined_summary_df[
+            combined_summary_df["evaluation_dataset"] == evaluation_name
+        ].copy()
+        if evaluation_subset.empty:
+            continue
+        for metric, low_col, high_col in metric_triplets:
+            metric_short, metric_label = metric_labels.get(metric, (
+                metric.replace("_", " ").upper(),
+                f"{metric.replace('_', ' ').upper()} (95% CI)",
+            ))
+            formatted = evaluation_subset.apply(
+                lambda row, m=metric, lo=low_col, hi=high_col: _format_three_line_ci(
+                    row.get(m),
+                    row.get(lo),
+                    row.get(hi),
+                    decimals=3,
+                    thousand_sep=False,
+                    fill_value="NA",
+                ),
+                axis=1,
+            )
+            value_frame = evaluation_subset.loc[:, ["training_dataset", "model"]].copy()
+            value_frame[metric_label] = formatted
+            pivot = value_frame.pivot(
+                index="training_dataset", columns="model", values=metric_label
+            )
+            if pivot.empty:
+                continue
+            pivot = pivot.reindex(index=training_order).reindex(columns=model_order)
+            pivot = pivot.fillna("NA")
+            pivot.insert(0, "training_dataset", pivot.index)
+            pivot = pivot.reset_index(drop=True)
+            column_tuples: List[Tuple[str, str]] = []
+            for column in pivot.columns:
+                if column == "training_dataset":
+                    column_tuples.append(("", "Training dataset"))
+                else:
+                    column_tuples.append((str(column), metric_label))
+            formatted_table = pivot.astype(str)
+            formatted_table.columns = pd.MultiIndex.from_tuples(column_tuples)
+            sheet_name = _make_three_line_sheet_name(evaluation_name, metric_short)
+            if sheet_name in summary_three_line_tables:
+                suffix = 2
+                while True:
+                    candidate = _make_three_line_sheet_name(
+                        evaluation_name, metric_short, suffix=suffix
+                    )
+                    if candidate not in summary_three_line_tables:
+                        sheet_name = candidate
+                        break
+                    suffix += 1
+            summary_three_line_tables[sheet_name] = formatted_table
+
+if summary_three_line_tables:
+    summary_three_line_path = TSTR_TRTR_DIR / "report_TSTR_TRTR_eval_summary.xlsx"
+    _write_three_line_workbook(summary_three_line_tables, summary_three_line_path)
+    print(
+        "Saved formatted TSTR/TRTR summary workbook to",
+        summary_three_line_path,
+    )
 
 real_features_numeric = training_sets_numeric.get(
     "TRTR (real)", (pd.DataFrame(), pd.Series(dtype=float))
