@@ -3932,9 +3932,11 @@ class SUAVE:
         """
 
         path = Path(path)
+        load_error: Exception | None = None
         try:
             payload = torch.load(path, map_location="cpu")
-        except (RuntimeError, pickle.UnpicklingError, EOFError):
+        except (RuntimeError, pickle.UnpicklingError, EOFError) as error:
+            load_error = error
             payload = None
         if isinstance(payload, dict):
             if "metadata" in payload:
@@ -3951,6 +3953,27 @@ class SUAVE:
                 return cls._load_from_legacy_json(payload)
         if payload is not None:
             raise ValueError("Unexpected model archive format")
+
+        suffix = path.suffix.lower()
+        is_text_payload = suffix in {".json", ".txt"}
+
+        if not is_text_payload:
+            zip_magic = b""
+            try:
+                with path.open("rb") as handle:
+                    zip_magic = handle.read(4)
+            except OSError:
+                zip_magic = b""
+
+            binary_suffixes = {".pt", ".pth"}
+            if load_error is not None and (
+                suffix in binary_suffixes or zip_magic.startswith(b"PK\x03\x04")
+            ):
+                raise RuntimeError(
+                    f"Failed to load binary SUAVE archive '{path}': {load_error}"
+                ) from load_error
+            raise ValueError("Unexpected model archive format")
+
         data = json.loads(path.read_text())
         return cls._load_from_legacy_json(data)
 
