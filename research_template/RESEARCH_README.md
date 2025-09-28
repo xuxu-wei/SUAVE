@@ -163,6 +163,26 @@
 
 该模板保持数据集无关性，只要在 `analysis_config.py` 中完成适配，即可在新的临床研究任务上复用完整流程。
 
+## 预期输出
+
+模板执行后会在 `resolve_analysis_output_root()` 指向的目录生成分阶段 Artefact。下表列出关键产物及缓存所包含的原始数据结构，便于在新数据集上复核。
+
+| 阶段目录 | 主要输出产物 | 缓存数据结构说明 |
+| --- | --- | --- |
+| `01_data_and_schema/` | 原始数据快照（可选）<br>`schema_{label}.csv`、`schema_summary_{label}.md` | TSV/CSV 快照保持原始列名及数据类型；schema CSV 含 `Column`、`Type`、`n_classes`、`y_dim` 字段，Markdown 版本提供相同信息的表格文本。 |
+| `02_feature_engineering/` | `*_features_{label}.parquet`、`baseline_feature_frames/`、`iterative_imputed_{dataset}_{label}.csv` | 特征帧以 `FEATURE_COLUMNS` 顺序保存数值化数据；`baseline_feature_frames/` 记录训练/验证划分索引；迭代插补 CSV 与原始特征列一致，仅值经过插补。 |
+| `03_optuna_search/` | `optuna_trials_{label}.csv`、`optuna_best_info_{label}.json`、`optuna_best_params_{label}.json`、`figures/` | Trial CSV 汇总 `trial_number`、目标值、耗时等列；`optuna_best_info` JSON 存储 `preferred_trial_number`、`preferred_trial`（含 `values`、`params`、`validation_metrics`、`tstr_metrics`、`trtr_metrics`、`diagnostic_paths`）及 `pareto_front` 元数据；`optuna_best_params` JSON 汇集 `preferred_params` 与帕累托 trial 的参数字典。 |
+| `04_suave_training/` | `suave_best_{label}.pt`、`suave_model_manifest_{label}.json`、训练日志 | 模型权重使用 PyTorch 序列化；manifest JSON 包含 `target_label`、`trial_number`、`values`、`params`、`model_path`、`calibrator_path`、`study_name`、`storage`、`saved_at`。 |
+| `05_calibration_uncertainty/` | `isotonic_calibrator_{label}.joblib`、`calibration_curve_{dataset}_{label}.*` | Joblib 中保存拟合后的等渗/温度缩放对象及其内部状态；图像文件按数据集输出曲线，不附加脚本指示。 |
+| `06_evaluation_metrics/` | `evaluation_metrics_{label}.csv`、`evaluation_metrics_{label}.xlsx`、`evaluation_summary_{label}.md` | 指标 CSV/Excel 覆盖训练、验证、测试、外部评估（如有）各 split；工作簿包含 `metrics`、长表及 bootstrap 明细；Markdown 摘要罗列关键文件路径。 |
+| `07_bootstrap_analysis/` | `*_bootstrap.joblib` | 每个 joblib 为字典：`metadata` 记录训练/评估数据集、模型名、`bootstrap_n`、`prediction_signature`；`results` 提供 `overall`、`per_class`、`overall_records`、`per_class_records`、`bootstrap_overall_records`、`bootstrap_per_class_records`、`warnings` DataFrame。 |
+| `08_baseline_models/` | `baseline_estimators_{label}.joblib`、`baseline_models_{label}.csv` | Joblib 字典的键为基线模型名称，值为已拟合 Pipeline；CSV 包含 `AUC`、`ACC`、`SPE`、`SEN`、`Brier` 等列及备注。 |
+| `09_tstr_trtr_transfer/` | `training_sets/manifest_{label}.json` 与 TSV<br>`tstr_trtr_results_{label}.joblib`、`TSTR_TRTR_eval.xlsx`、`bootstrap_cache/` | Manifest JSON 记录 `target_label`、`feature_columns`、`datasets` 列表（名称+文件名）、可选 `random_state`、`generated_at`；TSTR/TRTR joblib 存储 `summary_df`、`plot_df`、`nested_results`、`bootstrap_df` 及训练/评估顺序、特征列、manifest 签名；Excel 汇总 `summary`、`metrics`、`bootstrap`、`tstr_summary`、`trtr_summary` 等工作表；`bootstrap_cache/` 条目结构同第 7 行。 |
+| `10_distribution_shift/` | `c2st_metrics_{label}.joblib`、`c2st_metrics.xlsx`、`distribution_metrics_{label}.joblib`、`distribution_metrics.xlsx` | C2ST joblib 含 `feature_columns`、`model_order`、`metrics` 字典与 `results_df`；分布漂移 joblib 提供 `overall_df`、`per_feature_df`；对应 Excel 在 `overall`、`per_feature` 工作表末尾附解释文本。 |
+| `11_privacy_assessment/` | `membership_inference.xlsx` | 工作簿包含 `summary`、`metrics`、`bootstrap` 工作表，记录攻击 AUC、阈值与抽样明细。 |
+| `12_visualizations/` | 潜空间、指标曲线、箱线图等图像 | 图像按 PNG/SVG/PDF/JPG 等格式输出，文件名标记数据集与指标。 |
+| 输出根目录 | `evaluation_summary_{label}.md`、日志 | Markdown 摘要列出各阶段 Artefact 路径与关键信息；日志文件记录运行时间与缓存命中状态。 |
+
 ## 缓存机制
 
 ### 缓存判定信息
