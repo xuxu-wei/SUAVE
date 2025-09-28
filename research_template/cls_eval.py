@@ -10,12 +10,13 @@ import atexit
 import glob
 import inspect
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime
 from os import PathLike
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -1281,6 +1282,378 @@ def preview_result_tables(
 
     return results
 
+
+def _auto_detect_ci_triplets(columns: Iterable[str]) -> List[Tuple[str, str, str]]:
+    """Return ``(value, low, high)`` triplets detected from the column names."""
+    cols = list(columns)
+    col_set = set(cols)
+    triplets: List[Tuple[str, str, str]] = []
+    for name in cols:
+        if name.endswith("_ci_low"):
+            base = name[: -len("_ci_low")]
+            hi = f"{base}_ci_high"
+            if base in col_set and hi in col_set:
+                triplets.append((base, name, hi))
+    seen: Set[str] = set()
+    ordered: List[Tuple[str, str, str]] = []
+    for base, low, high in triplets:
+        if base not in seen:
+            ordered.append((base, low, high))
+            seen.add(base)
+    return ordered
+
+
+def _format_three_line_number(
+    value: Union[str, float, int, None],
+    *,
+    decimals: int,
+    use_decimals: bool,
+    thousand_sep: bool,
+    fill_value: str,
+) -> str:
+    if value is None:
+        return fill_value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return fill_value
+        return re.sub(r"(?<=\d)-(?!\s)(?=\d)", "–", stripped)
+
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    if not np.isfinite(num):
+        return fill_value
+
+    if not use_decimals and float(num).is_integer():
+        int_val = int(round(num))
+        if thousand_sep and len(str(abs(int_val))) >= 5:
+            return f"{int_val:,}"
+        return str(int_val)
+
+    int_part = str(int(abs(num))) if abs(num) >= 1 else "0"
+    use_thousand = thousand_sep and len(int_part) >= 5
+    fmt = f"{{:,.{decimals}f}}" if use_thousand else f"{{:.{decimals}f}}"
+    return fmt.format(num)
+
+
+def _format_three_line_ci(
+    value: Union[str, float, int, None],
+    low: Union[str, float, int, None],
+    high: Union[str, float, int, None],
+    *,
+    decimals: int,
+    thousand_sep: bool,
+    fill_value: str,
+) -> str:
+    value_txt = _format_three_line_number(
+        value,
+        decimals=decimals,
+        use_decimals=True,
+        thousand_sep=thousand_sep,
+        fill_value=fill_value,
+    )
+    low_txt = _format_three_line_number(
+        low,
+        decimals=decimals,
+        use_decimals=True,
+        thousand_sep=thousand_sep,
+        fill_value=fill_value,
+    )
+    high_txt = _format_three_line_number(
+        high,
+        decimals=decimals,
+        use_decimals=True,
+        thousand_sep=thousand_sep,
+        fill_value=fill_value,
+    )
+
+    if any(part == fill_value for part in (value_txt, low_txt, high_txt)):
+        return fill_value
+    return f"{value_txt} ({low_txt}–{high_txt})"
+
+
+def _prepare_three_line_sheet(
+    df: pd.DataFrame,
+    *,
+    index_columns: Sequence[str],
+    dataset_column: str,
+    dataset_order: Optional[Sequence[str]] = None,
+    drop_columns: Optional[Sequence[str]] = None,
+    decimals: int = 3,
+    thousand_sep: bool = True,
+    fill_value: str = "NA",
+    ci_pairs: Optional[Sequence[Tuple[str, str, str]]] = None,
+    ci_label_text: str = "95%",
+    decimal_metric_overrides: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    if not index_columns:
+        raise ValueError("'index_columns' must contain at least one column name")
+    if dataset_column not in df.columns:
+        raise ValueError(f"'{dataset_column}' column not found in dataframe")
+
+    work = df.copy()
+    if drop_columns:
+        drop_list = [c for c in drop_columns if c in work.columns]
+        if drop_list:
+            work = work.drop(columns=drop_list)
+
+    triplets = list(ci_pairs) if ci_pairs is not None else _auto_detect_ci_triplets(work.columns)
+    triplets = [t for t in triplets if len(t) == 3]
+    for base, low, high in triplets:
+        if base not in work.columns or low not in work.columns or high not in work.columns:
+            continue
+        combined = work.apply(
+            lambda row: _format_three_line_ci(
+                row.get(base),
+                row.get(low),
+                row.get(high),
+                decimals=decimals,
+                thousand_sep=thousand_sep,
+                fill_value=fill_value,
+            ),
+            axis=1,
+        )
+        label = f"{base} ({ci_label_text} CI)"
+        if label in work.columns:
+            work = work.drop(columns=[label])
+        work = work.drop(columns=[low, high])
+        base_pos = list(work.columns).index(base)
+        work.insert(base_pos + 1, label, combined)
+
+    if dataset_order:
+        categories = list(dataset_order)
+        extras = [c for c in work[dataset_column].unique() if c not in categories]
+        categories.extend(sorted(extras))
+        work[dataset_column] = pd.Categorical(work[dataset_column], categories=categories, ordered=True)
+
+    sort_cols = list(index_columns) + [dataset_column]
+    work = work.sort_values(sort_cols)
+
+    value_columns = [c for c in work.columns if c not in (*index_columns, dataset_column)]
+    if not value_columns:
+        raise ValueError("No value columns available for three-line export")
+
+    long_df = work.loc[:, list(index_columns) + [dataset_column] + value_columns]
+
+    decimal_metrics: Set[str] = set(decimal_metric_overrides or [])
+    for col in value_columns:
+        series = pd.to_numeric(long_df[col], errors="coerce")
+        if col in decimal_metrics:
+            continue
+        if series.notna().any():
+            rounded = np.round(series.dropna().astype(float))
+            if not np.allclose(series.dropna().astype(float), rounded):
+                decimal_metrics.add(col)
+            elif pd.api.types.is_float_dtype(long_df[col]):
+                decimal_metrics.add(col)
+
+    wide = (
+        long_df.set_index(list(index_columns) + [dataset_column])[value_columns]
+        .unstack(dataset_column)
+        .swaplevel(axis=1)
+    )
+    wide = wide.reset_index()
+
+    tuples: List[Tuple[str, str]] = []
+    for col in wide.columns:
+        if isinstance(col, tuple):
+            tuples.append((str(col[0]), str(col[1])))
+        else:
+            tuples.append(("", str(col)))
+    wide.columns = pd.MultiIndex.from_tuples(tuples)
+
+    prefix_cols = [col for col in wide.columns if col[0] == ""]
+    dataset_sequence: List[str] = []
+    for ds in wide.columns.get_level_values(0):
+        if ds and ds not in dataset_sequence:
+            dataset_sequence.append(ds)
+    if dataset_order:
+        ordered_ds = [ds for ds in dataset_order if ds in dataset_sequence]
+        ordered_ds.extend([ds for ds in dataset_sequence if ds not in ordered_ds])
+    else:
+        ordered_ds = dataset_sequence
+    column_order: List[Tuple[str, str]] = list(prefix_cols)
+    for ds in ordered_ds:
+        column_order.extend([col for col in wide.columns if col[0] == ds])
+    wide = wide.loc[:, column_order]
+
+    formatted = wide.copy()
+    for col in formatted.columns:
+        if col[0] == "":
+            formatted[col] = formatted[col].apply(lambda v: fill_value if pd.isna(v) else str(v))
+            continue
+        metric = col[1]
+        use_decimals = metric in decimal_metrics
+        formatted[col] = formatted[col].apply(
+            lambda v: _format_three_line_number(
+                v,
+                decimals=decimals,
+                use_decimals=use_decimals,
+                thousand_sep=thousand_sep,
+                fill_value=fill_value,
+            )
+        )
+
+    return formatted.fillna(fill_value)
+
+
+def _write_three_line_workbook(
+    sheets: Dict[str, pd.DataFrame],
+    output_path: Union[str, Path],
+    *,
+    font_name: str = "Times New Roman",
+) -> Path:
+    if not sheets:
+        raise ValueError("No sheets provided for three-line export")
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, Side
+    from openpyxl.utils import get_column_letter
+
+    workbook = Workbook()
+    medium_side = Side(style="medium", color="000000")
+    thin_side = Side(style="thin", color="000000")
+
+    def _update_border(cell, *, top=None, bottom=None):
+        cell.border = Border(
+            left=cell.border.left,
+            right=cell.border.right,
+            top=top if top is not None else cell.border.top,
+            bottom=bottom if bottom is not None else cell.border.bottom,
+        )
+
+    def _write_sheet(ws, name: str, data: pd.DataFrame):
+        ws.title = name
+        header_font = Font(name=font_name, bold=True)
+        body_font = Font(name=font_name, bold=False)
+        align = Alignment(horizontal="left", vertical="center")
+
+        level0 = data.columns.get_level_values(0)
+        level1 = data.columns.get_level_values(1)
+        n_cols = data.shape[1]
+
+        start_col = 1
+        current = level0[0] if n_cols else ""
+        for idx in range(1, n_cols + 1):
+            value = level0[idx - 1]
+            cell = ws.cell(row=1, column=idx, value=value if value else "")
+            cell.font = header_font
+            cell.alignment = align
+            if value != current:
+                if current and idx - start_col > 1:
+                    ws.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=idx - 1)
+                start_col = idx
+                current = value
+        if current and n_cols - start_col >= 1:
+            ws.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=n_cols)
+
+        for idx in range(1, n_cols + 1):
+            cell = ws.cell(row=2, column=idx, value=level1[idx - 1])
+            cell.font = header_font
+            cell.alignment = align
+
+        for row_idx, row in enumerate(data.itertuples(index=False, name=None), start=3):
+            for col_idx, value in enumerate(row, start=1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.font = body_font
+                cell.alignment = align
+
+        for col_idx in range(1, n_cols + 1):
+            top_cell = ws.cell(row=1, column=col_idx)
+            _update_border(top_cell, top=medium_side)
+            header_cell = ws.cell(row=2, column=col_idx)
+            _update_border(header_cell, bottom=thin_side)
+            bottom_cell = ws.cell(row=data.shape[0] + 2, column=col_idx)
+            _update_border(bottom_cell, bottom=medium_side)
+
+        for col_idx in range(1, n_cols + 1):
+            values = [
+                str(level0[col_idx - 1] or ""),
+                str(level1[col_idx - 1] or ""),
+            ] + [str(v) for v in data.iloc[:, col_idx - 1].tolist()]
+            max_len = max((len(v) for v in values if v is not None), default=0)
+            width = min(max(max_len + 2, 10), 60)
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    first = True
+    for sheet_name, table in sheets.items():
+        if table.empty:
+            continue
+        if first:
+            worksheet = workbook.active
+            _write_sheet(worksheet, sheet_name, table)
+            first = False
+        else:
+            worksheet = workbook.create_sheet(title=sheet_name)
+            _write_sheet(worksheet, sheet_name, table)
+
+    workbook.save(output_path)
+    return Path(output_path)
+
+
+def export_three_line_tables(
+    tables: Dict[str, pd.DataFrame],
+    output_path: Union[str, Path],
+    *,
+    index_columns: Dict[str, Sequence[str]],
+    dataset_column: str = "Dataset",
+    dataset_order: Optional[Sequence[str]] = None,
+    drop_columns: Optional[Sequence[str]] = ("Target",),
+    decimals: int = 3,
+    thousand_sep: bool = True,
+    fill_value: str = "NA",
+    ci_pairs: Optional[Dict[str, Sequence[Tuple[str, str, str]]]] = None,
+    ci_label_text: str = "95%",
+    decimal_metric_overrides: Optional[Dict[str, Sequence[str]]] = None,
+) -> Path:
+    """Export multiple dataframes as academic three-line tables grouped by dataset.
+
+    Examples
+    --------
+    >>> tables = {"Summary": summary_df, "overall": overall_df}
+    >>> export_three_line_tables(
+    ...     tables,
+    ...     "benchmark_three_line.xlsx",
+    ...     index_columns={"Summary": ["Model"], "overall": ["Model"]},
+    ... )
+    PosixPath('benchmark_three_line.xlsx')
+    """
+
+    prepared: Dict[str, pd.DataFrame] = {}
+    for sheet_name, df in tables.items():
+        if df is None or df.empty:
+            continue
+        idx_cols = index_columns.get(sheet_name)
+        if not idx_cols:
+            raise ValueError(f"Missing index columns configuration for sheet '{sheet_name}'")
+        ci_spec = ci_pairs.get(sheet_name) if ci_pairs else None
+        decimal_override = (
+            decimal_metric_overrides.get(sheet_name)
+            if decimal_metric_overrides and sheet_name in decimal_metric_overrides
+            else None
+        )
+        prepared[sheet_name] = _prepare_three_line_sheet(
+            df,
+            index_columns=idx_cols,
+            dataset_column=dataset_column,
+            dataset_order=dataset_order,
+            drop_columns=drop_columns,
+            decimals=decimals,
+            thousand_sep=thousand_sep,
+            fill_value=fill_value,
+            ci_pairs=ci_spec,
+            ci_label_text=ci_label_text,
+            decimal_metric_overrides=decimal_override,
+        )
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return _write_three_line_workbook(prepared, output_path)
+
+
 def _normalize_filepaths(
     filepaths: Union[
         str, PathLike,
@@ -1662,4 +2035,5 @@ __all__ = [
     "evaluate_and_export",
     "evaluate_and_export_autoname",   # 新增导出
     "export_to_excel",
+    "export_three_line_tables",
 ]
