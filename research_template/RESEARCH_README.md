@@ -281,6 +281,7 @@ for cache_path in sorted(cache_dir.glob("*_bootstrap.joblib")):
     payload = joblib.load(cache_path)
     print(cache_path.name, payload.keys())
 </code></pre> |
+> **更新提示**：生成的 `report_bootstrap_{label}.xlsx` 现采用“数据集 × 模型”行分组结构，自动合并相邻行中的数据集单元格，并仅保留带 95% 置信区间的指标列（如 ACC/AUROC/AUPRC/F1 micro）。这样可直接得到 n×k 行、m 列的摘要表格，满足论文写作需求；原始数值仍可在 `bootstrap_benchmark_{label}.xlsx` 中查阅。
 | 10. 合成数据 - TSTR/TRTR | TSTR/TRTR箱线图 | 图像 | `plot_transfer_metric_boxes` 生成的 Accuracy/AUROC 与 ΔAccuracy/ΔAUROC 箱线图；单模型时按训练数据集排布，多模型时横轴展示模型、箱体按数据集着色 | TSTR/TRTR bootstrap 明细表（`combined_bootstrap_df`、`delta_bootstrap_df`） | `OUTPUT_DIR / "10_tstr_trtr_transfer" / f"tstr_results_{label}.joblib"`<br>`OUTPUT_DIR / "10_tstr_trtr_transfer" / f"trtr_results_{label}.joblib"` | <pre><code class="language-python">from pathlib import Path
 import joblib
 

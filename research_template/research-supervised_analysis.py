@@ -148,6 +148,7 @@ from analysis_utils import (  # noqa: E402
 from cls_eval import (  # noqa: E402
     evaluate_predictions,
     write_results_to_excel_unique,
+    export_dataset_grouped_tables,
     export_three_line_tables,
     _format_three_line_ci,
     _write_three_line_workbook,
@@ -1565,7 +1566,7 @@ if "class" in bootstrap_per_class_df.columns:
 elif "Class" in bootstrap_per_class_df.columns:
     perclass_index_columns.append("Class")
 
-export_three_line_tables(
+export_dataset_grouped_tables(
     {
         "Summary": bootstrap_summary_df,
         "overall": bootstrap_overall_df,
@@ -1582,6 +1583,7 @@ export_three_line_tables(
     drop_columns=("Target",),
     decimals=3,
     ci_label_text="95%",
+    ci_only=True,
 )
 
 print("Saved formatted three-line benchmark workbook to", three_line_benchmark_path)
