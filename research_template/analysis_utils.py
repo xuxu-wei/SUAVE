@@ -421,7 +421,8 @@ def render_dataframe(
         print("(empty table)")
         return
     if is_interactive_session():
-        display(df)
+        with pd.option_context("display.max_columns", None):
+            display(df)
         return
     tabulate_kwargs = {"headers": "keys", "tablefmt": "github", "showindex": False}
     if floatfmt is not None:
@@ -971,7 +972,10 @@ def render_optuna_parameter_grid(
                 continue
 
             for trace in subplot_fig.data:
-                trace.showlegend = False
+                try:
+                    trace.showlegend = False
+                except ValueError:
+                    pass
                 row_fig.add_trace(trace, row=1, col=col_idx)
 
             xaxis = getattr(subplot_fig.layout, "xaxis", None)
