@@ -1266,6 +1266,8 @@ TRIAL_SUMMARY_BASE_COLUMNS = [
     "TSTR/TRTR ΔAUC",
 ]
 
+TRIAL_SUMMARY_ALLOWED_METRICS = {"Validation ROAUC"}
+
 
 def _format_metric_column(prefix: str, metric_key: object) -> str:
     """Return a human-readable column name for metric ``metric_key``."""
@@ -1308,6 +1310,8 @@ def _collect_metric_columns(source: object) -> Dict[str, float]:
                 continue
             for metric_key, metric_value in raw_metrics.items():
                 column_name = _format_metric_column(prefix, metric_key)
+                if column_name not in TRIAL_SUMMARY_ALLOWED_METRICS:
+                    continue
                 metric_columns[column_name] = _coerce_float(metric_value)
 
     return metric_columns
