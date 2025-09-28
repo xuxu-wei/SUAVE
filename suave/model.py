@@ -3933,11 +3933,35 @@ class SUAVE:
 
         path = Path(path)
         load_error: Exception | None = None
+        retry_error: Exception | None = None
         try:
             payload = torch.load(path, map_location="cpu")
         except (RuntimeError, pickle.UnpicklingError, EOFError) as error:
             load_error = error
             payload = None
+            if isinstance(error, pickle.UnpicklingError):
+                message = str(error)
+                retry_triggers = (
+                    "Weights only load failed",
+                    "Unsupported global",
+                )
+                if any(trigger in message for trigger in retry_triggers):
+                    try:
+                        payload = torch.load(
+                            path,
+                            map_location="cpu",
+                            weights_only=False,
+                        )
+                    except TypeError:
+                        # ``weights_only`` is unsupported (older PyTorch). Revert
+                        # to the original error handling path for backwards compatibility.
+                        payload = None
+                    except Exception as retry_exc:  # pragma: no cover - safety net
+                        retry_error = retry_exc
+                        payload = None
+                    else:
+                        load_error = None
+                        retry_error = None
         if isinstance(payload, dict):
             if "metadata" in payload:
                 return cls._load_from_payload(payload)
@@ -3969,6 +3993,12 @@ class SUAVE:
             if load_error is not None and (
                 suffix in binary_suffixes or zip_magic.startswith(b"PK\x03\x04")
             ):
+                if retry_error is not None:
+                    message = (
+                        f"Failed to load binary SUAVE archive '{path}': {load_error}. "
+                        f"Retry with weights_only=False raised: {retry_error}"
+                    )
+                    raise RuntimeError(message) from retry_error
                 raise RuntimeError(
                     f"Failed to load binary SUAVE archive '{path}': {load_error}"
                 ) from load_error
