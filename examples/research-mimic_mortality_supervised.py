@@ -2024,11 +2024,11 @@ if distribution_overall_df is None or distribution_df is None:
         feature_iterator.set_postfix_str(column)
         real_values = real_features_numeric[column].to_numpy()
         synthetic_values = synthesis_features_numeric[column].to_numpy()
-        mmd_value, mmd_p = rbf_mmd(
+        mmd_value, _ = rbf_mmd(
             real_values,
             synthetic_values,
             random_state=RANDOM_STATE,
-            n_permutations=200,
+            n_permutations=0,
         )
         energy_value, _ = energy_distance(
             real_values,
@@ -2041,7 +2041,6 @@ if distribution_overall_df is None or distribution_df is None:
             {
                 "feature": column,
                 "rbf_mmd": mmd_value,
-                "mmd_p_value": mmd_p,
                 "energy_distance": energy_value,
                 "mutual_information": mi_value,
             }
