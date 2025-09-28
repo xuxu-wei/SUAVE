@@ -162,3 +162,31 @@
   4. 归档所有模型、插补缓存、图表、日志与数据引用，确保第三方可复现。
 
 该模板保持数据集无关性，只要在 `analysis_config.py` 中完成适配，即可在新的临床研究任务上复用完整流程。
+
+## 缓存机制
+
+### 缓存判定信息
+
+- `07_bootstrap_analysis/`：主分析脚本会将每个“模型 × 数据集”的 bootstrap 结果保存为 `*_bootstrap.joblib`，其中包含总体/分层指标与抽样记录。命中缓存时直接读取；若 `FORCE_UPDATE_BOOTSTRAP=True` 则重新计算。
+- `09_tstr_trtr_transfer/training_sets/`：`build_tstr_training_sets` 会生成 TSV 与 `manifest_{label}.json`，manifest 记录特征列、生成时间以及 SUAVE manifest 的 SHA256。若签名与当前配置不一致或启用了 `FORCE_UPDATE_SYNTHETIC_DATA`，训练集会被重建，后续依赖同一签名的缓存也会失效。
+- `09_tstr_trtr_transfer/tstr_results_{label}.joblib`、`trtr_results_{label}.joblib`：存储真实/合成训练下的基线预测结果与指标，并携带 `training_manifest_signature`、`data_generator_signature` 等元数据。只有当签名匹配且未启用 `FORCE_UPDATE_TSTR_MODEL` / `FORCE_UPDATE_TRTR_MODEL` 时才会复用。
+- `09_tstr_trtr_transfer/bootstrap_cache/`：`evaluate_transfer_baselines` 在完成一次 bootstrap 后立即写入缓存，校验字段包括 `training_manifest_signature`、`data_generator_signature`、`prediction_signature` 与 `bootstrap_n`。当预测发生变化或启用 `FORCE_UPDATE_TSTR_BOOTSTRAP`、`FORCE_UPDATE_TRTR_BOOTSTRAP` 时会重新采样。
+- `10_distribution_shift/`：两类缓存分别存放在 `c2st_metrics_{label}.joblib` 与 `distribution_metrics_{label}.joblib` 中，记录特征列、模型顺序及统计结果。若配置改变或设置了 `FORCE_UPDATE_C2ST_MODEL`、`FORCE_UPDATE_DISTRIBUTION_SHIFT`，脚本会放弃缓存并重新计算。
+- SUAVE 生成器 artefact：默认读取 `04_suave_training/` 下的 `suave_best_{label}.pt` 与 manifest。当需要覆盖旧模型时，可启用 `FORCE_UPDATE_SUAVE` 强制重新训练（前提是 Optuna artefact 不可用或显式请求刷新）。
+
+### FORCE_UPDATE 参数对照
+
+| 参数 | 控制内容与关联缓存 |
+| --- | --- |
+| `FORCE_UPDATE_BENCHMARK_MODEL` | 覆盖 `08_baseline_models/` 下的 `baseline_estimators_{label}.joblib` 与相关指标，确保传统基线与最新特征一致。 |
+| `FORCE_UPDATE_BOOTSTRAP` | 忽略 `07_bootstrap_analysis/` 中的缓存，重新执行 SUAVE 与基线的 bootstrap 评估。 |
+| `FORCE_UPDATE_SYNTHETIC_DATA` | 重新生成合成训练 TSV 与 manifest，并使依赖 `training_manifest_signature` 的缓存全部失效。 |
+| `FORCE_UPDATE_TSTR_MODEL` | 重新拟合 TSTR 基线模型并覆盖 `tstr_results_{label}.joblib`。 |
+| `FORCE_UPDATE_TRTR_MODEL` | 重新拟合 TRTR 基线模型并覆盖 `trtr_results_{label}.joblib`。 |
+| `FORCE_UPDATE_TSTR_BOOTSTRAP` | 禁用 `bootstrap_cache/` 中与 TSTR 相关的缓存条目，基于最新预测重新生成 bootstrap 明细。 |
+| `FORCE_UPDATE_TRTR_BOOTSTRAP` | 禁用 `bootstrap_cache/` 中与 TRTR 相关的缓存条目，确保真实训练结果的 bootstrap 指标更新。 |
+| `FORCE_UPDATE_C2ST_MODEL` | 跳过 `c2st_metrics_{label}.joblib` 缓存，重新训练 C2ST 分类器并输出最新统计。 |
+| `FORCE_UPDATE_DISTRIBUTION_SHIFT` | 重新计算全局与逐特征的分布漂移指标，覆盖 `distribution_metrics_{label}.joblib`。 |
+| `FORCE_UPDATE_SUAVE` | 当 Optuna 产物缺失或需要替换生成器时，强制放弃已有 `suave_best_{label}.pt`，触发重新训练。 |
+
+默认开关由脚本顶部或 `FORCE_UPDATE_FLAG_DEFAULTS` 控制：批处理流程通常将耗时步骤设为 `True` 以确保输出最新；交互式分析则倾向复用缓存以节省时间。调整参数时请在研究日志中记录原因与时间，便于后续审计与复现。

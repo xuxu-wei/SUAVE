@@ -126,6 +126,7 @@
 2. 通过 `make_baseline_model_factories` 注册 `Logistic regression`、`Random forest` 与 `GBDT` 三类下游分类器，对每个训练方案分别拟合并在 `evaluate_transfer_baselines` 中统计 `accuracy` 与 `roc_auc`（含置信区间）。
 3. 若需将 SUAVE 纳入迁移评估，可在运行脚本前设置 `INCLUDE_SUAVE_TRANSFER=1`，前提是 Optuna 已产出可用的最优超参；默认行为仅评估传统基线模型，以避免在 TSTR/TRTR 分析阶段重复拟合 SUAVE。
 4. `build_tstr_training_sets` 会在 `09_tstr_trtr_transfer/training_sets/` 生成 TSV + JSON manifest（`manifest_{label}.json`），复用 SUAVE 采样得到的各类训练集；`evaluate_transfer_baselines` 则分别缓存 `tstr_results_{label}.joblib` 与 `trtr_results_{label}.joblib`，避免重复训练下游基线。脚本模式下默认强制重算（`FORCE_UPDATE_SYNTHETIC_DATA=1`、`FORCE_UPDATE_TSTR_MODEL=1`、`FORCE_UPDATE_TRTR_MODEL=1`），交互模式默认复用缓存（上述变量默认为 `0`）。如需刷新单独阶段，可将 `FORCE_UPDATE_SYNTHETIC_DATA` 置为 `1` 以重建 TSV 并自动失效旧的 TSTR/TRTR 结果，或分别设置 `FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL` 以重新拟合下游模型。
+
 5. 运行结束后会额外导出 bootstrap 抽样记录，并统一写入 `09_tstr_trtr_transfer/TSTR_TRTR_eval.xlsx`：`summary` 汇总各模型在所有训练方案下的 AUC/accuracy 与置信区间，`metrics` 保留长表结构以便绘图，`bootstrap` 存放逐次抽样的原始指标，`tstr_summary`/`trtr_summary` 按需拆分合成与真实训练集的结果，`bootstrap_overall` 与 `bootstrap_per_class` 则保留整体与分层自助采样明细。
 6. `plot_transfer_metric_boxes` 会针对每个评估数据集绘制箱线图：横轴按模型分组，箱体颜色区分训练数据来源，当仅评估单个模型时横轴改为数据集标签。箱线图基于 bootstrap 样本的分布，更直观地展示生成数据对下游性能的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
 
@@ -155,3 +156,31 @@
 2. 使用 `dataframe_to_markdown`、`render_dataframe` 与 `write_results_to_excel_unique` 汇总评估结果，最终通过 `build_prediction_dataframe` 与 `evaluate_predictions` 生成 `evaluation_summary_{label}.md` 技术报告草稿，并在 `06_evaluation_metrics/` 同步保存 Excel/Markdown 版本。
 3. 在归档目录保留所有原始数据引用、模型权重（`.pt`/`.joblib`）、插补缓存、图表、Markdown 报告及运行日志，以支持第三方审计与论文附录撰写。
 4. 在潜空间解释章节调用 `suave.plots.compute_feature_latent_correlation` 计算潜空间与临床特征（含目标标签）的 Spearman 相关性，依托 statsmodels 进行 FDR/Bonferroni/Holm 校正。将 `compute_feature_latent_correlation` 的结果导出为相关系数/`p` 值 CSV，并以 `plot_feature_latent_outcome_path_graph` 绘制特征→潜变量→结局的多层次路径图（显著性水平 0.05，临床特征按定义的 group/color 映射着色），作为潜空间解释章节的核心可视化。`plot_feature_latent_correlation_heatmap(..., value="correlation")`、`plot_feature_latent_correlation_heatmap(..., value="pvalue")` 与 `plot_feature_latent_correlation_bubble` 作为补充结果，仍按 VAR_GROUP_DICT 分组生成热图与气泡图，用于量化隐空间与关键临床变量的相关性分布。
+
+## 缓存机制
+
+### 缓存判定信息
+
+- `07_bootstrap_analysis/`：针对 SUAVE 主模型与临床基线的分类/校准评估，`evaluate_predictions` 会按“模型 × 数据集”落盘 `*_bootstrap.joblib`，其中包含 `overall`、`per_class` 等 DataFrame。命中缓存时直接读取；若设置 `FORCE_UPDATE_BOOTSTRAP=True` 则忽略缓存重新计算。
+- `09_tstr_trtr_transfer/training_sets/`：`build_tstr_training_sets` 保存 `manifest_{label}.json` 与对应的 TSV，manifest 内记录特征列、生成时间与 SUAVE manifest 的 SHA256。脚本会校验 manifest 与当前配置/生成器签名一致，若 `FORCE_UPDATE_SYNTHETIC_DATA=True` 或签名不匹配则重建训练集并刷新后续缓存。
+- `09_tstr_trtr_transfer/tstr_results_{label}.joblib`、`trtr_results_{label}.joblib`：存储真实/合成训练下的基线模型预测表与指标。缓存载荷包含 `training_manifest_signature` 与当前 SUAVE manifest 的 SHA256（`data_generator_signature`），命中缓存需与最新训练集一致；可通过 `FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL` 控制重新拟合。
+- `09_tstr_trtr_transfer/bootstrap_cache/`：`evaluate_transfer_baselines` 针对每个“训练方案 × 评估集 × 模型”单独缓存 bootstrap 明细。校验字段包含 `training_manifest_signature`、`data_generator_signature`、`prediction_signature`（基于概率与预测的哈希）及 `bootstrap_n`。任一信息变化或显式启用 `FORCE_UPDATE_TSTR_BOOTSTRAP` / `FORCE_UPDATE_TRTR_BOOTSTRAP` 时会重新执行 bootstrap。
+- `10_distribution_shift/`：`classifier_two_sample_test` 与分布漂移统计分别写入 `c2st_metrics_{label}.joblib` 与 `distribution_metrics_{label}.joblib`。缓存载荷记录特征列顺序、模型顺序及相关指标，若检测到配置变化或设置了 `FORCE_UPDATE_C2ST_MODEL`、`FORCE_UPDATE_DISTRIBUTION_SHIFT`，则重新计算。
+- SUAVE 模型目录（`04_suave_training/`）与 Optuna artefact：默认读取已有的 `suave_best_{label}.pt` 与 manifest；当设置 `FORCE_UPDATE_SUAVE=True` 且 Optuna 产物缺失时，会跳过缓存并强制重新训练模型。
+
+### FORCE_UPDATE 参数对照
+
+| 参数 | 控制内容与关联缓存 |
+| --- | --- |
+| `FORCE_UPDATE_BENCHMARK_MODEL` | 重新训练并覆盖 `08_baseline_models/` 下的 `baseline_estimators_{label}.joblib` 及基线指标表，避免沿用旧的临床/传统模型。 |
+| `FORCE_UPDATE_BOOTSTRAP` | 忽略 `07_bootstrap_analysis/` 中的 `*_bootstrap.joblib`，强制重新计算 SUAVE 与基线的分类/校准 bootstrap 指标。 |
+| `FORCE_UPDATE_SYNTHETIC_DATA` | 重建 `09_tstr_trtr_transfer/training_sets/` 的 TSV 与 manifest，同步失效依赖该签名的 TSTR/TRTR 结果与 bootstrap 缓存。 |
+| `FORCE_UPDATE_TSTR_MODEL` | 重新拟合并写入 `tstr_results_{label}.joblib`，常用于生成器或训练集更新后刷新合成数据基线。 |
+| `FORCE_UPDATE_TRTR_MODEL` | 重新拟合并写入 `trtr_results_{label}.joblib`，确保真实数据训练的对照基线与最新特征/标签一致。 |
+| `FORCE_UPDATE_TSTR_BOOTSTRAP` | 对 TSTR 结果禁用 `bootstrap_cache/` 复用，依据最新预测重新计算并缓存 bootstrap 明细。 |
+| `FORCE_UPDATE_TRTR_BOOTSTRAP` | 对 TRTR 结果禁用 `bootstrap_cache/` 复用，确保真实训练的 bootstrap 指标与当前预测一致。 |
+| `FORCE_UPDATE_C2ST_MODEL` | 忽略 `c2st_metrics_{label}.joblib`，重新训练 C2ST 分类器并生成分布漂移 Excel。 |
+| `FORCE_UPDATE_DISTRIBUTION_SHIFT` | 强制刷新 `distribution_metrics_{label}.joblib` 及相关 Excel，重新评估全局与逐特征分布差异。 |
+| `FORCE_UPDATE_SUAVE` | 在 Optuna 产物缺失或需替换生成器时，指示脚本放弃加载已有 `suave_best_{label}.pt`，触发模型重训。 |
+
+上述参数的默认值由脚本顶部或 `FORCE_UPDATE_FLAG_DEFAULTS` 决定：批处理模式通常将耗时阶段设为 `True` 以确保结果最新，而交互式探索默认复用缓存以缩短迭代时间。根据研究需要调整开关时，请同步记录触发原因与时间以便审计追踪。
