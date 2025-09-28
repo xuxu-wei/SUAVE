@@ -151,7 +151,6 @@
 - **结果解读**：关注真实 vs. 合成训练的指标差异；差距越小，说明生成器迁移价值越高。
 - **输入**：`build_tstr_training_sets` 生成的训练方案、迭代插补特征、基线模型工厂。
 - **输出**：`10_tstr_trtr_transfer/` 下的结果缓存与 Excel/图表。
-- **结构更新**：脚本以 `Data synthesis`、`TSTR/TRTR`、`Distribution shift`、`Privacy` 四个 Markdown 小节串联该阶段，保持执行顺序不变但明确各类缓存与报表的定位。
 - **执行要点**：
   1. 按既定方案构建 `TRTR (real)`、`TSTR`、`TSTR balance`、`TSTR augment`、`TSTR 5x`、`TSTR 5x balance`、`TSTR 10x`、`TSTR 10x balance` 等训练集。
   2. 统一使用 `evaluate_transfer_baselines` 计算 Accuracy、ROC-AUC 及置信区间；默认仅使用 `analysis_config.TSTR_BASELINE_MODELS`（示例脚本为 `analysis_config["tstr_models"]`）列出的经典模型，当列表仅包含 1 个模型时，箱线图的横轴按训练数据集展开，若配置多个模型则横轴切换为模型名称、箱体按数据集着色。
