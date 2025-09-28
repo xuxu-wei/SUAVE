@@ -107,6 +107,10 @@ def test_compute_feature_latent_correlation_and_bubble(tmp_path):
     for extension in (".png", ".pdf"):
         assert output_base.with_suffix(extension).exists()
 
+    legend = ax.get_legend()
+    assert legend is not None
+    assert legend.get_title().get_text() == "$-\\log_{10}(p)$"
+
     plt.close(fig)
 
 
@@ -150,6 +154,10 @@ def test_plot_feature_latent_correlation_bubble_default_title():
     assert ax.get_yticklabels()[0].get_text() == "Feature X"
     assert fig.axes[0] is ax
 
+    legend = ax.get_legend()
+    assert legend is not None
+    assert legend.get_title().get_text() == "$-\\log_{10}(FDR)$"
+
     plt.close(fig)
 
 
@@ -179,13 +187,27 @@ def test_plot_feature_latent_correlation_heatmap_switch():
         p_values=pvals,
         title="P-values",
     )
+    fig_fdr, ax_fdr = plot_feature_latent_correlation_heatmap(
+        DummyModel(),
+        X,
+        value="pvalue",
+        p_adjust="fdr_bh",
+        correlations=corr,
+        p_values=pvals,
+        title="FDR",
+    )
 
     assert ax_corr.get_title() == "Correlation"
     assert ax_p.get_title() == "P-values"
     assert ax_corr.get_xticklabels()[0].get_text() == "$z_{1}$"
 
+    assert fig_corr.axes[-1].get_xlabel() == "Spearman correlation"
+    assert fig_p.axes[-1].get_xlabel() == "$-\\log_{10}(p)$"
+    assert fig_fdr.axes[-1].get_xlabel() == "$-\\log_{10}(FDR)$"
+
     plt.close(fig_corr)
     plt.close(fig_p)
+    plt.close(fig_fdr)
 
 
 def test_plot_feature_latent_correlation_requires_pair():

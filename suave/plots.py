@@ -30,6 +30,14 @@ from statsmodels.stats.multitest import multipletests
 _ISSUE_ACTIONS = {"ignore", "warn", "error"}
 
 
+def _is_fdr_adjustment(method: str | None) -> bool:
+    """Return ``True`` when ``method`` corresponds to an FDR correction."""
+
+    if method is None:
+        return False
+    return method.lower().startswith("fdr")
+
+
 def _handle_data_issue(action: str, message: str) -> None:
     """Dispatch *message* according to the configured issue *action*."""
 
@@ -1133,6 +1141,7 @@ def plot_feature_latent_correlation_bubble(
 
     corr_matrix = corr_df.to_numpy(dtype=float)
     pval_matrix = pval_df.to_numpy(dtype=float)
+    use_fdr_label = _is_fdr_adjustment(p_adjust)
 
     n_features, n_latents = corr_df.shape
     feature_labels = [
@@ -1270,7 +1279,9 @@ def plot_feature_latent_correlation_bubble(
             for size in legend_sizes
         ]
         legend_labels = [f"{value:.2f}" for value in legend_values]
-        legend_title = "$-\\log_{10}(FDR)$" if p_adjust else "$-\\log_{10}(p)$"
+        legend_title = (
+            "$-\\log_{10}(FDR)$" if use_fdr_label else "$-\\log_{10}(p)$"
+        )
         ax.legend(
             handles,
             legend_labels,
@@ -1386,6 +1397,7 @@ def plot_feature_latent_correlation_heatmap(
 
     corr_matrix = corr_df.to_numpy(dtype=float)
     pval_matrix = pval_df.to_numpy(dtype=float)
+    use_fdr_label = _is_fdr_adjustment(p_adjust)
     n_features, n_latents = corr_df.shape
     feature_labels = [
         _resolve_variable_label(name, variable_name) for name in corr_df.index
@@ -1400,8 +1412,35 @@ def plot_feature_latent_correlation_heatmap(
     fig.subplots_adjust(left=left_margin, bottom=0.28, right=0.98)
 
     cmap = plt.cm.RdBu_r
-    norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
-    ax.imshow(corr_matrix, cmap=cmap, norm=norm, aspect="equal")
+    if value_lower == "correlation":
+        color_matrix = corr_matrix
+        norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
+        colorbar_label = f"{method.title()} correlation"
+    else:
+        clipped = np.clip(pval_matrix, np.finfo(float).tiny, 1.0)
+        with np.errstate(divide="ignore"):
+            neg_log = -np.log10(clipped)
+        color_matrix = np.where(np.isfinite(neg_log), neg_log, np.nan)
+        finite_values = color_matrix[np.isfinite(color_matrix)]
+        if finite_values.size:
+            vmin = float(np.nanmin(finite_values))
+            vmax = float(np.nanmax(finite_values))
+        else:
+            vmin = 0.0
+            vmax = 0.0
+        if not math.isfinite(vmin):
+            vmin = 0.0
+        if not math.isfinite(vmax):
+            vmax = 0.0
+        if math.isclose(vmin, vmax):
+            if vmin <= 0.0:
+                vmin, vmax = 0.0, 1.0
+            else:
+                vmin = max(0.0, vmin - 0.5)
+                vmax = vmin + 1.0
+        norm = Normalize(vmin=vmin, vmax=vmax)
+        colorbar_label = "$-\\log_{10}(FDR)$" if use_fdr_label else "$-\\log_{10}(p)$"
+    ax.imshow(color_matrix, cmap=cmap, norm=norm, aspect="equal")
 
     ax.set_xticks(np.arange(n_latents))
     ax.set_xticklabels(latent_labels)
@@ -1434,16 +1473,16 @@ def plot_feature_latent_correlation_heatmap(
 
     for row_index in range(n_features):
         for col_index in range(n_latents):
-            corr_value = corr_matrix[row_index, col_index]
-            if not np.isfinite(corr_value):
+            color_value = color_matrix[row_index, col_index]
+            if not np.isfinite(color_value):
                 continue
             if value_lower == "correlation":
-                text = f"{corr_value:.2f}"
+                text = f"{corr_matrix[row_index, col_index]:.2f}"
             else:
                 text = _format_p_value(pval_matrix[row_index, col_index])
                 if not text:
                     continue
-            rgba = cmap(norm(corr_value))
+            rgba = cmap(norm(color_value))
             luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
             text_colour = "white" if luminance < 0.5 else "black"
             ax.text(
@@ -1465,7 +1504,7 @@ def plot_feature_latent_correlation_heatmap(
         fraction=0.08,
         pad=0.12,
     )
-    cbar.set_label(f"{method.title()} correlation", labelpad=10)
+    cbar.set_label(colorbar_label, labelpad=10)
     cbar.ax.xaxis.set_label_position("bottom")
 
     ax.set_title(title or "")
