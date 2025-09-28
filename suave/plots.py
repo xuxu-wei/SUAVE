@@ -21,6 +21,7 @@ from matplotlib.colors import (
 )
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch
+from matplotlib.path import Path as BezierPath
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -1547,12 +1548,12 @@ def plot_multilayer_path_graph(
     layer_spacing: float = 2.6,
     node_spacing: float = 1.4,
     node_size: float = 600.0,
-    edge_cmap: str | Colormap = "coolwarm",
+    edge_cmap: str | Colormap = plt.cm.RdBu_r,
     edge_color_normalization: str = "minmax",
     edge_label_position: str = "center",
     edge_label_offset: float = 0.1,
     node_outline_color: str = "white",
-    node_outline_width: float = 1.2,
+    node_outline_width: float = 0.0,
     ax: Axes | None = None,
     figure_kwargs: Mapping[str, float] | None = None,
     duplicate_edge_action: str = "warn",
@@ -1592,7 +1593,7 @@ def plot_multilayer_path_graph(
         Vertical spacing between nodes within the same layer.
     node_size : float, default 600.0
         Area passed to :func:`matplotlib.axes.Axes.scatter` when drawing nodes.
-    edge_cmap : str or matplotlib.colors.Colormap, default ``"coolwarm"``
+    edge_cmap : str or matplotlib.colors.Colormap, default ``plt.cm.RdBu_r``
         Colour map applied to ``weight_edge_color``.
     edge_color_normalization : {"minmax", "symmetric"}, default ``"minmax"``
         Strategy for normalising edge colours. ``"symmetric"`` centres the
@@ -1603,7 +1604,7 @@ def plot_multilayer_path_graph(
         Distance applied orthogonally to the edge direction when placing labels.
     node_outline_color : str, default ``"white"``
         Outline colour applied to all nodes for contrast.
-    node_outline_width : float, default 1.2
+    node_outline_width : float, default 0.0
         Line width of the node outline stroke.
     ax : matplotlib.axes.Axes, optional
         Existing axes used for drawing. When omitted, a new figure and axes are
@@ -1853,6 +1854,18 @@ def plot_multilayer_path_graph(
 
     # Resolve node colours according to the priority rules.
     layer_values = np.sort(nodes_proc["layer"].unique())
+    layer_counts = nodes_proc.groupby("layer").size()
+    max_nodes_per_layer = int(layer_counts.max()) if not layer_counts.empty else 0
+
+    # Adapt spacing and marker size heuristically to reduce overlap when the caller
+    # relies on default parameters. The adjustments expand vertical distances for
+    # dense layers and shrink marker areas when required while remaining
+    # overrideable through the function arguments.
+    if max_nodes_per_layer > 1:
+        node_spacing = max(node_spacing, 1.0 + 0.25 * math.log1p(max_nodes_per_layer))
+        if node_size > 0:
+            scale = min(1.0, 6.0 / max_nodes_per_layer)
+            node_size *= scale
     if layer_color_mapping is not None:
         layer_palette = dict(layer_color_mapping)
     else:
@@ -1913,8 +1926,9 @@ def plot_multilayer_path_graph(
             positions[node_row["id"]] = (x_coord, y_coord)
 
     if ax is None:
-        width = max(6.0, layer_spacing * max(len(layer_values) - 1, 1) + 3.0)
-        height = max(4.0, node_spacing * max(nodes_proc.groupby("layer").size().max(), 1) + 2.5)
+        layer_count = max(len(layer_values), 1)
+        width = max(6.0, layer_spacing * (layer_count + 0.5))
+        height = max(4.5, node_spacing * max(max_nodes_per_layer, 1) + 2.5)
         fig_kwargs = {"figsize": (width, height)}
         if figure_kwargs:
             fig_kwargs.update(figure_kwargs)
@@ -1933,13 +1947,14 @@ def plot_multilayer_path_graph(
     )
 
     # Annotate node labels.
+    label_offset_x = max(layer_spacing * 0.12, 0.4)
     for node_id, (x_coord, y_coord) in positions.items():
         ax.text(
-            x_coord,
-            y_coord - (node_spacing * 0.15),
+            x_coord - label_offset_x,
+            y_coord,
             str(node_labels.loc[node_id]),
-            ha="center",
-            va="top",
+            ha="right",
+            va="center",
             fontsize=11,
             zorder=4,
         )
@@ -1948,6 +1963,52 @@ def plot_multilayer_path_graph(
     if label_position not in {"source", "center", "target"}:
         raise ValueError("edge_label_position must be one of {'source', 'center', 'target'}")
     position_fraction = {"source": 0.2, "center": 0.5, "target": 0.8}[label_position]
+
+    def _bezier_point(
+        t: float,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+        p3: tuple[float, float],
+    ) -> tuple[float, float]:
+        """Evaluate a cubic Bézier curve at fraction ``t``."""
+
+        mt = 1.0 - t
+        x_val = (
+            (mt ** 3) * p0[0]
+            + 3 * (mt ** 2) * t * p1[0]
+            + 3 * mt * (t ** 2) * p2[0]
+            + (t ** 3) * p3[0]
+        )
+        y_val = (
+            (mt ** 3) * p0[1]
+            + 3 * (mt ** 2) * t * p1[1]
+            + 3 * mt * (t ** 2) * p2[1]
+            + (t ** 3) * p3[1]
+        )
+        return (x_val, y_val)
+
+    def _bezier_tangent(
+        t: float,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+        p3: tuple[float, float],
+    ) -> tuple[float, float]:
+        """Return the tangent vector of a cubic Bézier curve at ``t``."""
+
+        mt = 1.0 - t
+        dx_dt = (
+            3 * (mt ** 2) * (p1[0] - p0[0])
+            + 6 * mt * t * (p2[0] - p1[0])
+            + 3 * (t ** 2) * (p3[0] - p2[0])
+        )
+        dy_dt = (
+            3 * (mt ** 2) * (p1[1] - p0[1])
+            + 6 * mt * t * (p2[1] - p1[1])
+            + 3 * (t ** 2) * (p3[1] - p2[1])
+        )
+        return (dx_dt, dy_dt)
 
     for index, edge_row in edges_proc.iterrows():
         start = positions[edge_row["source"]]
@@ -1958,11 +2019,25 @@ def plot_multilayer_path_graph(
         if distance == 0.0:
             continue  # Already filtered self-loops; safeguard for degenerate positions.
 
-        curvature = 0.2 * np.sign(dx) if dx != 0 else 0.3 * np.sign(dy or 1.0)
+        curvature = 0.25 if dx >= 0 else -0.25
+        normal = np.array([-dy, dx], dtype=float)
+        normal_norm = np.linalg.norm(normal)
+        if normal_norm > 1e-9:
+            normal = normal / normal_norm
+        else:
+            normal = np.array([0.0, 1.0])
+        control_offset = curvature * distance
+        control_shift = normal * control_offset
+        control1 = (start[0] + dx * 0.25 + control_shift[0], start[1] + dy * 0.25 + control_shift[1])
+        control2 = (start[0] + dx * 0.75 + control_shift[0], start[1] + dy * 0.75 + control_shift[1])
+
+        bezier_path = BezierPath(
+            [start, control1, control2, end],
+            [BezierPath.MOVETO, BezierPath.CURVE4, BezierPath.CURVE4, BezierPath.CURVE4],
+        )
+
         patch = FancyArrowPatch(
-            start,
-            end,
-            connectionstyle=f"arc3,rad={curvature}",
+            path=bezier_path,
             arrowstyle="-|>",
             mutation_scale=12,
             linewidth=widths[index],
@@ -1975,13 +2050,13 @@ def plot_multilayer_path_graph(
         label_value = edge_row.get("label")
         if isinstance(label_value, str) and label_value:
             t = position_fraction
-            label_x = start[0] + t * dx
-            label_y = start[1] + t * dy
-            if distance > 0:
-                offset_scale = edge_label_offset
-                nx, ny = -dy / distance, dx / distance
-                label_x += offset_scale * nx
-                label_y += offset_scale * ny
+            label_x, label_y = _bezier_point(t, start, control1, control2, end)
+            tangent = _bezier_tangent(t, start, control1, control2, end)
+            tangent_norm = float(np.hypot(*tangent))
+            if tangent_norm > 0:
+                nx, ny = -tangent[1] / tangent_norm, tangent[0] / tangent_norm
+                label_x += edge_label_offset * nx
+                label_y += edge_label_offset * ny
             ax.text(
                 label_x,
                 label_y,
@@ -2007,6 +2082,10 @@ def plot_multilayer_path_graph(
         cb_kwargs.update(colorbar_kwargs)
     colorbar = fig.colorbar(sm, ax=ax, **cb_kwargs)
     colorbar.set_label(colorbar_title, fontsize=11)
+    if colorbar.outline is not None:
+        colorbar.outline.set_linewidth(0)
+    for spine in colorbar.ax.spines.values():
+        spine.set_visible(False)
 
     # Build group legend using the resolved colours.
     group_handles: list[Line2D] = []
@@ -2015,12 +2094,42 @@ def plot_multilayer_path_graph(
         group_handles.append(handle)
 
     if group_handles:
+        fig_width, fig_height = fig.get_size_inches()
+        axis_bbox = ax.get_position()
+        axis_width = axis_bbox.width * fig_width
+        axis_height = axis_bbox.height * fig_height
+        horizontal_margin = fig_width - axis_width
+        vertical_margin = fig_height - axis_height
+
+        legend_side = "right" if horizontal_margin >= vertical_margin else "bottom"
+
+        if legend_side == "right":
+            approx_entry_height = 0.35
+            max_rows = max(1, int(round(axis_height / approx_entry_height)))
+            ncol = max(1, min(len(group_handles), math.ceil(len(group_handles) / max_rows)))
+            legend_loc = "center left"
+            legend_anchor = (1.02, 0.5)
+        else:
+            approx_entry_width = 1.0
+            max_cols = max(1, int(round(axis_width / approx_entry_width)))
+            ncol = max(1, min(len(group_handles), max_cols))
+            row_count = math.ceil(len(group_handles) / ncol)
+            while row_count > 3 and ncol < len(group_handles):
+                ncol += 1
+                row_count = math.ceil(len(group_handles) / ncol)
+            legend_loc = "upper center"
+            legend_anchor = (0.5, -0.14)
+
         group_legend = ax.legend(
             handles=group_handles,
             title="Groups",
-            loc="upper left",
-            bbox_to_anchor=(1.02, 1.0),
+            loc=legend_loc,
+            bbox_to_anchor=legend_anchor,
             borderaxespad=0.0,
+            frameon=False,
+            ncol=ncol,
+            columnspacing=0.8,
+            handletextpad=0.8,
         )
         ax.add_artist(group_legend)
 
@@ -2090,7 +2199,7 @@ def plot_feature_latent_outcome_path_graph(
     edge_size_legend_title: str | None = "Correlation magnitude",
     edge_size_legend_values: Sequence[float] | None = None,
     colorbar_kwargs: Mapping[str, float] | None = None,
-    edge_cmap: str | Colormap = "coolwarm",
+    edge_cmap: str | Colormap = plt.cm.RdBu_r,
     **path_kwargs,
 ) -> tuple[plt.Figure, Axes]:
     """Render a feature → latent → outcome path graph from correlations.
@@ -2168,7 +2277,7 @@ def plot_feature_latent_outcome_path_graph(
         Explicit correlation values highlighted in the edge-width legend.
     colorbar_kwargs : mapping, optional
         Extra keyword arguments for :meth:`matplotlib.figure.Figure.colorbar`.
-    edge_cmap : str or matplotlib.colors.Colormap, default ``"coolwarm"``
+    edge_cmap : str or matplotlib.colors.Colormap, default ``plt.cm.RdBu_r``
         Colormap applied to correlation values.
     **path_kwargs
         Additional keyword arguments forwarded to

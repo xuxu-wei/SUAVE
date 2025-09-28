@@ -1573,11 +1573,11 @@ overall_path_fig, _overall_path_ax = plot_feature_latent_outcome_path_graph(
     edge_label_top_k=15,
     figure_kwargs={"figsize": (14, 8)},
 )
+for extension in (".png", ".jpg", ".svg", ".pdf"):
+    overall_path_fig.savefig(
+        overall_path_graph_base.with_suffix(extension), dpi=300, bbox_inches="tight"
+    )
 overall_path_graph_path = overall_path_graph_base.with_suffix(".png")
-overall_path_fig.savefig(overall_path_graph_path, dpi=300, bbox_inches="tight")
-overall_path_fig.savefig(
-    overall_path_graph_base.with_suffix(".pdf"), bbox_inches="tight"
-)
 plt.close(overall_path_fig)
 
 overall_group_label = PATH_GRAPH_NODE_GROUPS.get(TARGET_LABEL, TARGET_LABEL)
