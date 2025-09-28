@@ -149,8 +149,6 @@ print(train_labels.head())</code></pre>
 **输入**：使用 `build_tstr_training_sets` 生成的训练集缓存、`02_feature_engineering/` 中的迭代插补特征（`iterative_imputed_{dataset}_{label}.csv`）以及 `INCLUDE_SUAVE_TRANSFER` 环境变量。
 **输出**：在 `10_tstr_trtr_transfer/` 缓存 `tstr_trtr_results_{label}.joblib`、`TSTR_TRTR_eval.xlsx` 与可视化结果。
 
-> **结构更新**：脚本现将合成数据阶段拆分为四个小节，分别为 `Data synthesis`（生成并签名缓存 TSTR/TRTR 训练集）、`TSTR/TRTR`（迁移学习评估与 bootstrap 聚合）、`Distribution shift`（C2ST/MMD/能量距离/互信息对比）以及 `Privacy`（成员推断基线）。执行顺序不变，但每个阶段的缓存与报表位置在脚本中拥有独立标题，便于调试与审计定位。
-
 1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR`、`TSTR balance`、`TSTR augment`、`TSTR 5x`、`TSTR 5x balance`、`TSTR 10x` 与 `TSTR 10x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
 2. 通过 `make_baseline_model_factories` 注册 `Logistic regression`、`Random forest` 与 `GBDT` 三类下游分类器，对每个训练方案分别拟合并在 `evaluate_transfer_baselines` 中统计 `accuracy` 与 `roc_auc`（含置信区间）。
 3. 若需将 SUAVE 纳入迁移评估，可在运行脚本前设置 `INCLUDE_SUAVE_TRANSFER=1`，前提是 Optuna 已产出可用的最优超参；默认行为仅评估 `analysis_config["tstr_models"]`（模板脚本同名配置项）列出的传统基线，以避免在 TSTR/TRTR 分析阶段重复拟合 SUAVE。配置项允许用户通过元组挑选参与 TSTR 的模型；当仅包含 1 个模型时，箱线图横轴展示训练数据集，若配置多个模型则横轴切换为模型名称、箱体按数据集着色。
