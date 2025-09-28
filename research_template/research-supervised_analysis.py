@@ -1202,21 +1202,10 @@ for model_name, dataset_tables in model_prediction_frames.items():
     model_warning_frames: List[pd.DataFrame] = []
 
     for dataset_name, prediction_df in dataset_tables.items():
-        results = evaluate_predictions(
-            prediction_df,
-            label_col="label",
-            pred_col="y_pred",
-            positive_label=positive_label_name,
-            bootstrap_n=1000,
-            random_state=RANDOM_STATE,
-            show_progress=True,
-            progress_desc=f"Bootstrap | {model_name} @ {dataset_name}",
-        )
-        model_results[dataset_name] = results
         dataset_slug = _sanitise_path_component(dataset_name.lower())
         dataset_cache_path = model_dir / f"{dataset_slug}_bootstrap.joblib"
 
-        cached_results: Optional[Dict[str, pd.DataFrame]] = None
+        results: Optional[Dict[str, pd.DataFrame]] = None
         if dataset_cache_path.exists() and not FORCE_UPDATE_BOOTSTRAP:
             try:
                 potential_results = joblib.load(dataset_cache_path)
@@ -1231,7 +1220,7 @@ for model_name, dataset_tables in model_prediction_frames.items():
                 if isinstance(potential_results, dict) and required_keys.issubset(
                     potential_results.keys()
                 ):
-                    cached_results = potential_results
+                    results = potential_results
                     print(
                         "Loaded cached bootstrap metrics for",
                         f"{model_name} @ {dataset_name}",
@@ -1242,7 +1231,7 @@ for model_name, dataset_tables in model_prediction_frames.items():
                         f"{model_name} @ {dataset_name} due to missing keys.",
                     )
 
-        if cached_results is None:
+        if results is None:
             results = evaluate_predictions(
                 prediction_df,
                 label_col="label",
@@ -1255,8 +1244,6 @@ for model_name, dataset_tables in model_prediction_frames.items():
             )
             joblib.dump(results, dataset_cache_path)
             print("Saved bootstrap metrics to", dataset_cache_path)
-        else:
-            results = cached_results
 
         model_results[dataset_name] = results
 

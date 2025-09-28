@@ -204,7 +204,7 @@
 
 ### 缓存判定信息
 
-- `07_bootstrap_analysis/`：主分析脚本会将每个“模型 × 数据集”的 bootstrap 结果保存为 `*_bootstrap.joblib`，其中包含总体/分层指标与抽样记录。命中缓存时直接读取；若 `FORCE_UPDATE_BOOTSTRAP=True` 则重新计算。
+- `07_bootstrap_analysis/`：主分析脚本会将每个“模型 × 数据集”的 bootstrap 结果保存为 `*_bootstrap.joblib`，其中包含总体/分层指标与抽样记录。命中缓存时直接读取，避免重复展示 bootstrap 进度条；若 `FORCE_UPDATE_BOOTSTRAP=True` 则重新计算。
 - `10_tstr_trtr_transfer/training_sets/`：`build_tstr_training_sets` 会生成 TSV 与 `manifest_{label}.json`，manifest 记录特征列、生成时间以及 SUAVE manifest 的 SHA256。若签名与当前配置不一致或启用了 `FORCE_UPDATE_SYNTHETIC_DATA`，训练集会被重建，后续依赖同一签名的缓存也会失效。
 - `10_tstr_trtr_transfer/tstr_results_{label}.joblib`、`trtr_results_{label}.joblib`：存储真实/合成训练下的基线预测结果与指标，并携带 `training_manifest_signature`、`data_generator_signature` 等元数据。只有当签名匹配且未启用 `FORCE_UPDATE_TSTR_MODEL` / `FORCE_UPDATE_TRTR_MODEL` 时才会复用。
 - `10_tstr_trtr_transfer/bootstrap_cache/`：`evaluate_transfer_baselines` 在完成一次 bootstrap 后立即写入缓存，校验字段包括 `training_manifest_signature`、`data_generator_signature`、`prediction_signature` 与 `bootstrap_n`。当预测发生变化或启用 `FORCE_UPDATE_TSTR_BOOTSTRAP`、`FORCE_UPDATE_TRTR_BOOTSTRAP` 时会重新采样。
