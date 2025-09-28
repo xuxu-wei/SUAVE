@@ -474,7 +474,7 @@ baseline_models: Dict[str, Pipeline] = {
         [
             (
                 "classifier",
-                GradientBoostingClassifier(random_state=RANDOM_STATE),
+                GradientBoostingClassifier(n_estimators=50, random_state=RANDOM_STATE),
             ),
         ]
     ),
@@ -482,7 +482,7 @@ baseline_models: Dict[str, Pipeline] = {
         [
             (
                 "classifier",
-                RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE),
+                RandomForestClassifier(random_state=RANDOM_STATE),
             ),
         ]
     ),
