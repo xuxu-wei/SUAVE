@@ -24,11 +24,28 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from sklearn.model_selection import train_test_split
 
-EXAMPLES_DIR = Path(__file__).resolve().parent
-if not EXAMPLES_DIR.exists():
+def _resolve_examples_dir() -> Path:
+    """Resolve the examples directory for both scripts and notebooks."""
+
+    candidates = []
+    try:
+        candidates.append(Path(__file__).resolve().parent)
+    except NameError:
+        # ``__file__`` is not defined inside notebooks executed via Jupyter.
+        pass
+
+    cwd = Path.cwd()
+    candidates.extend([cwd, cwd / "examples"])
+
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "mimic_mortality_utils.py").exists():
+            return candidate
+
     raise RuntimeError(
-        "Run this script from the repository so the 'examples' directory is available."
+        "Run this notebook from the repository root so 'examples' is available."
     )
+
+EXAMPLES_DIR = _resolve_examples_dir()
 if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
