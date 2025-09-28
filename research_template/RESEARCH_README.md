@@ -138,7 +138,7 @@
 - **输入**：`VAR_GROUP_DICT` 定义的特征分组、训练集潜空间嵌入、`evaluation_datasets` 缓存。
 - **输出**：`09_interpretation/` 下的 `latent_clinical_correlation_{label}` 系列 CSV/图像，以及 `latent_{label}.png` 潜空间投影。
 - **执行要点**：
-  1. 使用 `compute_feature_latent_correlation` 生成整体相关矩阵与 `p` 值，同时导出泡泡图、相关性热图、`p` 值热图与路径图。
+  1. 使用 `compute_feature_latent_correlation` 生成整体相关矩阵与 `p` 值，泡泡图/热图统一以相关系数着色（`plt.cm.RdBu_r`，0 为色谱中点），气泡大小按 `-log10(p)` 缩放并隐藏 `p≥0.1` 的关联，`p` 值热图在保持颜色的同时根据数值自动选择精度（0.049–0.051 与 0.001–0.01 区间保留三位小数，小于 0.001 显示 `<0.001`，大于 0.99 显示 `>0.99`）。轴标签继承 `PATH_GRAPH_NODE_DEFINITIONS` 的中文/LaTeX 标注，潜变量刻度渲染为 `$z_{n}$` 并水平放置，色条位于图像下方；所有图像以 PNG/JPG/SVG/PDF 四种格式写入 `09_interpretation/`。
   2. 依照 `VAR_GROUP_DICT` 分组重复相关性分析，若特征缺失脚本会打印 `Skipping unavailable variables` 以提醒补齐或记录。
   3. 调用 `plot_latent_space` 比较训练、验证、测试及外部验证集的潜空间分布，图像保存在 `latent_{label}.png`。
 
@@ -152,6 +152,7 @@
   2. 统一使用 `evaluate_transfer_baselines` 计算 Accuracy、ROC-AUC 及置信区间；默认仅使用 `analysis_config.TSTR_BASELINE_MODELS`（示例脚本为 `analysis_config["tstr_models"]`）列出的经典模型，当列表仅包含 1 个模型时，箱线图的横轴按训练数据集展开，若配置多个模型则横轴切换为模型名称、箱体按数据集着色。
   3. `plot_transfer_metric_boxes` 按 `analysis_config.TSTR_METRIC_LABELS` 设置纵轴标签，默认隐藏离群点并启用 0.1/0.05 的主次刻度；`plot_transfer_metric_bars` 额外绘制 Accuracy/AUROC 无误差棒条形图（纵轴固定 (0.5, 1)），同时输出 ΔAccuracy/ΔAUROC 箱线图便于对比。
   4. 需要纳入 SUAVE 迁移评估时，确保已有最优 Trial 并设置 `INCLUDE_SUAVE_TRANSFER=1`。
+  5. 所有 TSTR/TRTR 图表默认沿用当前 Seaborn 主题的调色板；如需自定义配色，可在 `analysis_config.TRAINING_COLOR_PALETTE`（示例脚本为 `analysis_config["training_color_palette"]`）传入调色板名称或颜色序列，以保持不同环境下的颜色一致性。
 
 ### 11. 合成数据分布漂移分析
 - **目的**：量化生成数据与真实数据的分布差异，定位潜在失真。
@@ -345,7 +346,7 @@ print(manifest.keys())
 payload = joblib.load(output_root / "01_data_and_schema" / f"evaluation_datasets_{label}.joblib")
 print(payload["datasets"].keys())
 </code></pre> |
-| 9. 潜空间相关性与解释 | 特征-预测目标-潜空间相关性气泡图 | 图像 | `plot_feature_latent_correlation_bubble` 绘制的总体相关性气泡图 | 潜变量-特征-结局的相关矩阵与显著性矩阵（`overall_corr`、`overall_pvals`） | `OUTPUT_DIR / "09_interpretation" / f"latent_clinical_correlation_{label}_correlations.csv"`<br>`OUTPUT_DIR / "09_interpretation" / f"latent_clinical_correlation_{label}_pvalues.csv"` | <pre><code class="language-python">from pathlib import Path
+| 9. 潜空间相关性与解释 | 特征-预测目标-潜空间相关性气泡图 | 图像 | `plot_feature_latent_correlation_bubble` 绘制的总体相关性气泡图，颜色表示相关系数（RdBu_r，0 为中点），气泡大小按 `-log10(p)` 缩放并隐藏 `p≥0.1` 的关联，特征/结局标签来自 `PATH_GRAPH_NODE_DEFINITIONS`，潜变量刻度渲染为 `$z_{n}$`；图像输出 PNG/JPG/SVG/PDF 四种格式 | 潜变量-特征-结局的相关矩阵与显著性矩阵（`overall_corr`、`overall_pvals`） | `OUTPUT_DIR / "09_interpretation" / f"latent_clinical_correlation_{label}_correlations.csv"`<br>`OUTPUT_DIR / "09_interpretation" / f"latent_clinical_correlation_{label}_pvalues.csv"` | <pre><code class="language-python">from pathlib import Path
 import pandas as pd
 
 from analysis_config import DEFAULT_ANALYSIS_CONFIG

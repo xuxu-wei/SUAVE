@@ -133,7 +133,7 @@ print(train_labels.head())</code></pre>
 **输入**：训练集潜空间嵌入、`VAR_GROUP_DICT` 中的特征分组映射、评估阶段构建的 `evaluation_datasets` 缓存。
 **输出**：在 `09_interpretation/` 写入 `latent_clinical_correlation_{label}` 前缀的 CSV/图像，以及 `latent_{label}.png` 投影图。
 
-1. 使用 `compute_feature_latent_correlation` 生成整体相关矩阵与 `p` 值，并导出 `*_correlations.csv`、`*_pvalues.csv`，同时生成泡泡图、相关性热图、`p` 值热图与路径图（PNG/PDF）。
+1. 使用 `compute_feature_latent_correlation` 生成整体相关矩阵与 `p` 值，并导出 `*_correlations.csv`、`*_pvalues.csv`。泡泡图与热图的着色统一由相关系数驱动（`plt.cm.RdBu_r`，以 0 为色谱中点），气泡半径按 `-log10(p)` 线性缩放且仅保留 `p<0.1` 的关联，`p` 值热图在颜色保持相关系数的同时采用动态精度显示显著性（0.049–0.051 与 0.001–0.01 区间保留三位小数，小于 0.001 显示 `<0.001`，大于 0.99 显示 `>0.99`）。轴标签继承 `PATH_GRAPH_NODE_DEFINITIONS` 的中文/LaTeX 标注，潜变量刻度使用 `$z_{n}$` 并水平置于刻度正上方，色条统一置于图像下方。所有图像以 PNG、JPG、SVG、PDF 四种格式写入 `09_interpretation/`。
 2. 依照 `VAR_GROUP_DICT` 为每个临床分组重复相关性分析，输出分组级别的 CSV 与配套图像；若特征缺失，脚本会打印 `Skipping unavailable variables` 以提醒补齐或记录。
 3. 调用 `plot_latent_space` 将训练、验证、测试与 eICU 数据集的潜空间嵌入投影到统一图像，留存于 `latent_{label}.png` 以支持质性审查。
 
@@ -152,6 +152,8 @@ print(train_labels.head())</code></pre>
 5. 运行结束后会额外导出 bootstrap 抽样记录，并统一写入 `10_tstr_trtr_transfer/TSTR_TRTR_eval.xlsx`：`summary` 汇总各模型在所有训练方案下的 Accuracy/AUROC 与置信区间，`metrics` 保留长表结构以便绘图，`bootstrap` 集成原始抽样指标与 ΔAccuracy/ΔAUROC 长表（相对 `TRTR (real)` 的差值），`bootstrap_delta` 独立存放差值明细，`tstr_summary`/`trtr_summary` 拆分合成与真实训练集的结果，`bootstrap_overall` 与 `bootstrap_per_class` 则保留整体与分层自助采样明细。
 6. `plot_transfer_metric_boxes` 在生成 Accuracy/AUROC/ΔAccuracy/ΔAUROC 箱线图时会按 `analysis_config["tstr_metric_labels"]`（模板项目改写 `analysis_config.TSTR_METRIC_LABELS`）设置纵轴标签，默认启用 0.1 间隔的主刻度、0.05 的次刻度并隐藏离群点；新增的 `plot_transfer_metric_bars` 则绘制无误差棒的绝对指标条形图，纵轴固定在 (0.5, 1)。
 6. `plot_transfer_metric_boxes` 会针对每个评估数据集绘制箱线图：横轴按模型分组，箱体颜色区分训练数据来源，当仅评估单个模型时横轴改为数据集标签。箱线图基于 bootstrap 样本的分布，更直观地展示生成数据对下游性能的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
+
+7. TSTR/TRTR 可视化默认沿用当前 Seaborn 主题的调色板，脚本会根据训练数据集数量自动循环颜色；若需自定义配色，可在 `analysis_config["training_color_palette"]`（模板项目修改 `analysis_config.TRAINING_COLOR_PALETTE`）传入调色板名称或颜色序列，便于在不同环境中保持一致的图例颜色。
 
 
 ### 10. 合成数据 - 分布漂移分析
@@ -302,7 +304,7 @@ print(manifest.keys())
 payload = joblib.load(Path("examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib"))
 print(payload["datasets"].keys())
 </code></pre> |
-| 9. 潜空间相关性与解释 | 特征-预测目标-潜空间相关性气泡图 | 图像 | `plot_feature_latent_correlation_bubble` 绘制的总体相关性气泡图 | 潜变量-特征-结局的相关矩阵与显著性矩阵（`overall_corr`、`overall_pvals`） | `examples/research_outputs_supervised/09_interpretation/latent_clinical_correlation_in_hospital_mortality_correlations.csv`<br>`examples/research_outputs_supervised/09_interpretation/latent_clinical_correlation_in_hospital_mortality_pvalues.csv` | <pre><code class="language-python">from pathlib import Path
+| 9. 潜空间相关性与解释 | 特征-预测目标-潜空间相关性气泡图 | 图像 | `plot_feature_latent_correlation_bubble` 绘制的总体相关性气泡图，颜色表示相关系数（RdBu_r，0 为中点），气泡大小按 `-log10(p)` 缩放且省略 `p≥0.1` 的关联，标签来源 `PATH_GRAPH_NODE_DEFINITIONS`，潜变量刻度渲染为 `$z_{n}$`；图像输出 PNG/JPG/SVG/PDF 四种格式 | 潜变量-特征-结局的相关矩阵与显著性矩阵（`overall_corr`、`overall_pvals`） | `examples/research_outputs_supervised/09_interpretation/latent_clinical_correlation_in_hospital_mortality_correlations.csv`<br>`examples/research_outputs_supervised/09_interpretation/latent_clinical_correlation_in_hospital_mortality_pvalues.csv` | <pre><code class="language-python">from pathlib import Path
 import pandas as pd
 
 corr_path = Path("examples/research_outputs_supervised/09_interpretation/latent_clinical_correlation_in_hospital_mortality_correlations.csv")

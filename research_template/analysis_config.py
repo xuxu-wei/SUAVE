@@ -152,6 +152,7 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
         "delta_accuracy": "ΔAccuracy",
         "delta_roc_auc": "ΔAUROC",
     },
+    "training_color_palette": None,
 }
 
 # 🟡 Script-mode defaults that force regeneration of cached artefacts。

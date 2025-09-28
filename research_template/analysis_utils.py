@@ -133,6 +133,27 @@ def configure_plot_theme(
 configure_plot_theme()
 
 
+def build_training_color_map(
+    training_order: Sequence[str],
+    *,
+    palette: str | Sequence[str] | None = None,
+) -> Dict[str, str]:
+    """Return a colour mapping for training datasets using Seaborn palettes."""
+
+    if not training_order:
+        return {}
+
+    if palette is None:
+        colors = sns.color_palette(None, n_colors=len(training_order))
+    else:
+        colors = sns.color_palette(palette, n_colors=len(training_order))
+
+    if not colors:
+        colors = sns.color_palette("deep", n_colors=len(training_order))
+
+    return {name: colors[idx % len(colors)] for idx, name in enumerate(training_order)}
+
+
 def read_bool_env_flag(variable: str, default: bool) -> bool:
     """Return a boolean flag parsed from ``variable``.
 
@@ -275,6 +296,7 @@ __all__ = [
     "make_random_forest_pipeline",
     "make_gradient_boosting_pipeline",
     "make_baseline_model_factories",
+    "build_training_color_map",
     "mutual_information_feature",
     "plot_benchmark_curves",
     "plot_calibration_curves",
@@ -2936,11 +2958,7 @@ def plot_transfer_metric_boxes(
     model_count = len(model_order)
     dataset_count = len(training_order)
     if color_map is None:
-        cmap = plt.get_cmap("tab10")
-        color_map = {
-            name: cmap(idx % cmap.N)
-            for idx, name in enumerate(training_order)
-        }
+        color_map = build_training_color_map(training_order)
 
     fig_width = max(6.0, model_count * 2.5)
     fig, ax = plt.subplots(figsize=(fig_width, 6.0))
@@ -3131,11 +3149,7 @@ def plot_transfer_metric_bars(
     model_count = len(model_order)
     dataset_count = len(training_order)
     if color_map is None:
-        cmap = plt.get_cmap("tab10")
-        color_map = {
-            name: cmap(idx % cmap.N)
-            for idx, name in enumerate(training_order)
-        }
+        color_map = build_training_color_map(training_order)
 
     fig_width = max(6.0, model_count * 2.5)
     fig, ax = plt.subplots(figsize=(fig_width, 6.0))

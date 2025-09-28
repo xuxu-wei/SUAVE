@@ -139,9 +139,15 @@ def test_plot_feature_latent_correlation_bubble_default_title():
 
     X = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
 
-    fig, ax = plot_feature_latent_correlation_bubble(DummyModel(), X)
+    fig, ax = plot_feature_latent_correlation_bubble(
+        DummyModel(),
+        X,
+        variable_name={"x": "Feature X", "y": "Feature Y"},
+    )
 
-    assert ax.get_title() == "Spearman correlation vs. adjusted p-values"
+    assert ax.get_title() == ""
+    assert ax.get_xticklabels()[0].get_text() == "$z_{1}$"
+    assert ax.get_yticklabels()[0].get_text() == "Feature X"
     assert fig.axes[0] is ax
 
     plt.close(fig)
@@ -162,6 +168,7 @@ def test_plot_feature_latent_correlation_heatmap_switch():
         value="correlation",
         correlations=corr,
         p_values=pvals,
+        title="Correlation",
     )
     fig_p, ax_p = plot_feature_latent_correlation_heatmap(
         DummyModel(),
@@ -170,10 +177,12 @@ def test_plot_feature_latent_correlation_heatmap_switch():
         p_adjust=None,
         correlations=corr,
         p_values=pvals,
+        title="P-values",
     )
 
-    assert "correlation" in ax_corr.get_title().lower()
-    assert "p-value" in ax_p.get_title().lower()
+    assert ax_corr.get_title() == "Correlation"
+    assert ax_p.get_title() == "P-values"
+    assert ax_corr.get_xticklabels()[0].get_text() == "$z_{1}$"
 
     plt.close(fig_corr)
     plt.close(fig_p)

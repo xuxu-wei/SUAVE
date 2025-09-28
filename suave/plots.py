@@ -6,9 +6,10 @@ import itertools
 import math
 import warnings
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 import matplotlib.pyplot as plt
+from matplotlib import cm
 from matplotlib.axes import Axes
 from matplotlib.colors import (
     Colormap,
@@ -43,6 +44,24 @@ def _handle_data_issue(action: str, message: str) -> None:
         warnings.warn(message, UserWarning, stacklevel=3)
         return
     raise ValueError(message)
+
+
+def _resolve_variable_label(
+    identifier: object,
+    mapping: Mapping[str, object] | Callable[[str], object] | None,
+) -> str:
+    """Return the display label for ``identifier`` using ``mapping`` when available."""
+
+    key = str(identifier)
+    if mapping is None:
+        label = key
+    elif callable(mapping):
+        label = mapping(key)
+    else:
+        label = mapping.get(key, key)
+    if label is None:
+        return ""
+    return str(label)
 
 
 def _in_notebook() -> bool:
@@ -790,6 +809,9 @@ def compute_feature_latent_correlation(
     latent_indices : sequence of int, optional
         Indices of the latent dimensions to analyse. ``None`` uses every
         dimension returned by :meth:`encode`.
+    variable_name : mapping or callable, optional
+        Mapping (or callable) used to translate feature identifiers into
+        display labels on the y-axis. ``None`` keeps the DataFrame index.
     method : {"spearman", "pearson", "kendall"}, default "spearman"
         Correlation coefficient applied pairwise between features and latent
         variables.
@@ -992,6 +1014,7 @@ def plot_feature_latent_correlation_bubble(
     target_name: str = "target",
     variables: Sequence[str] | None = None,
     latent_indices: Sequence[int] | None = None,
+    variable_name: Mapping[str, object] | Callable[[str], object] | None = None,
     method: str = "spearman",
     p_adjust: str | None = "fdr_bh",
     title: str | None = None,
@@ -1004,9 +1027,10 @@ def plot_feature_latent_correlation_bubble(
 ) -> tuple[plt.Figure, Axes]:
     """Draw a bubble chart summarising feature/latent correlations.
 
-    Each bubble encodes the absolute correlation magnitude as its size and the
-    (optionally adjusted) p-value as its colour. The underlying correlations are
-    derived from :func:`compute_feature_latent_correlation`, which uses
+    Each bubble encodes statistical significance through its radius while
+    colours reflect the signed correlation coefficients. The underlying
+    correlations are derived from :func:`compute_feature_latent_correlation`,
+    which uses
     :meth:`suave.model.SUAVE.encode` to obtain posterior means unless custom
     latent samples are supplied.
 
@@ -1034,6 +1058,9 @@ def plot_feature_latent_correlation_bubble(
     p_adjust : {"fdr_bh", "bonferroni", "holm", None}, default "fdr_bh"
         Multiplicity correction applied to the correlation p-values. ``None``
         disables any adjustment.
+    variable_name : mapping or callable, optional
+        Custom mapping from feature identifiers to human-readable labels. When
+        omitted the DataFrame index is rendered verbatim.
     title : str, optional
         Axis title displayed above the bubble chart. Defaults to a descriptive
         label derived from :paramref:`method` and :paramref:`p_adjust`.
@@ -1104,27 +1131,156 @@ def plot_feature_latent_correlation_bubble(
             "correlations and p_values must either both be provided or both be omitted"
         )
 
+    corr_matrix = corr_df.to_numpy(dtype=float)
+    pval_matrix = pval_df.to_numpy(dtype=float)
+
     n_features, n_latents = corr_df.shape
-    fig, ax = plt.subplots(
-        1,
-        1,
-        figsize=(max(6.0, 1.4 * n_latents), max(5.0, 0.35 * n_features)),
-        constrained_layout=True,
+    feature_labels = [
+        _resolve_variable_label(name, variable_name) for name in corr_df.index
+    ]
+    latent_labels = [fr"$z_{{{idx + 1}}}$" for idx in range(n_latents)]
+
+    clipped_pvals = np.clip(pval_matrix, np.finfo(float).tiny, 1.0)
+    with np.errstate(divide="ignore"):
+        neg_log_p = -np.log10(clipped_pvals)
+    neg_log_p = np.where(np.isfinite(neg_log_p), neg_log_p, np.nan)
+    significance_mask = neg_log_p >= 1.0
+    valid_values = neg_log_p[significance_mask]
+
+    if valid_values.size:
+        min_value = float(np.nanmin(valid_values))
+        max_value = float(np.nanmax(valid_values))
+    else:
+        min_value = 1.0
+        max_value = 1.0
+
+    formatted_corr = np.where(significance_mask, corr_matrix, np.nan)
+    finite_corr = formatted_corr[np.isfinite(formatted_corr)]
+    max_text_len = max((len(f"{value:.2f}") for value in finite_corr), default=4)
+    min_area = max(900.0, 600.0 + 160.0 * max(0, max_text_len - 4))
+    max_area = min_area * 4.0
+
+    def _scale_significance(values: np.ndarray) -> np.ndarray:
+        if not values.size:
+            return np.array([], dtype=float)
+        if not valid_values.size or math.isclose(max_value, min_value):
+            return np.full(values.shape, max_area, dtype=float)
+        normalised = (values - min_value) / (max_value - min_value)
+        return normalised * (max_area - min_area) + min_area
+
+    bubble_sizes = np.zeros_like(neg_log_p, dtype=float)
+    if valid_values.size:
+        bubble_sizes[significance_mask] = _scale_significance(valid_values)
+
+    x_positions = np.arange(n_latents)
+    y_positions = np.arange(n_features)
+    grid_x, grid_y = np.meshgrid(x_positions, y_positions)
+    flat_mask = significance_mask.flatten()
+
+    fig_width = max(7.0, 1.4 * n_latents)
+    longest_label = max((len(label) for label in feature_labels), default=1)
+    fig_height = max(5.5, 0.45 * n_features, 0.28 * longest_label)
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    fig.subplots_adjust(bottom=0.28, right=0.78)
+
+    cmap = plt.cm.RdBu_r
+    norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
+
+    scatter = ax.scatter(
+        grid_x.flatten()[flat_mask],
+        grid_y.flatten()[flat_mask],
+        s=bubble_sizes.flatten()[flat_mask],
+        c=corr_matrix.flatten()[flat_mask],
+        cmap=cmap,
+        norm=norm,
+        edgecolors="black",
+        linewidths=0.6,
+        alpha=0.85,
     )
 
-    colorbar_label = "Adjusted p-values" if p_adjust else "P-values"
-    plot_bubble_matrix(
-        corr_df.abs(),
-        color_matrix=pval_df,
-        text_matrix=corr_df,
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(latent_labels)
+    ax.tick_params(axis="x", bottom=True, top=False, labelbottom=True, labeltop=False)
+    for label in ax.get_xticklabels():
+        label.set_rotation(0)
+        label.set_ha("center")
+
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(feature_labels)
+    for label in ax.get_yticklabels():
+        label.set_rotation(0)
+        label.set_va("center")
+
+    ax.set_xlim(-0.5, n_latents - 0.5)
+    ax.set_ylim(n_features - 0.5, -0.5)
+    ax.set_aspect("equal")
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    for row_index in range(n_features):
+        for col_index in range(n_latents):
+            if not significance_mask[row_index, col_index]:
+                continue
+            corr_value = corr_matrix[row_index, col_index]
+            if not np.isfinite(corr_value):
+                continue
+            rgba = cmap(norm(corr_value))
+            luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+            text_colour = "white" if luminance < 0.5 else "black"
+            ax.text(
+                col_index,
+                row_index,
+                f"{corr_value:.2f}",
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=text_colour,
+                fontweight="semibold",
+            )
+
+    colorbar_mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
+    cbar = fig.colorbar(
+        colorbar_mappable,
         ax=ax,
-        cmap="magma_r",
-        colorbar_label=colorbar_label,
-        size_label=f"|{method.title()}|",
+        orientation="horizontal",
+        fraction=0.08,
+        pad=0.12,
     )
+    cbar.set_label(f"{method.title()} correlation", labelpad=10)
+    cbar.ax.xaxis.set_label_position("bottom")
 
-    default_title = f"{method.title()} correlation vs. {colorbar_label.lower()}"
-    ax.set_title(title or default_title)
+    if valid_values.size:
+        unique_count = max(1, int(np.unique(valid_values).size))
+        level_count = min(3, unique_count)
+        legend_values = np.linspace(min_value, max_value, num=level_count)
+        if np.isclose(max_value, min_value):
+            legend_values = np.array([min_value])
+        legend_sizes = _scale_significance(legend_values)
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="none",
+                markerfacecolor="#6c6c6c",
+                markeredgecolor="#6c6c6c",
+                alpha=0.8,
+                markersize=math.sqrt(size / math.pi) if size > 0 else 0.0,
+            )
+            for size in legend_sizes
+        ]
+        legend_labels = [f"{value:.2f}" for value in legend_values]
+        legend_title = "$-\\log_{10}(FDR)$" if p_adjust else "$-\\log_{10}(p)$"
+        ax.legend(
+            handles,
+            legend_labels,
+            title=legend_title,
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            frameon=False,
+        )
+
+    ax.set_title(title or "")
 
     if output_path is not None:
         formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)
@@ -1150,6 +1306,7 @@ def plot_feature_latent_correlation_heatmap(
     target_name: str = "target",
     variables: Sequence[str] | None = None,
     latent_indices: Sequence[int] | None = None,
+    variable_name: Mapping[str, object] | Callable[[str], object] | None = None,
     method: str = "spearman",
     p_adjust: str | None = "fdr_bh",
     value: str = "correlation",
@@ -1161,13 +1318,15 @@ def plot_feature_latent_correlation_heatmap(
     correlations: pd.DataFrame | None = None,
     p_values: pd.DataFrame | None = None,
 ) -> tuple[plt.Figure, Axes]:
-    """Plot either the correlation or p-value heatmap for feature/latent pairs.
+    """Plot correlation heatmaps with optional p-value annotations.
 
     Parameters mirror :func:`compute_feature_latent_correlation`. Set
-    :paramref:`value` to ``"correlation"`` (default) or ``"pvalue"`` to choose
-    the matrix rendered in the heatmap. Providing both :paramref:`correlations`
-    and :paramref:`p_values` allows reusing pre-computed matrices without
-    calling :func:`compute_feature_latent_correlation` again.
+    :paramref:`value` to ``"correlation"`` (default) to annotate each cell with
+    the coefficient, or ``"pvalue"`` to print formatted p-values while colours
+    continue to reflect the signed correlations. Providing both
+    :paramref:`correlations` and :paramref:`p_values` allows reusing
+    pre-computed matrices without calling
+    :func:`compute_feature_latent_correlation` again.
 
     Returns
     -------
@@ -1225,37 +1384,91 @@ def plot_feature_latent_correlation_heatmap(
     if value_lower not in {"correlation", "pvalue"}:
         raise ValueError("value must be either 'correlation' or 'pvalue'")
 
-    matrix = corr_df if value_lower == "correlation" else pval_df
-    fig, ax = plt.subplots(
-        1,
-        1,
-        figsize=(max(6.0, 1.2 * matrix.shape[1]), max(5.0, 0.35 * matrix.shape[0])),
-        constrained_layout=True,
-    )
+    corr_matrix = corr_df.to_numpy(dtype=float)
+    pval_matrix = pval_df.to_numpy(dtype=float)
+    n_features, n_latents = corr_df.shape
+    feature_labels = [
+        _resolve_variable_label(name, variable_name) for name in corr_df.index
+    ]
+    latent_labels = [fr"$z_{{{idx + 1}}}$" for idx in range(n_latents)]
 
-    if value_lower == "correlation":
-        cmap = create_centered_colormap("RdBu_r", vmin=-1.0, vmax=1.0, midpoint=0.0)
-        colorbar_label = f"{method.title()} correlation"
-        vmin, vmax = -1.0, 1.0
-        default_title = f"{method.title()} correlation coefficients"
-    else:
-        cmap = "magma_r"
-        colorbar_label = "Adjusted p-values" if p_adjust else "P-values"
-        matrix_values = matrix.to_numpy(dtype=float)
-        vmax_value = float(np.nanmax(matrix_values)) if np.isfinite(matrix_values).any() else 1.0
-        vmin, vmax = 0.0, min(1.0, vmax_value)
-        default_title = colorbar_label
+    fig_width = max(7.0, 1.2 * n_latents)
+    longest_label = max((len(label) for label in feature_labels), default=1)
+    fig_height = max(5.0, 0.38 * n_features, 0.26 * longest_label)
+    left_margin = min(0.4, 0.18 + 0.012 * longest_label)
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    fig.subplots_adjust(left=left_margin, bottom=0.28, right=0.98)
 
-    plot_matrix_heatmap(
-        matrix,
+    cmap = plt.cm.RdBu_r
+    norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
+    ax.imshow(corr_matrix, cmap=cmap, norm=norm, aspect="equal")
+
+    ax.set_xticks(np.arange(n_latents))
+    ax.set_xticklabels(latent_labels)
+    ax.tick_params(axis="x", bottom=True, top=False, labelbottom=True, labeltop=False)
+    for tick in ax.get_xticklabels():
+        tick.set_rotation(0)
+        tick.set_ha("center")
+
+    ax.set_yticks(np.arange(n_features))
+    ax.set_yticklabels(feature_labels)
+    for tick in ax.get_yticklabels():
+        tick.set_rotation(0)
+        tick.set_va("center")
+
+    ax.set_xlim(-0.5, n_latents - 0.5)
+    ax.set_ylim(n_features - 0.5, -0.5)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    def _format_p_value(value: float) -> str:
+        if not np.isfinite(value):
+            return ""
+        if value < 0.001:
+            return "<0.001"
+        if value > 0.99:
+            return ">0.99"
+        if 0.001 <= value < 0.01 or 0.049 <= value <= 0.051:
+            return f"{value:.3f}"
+        return f"{value:.2f}"
+
+    for row_index in range(n_features):
+        for col_index in range(n_latents):
+            corr_value = corr_matrix[row_index, col_index]
+            if not np.isfinite(corr_value):
+                continue
+            if value_lower == "correlation":
+                text = f"{corr_value:.2f}"
+            else:
+                text = _format_p_value(pval_matrix[row_index, col_index])
+                if not text:
+                    continue
+            rgba = cmap(norm(corr_value))
+            luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+            text_colour = "white" if luminance < 0.5 else "black"
+            ax.text(
+                col_index,
+                row_index,
+                text,
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=text_colour,
+                fontweight="semibold",
+            )
+
+    colorbar_mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
+    cbar = fig.colorbar(
+        colorbar_mappable,
         ax=ax,
-        cmap=cmap,
-        annotate=False,
-        colorbar_label=colorbar_label,
-        vmin=vmin,
-        vmax=vmax,
+        orientation="horizontal",
+        fraction=0.08,
+        pad=0.12,
     )
-    ax.set_title(title or default_title)
+    cbar.set_label(f"{method.title()} correlation", labelpad=10)
+    cbar.ax.xaxis.set_label_position("bottom")
+
+    ax.set_title(title or "")
 
     if output_path is not None:
         formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)

@@ -117,6 +117,7 @@ from analysis_utils import (  # noqa: E402
     to_numeric_frame,
     load_model_manifest,
     record_model_manifest,
+    build_training_color_map,
     DISTRIBUTION_SHIFT_OVERALL_NOTE,
     DISTRIBUTION_SHIFT_PER_FEATURE_NOTE,
     _interpret_feature_shift,
@@ -164,6 +165,10 @@ TSTR_METRIC_LABELS: Dict[str, str] = dict(
     analysis_config.get("tstr_metric_labels", {})
 )
 TSTR_BASELINE_MODELS: Optional[Sequence[str]] = analysis_config.get("tstr_models")
+TRAINING_COLOR_PALETTE: Optional[Sequence[str] | str] = analysis_config.get(
+    "training_color_palette"
+)
+LATENT_CORRELATION_FORMATS: Tuple[str, ...] = ("jpg", "svg", "pdf", "png")
 IS_INTERACTIVE = is_interactive_session()
 
 DATASET_NAME_MAP = BASELINE_DATASET_LABELS
@@ -1575,14 +1580,18 @@ overall_path_fig.savefig(
 )
 plt.close(overall_path_fig)
 
+overall_group_label = PATH_GRAPH_NODE_GROUPS.get(TARGET_LABEL, TARGET_LABEL)
+
 overall_bubble_fig, _overall_bubble_ax = plot_feature_latent_correlation_bubble(
     model,
     X_train_model,
     targets=y_train_model,
     target_name=TARGET_LABEL,
     variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-    title=f"Latent correlations ({TARGET_LABEL}) – bubble chart",
+    variable_name=PATH_GRAPH_NODE_LABELS,
+    title=overall_group_label,
     output_path=overall_bubble_base,
+    output_formats=LATENT_CORRELATION_FORMATS,
     correlations=overall_corr,
     p_values=overall_pvals,
 )
@@ -1595,8 +1604,10 @@ overall_corr_fig, _overall_corr_ax = plot_feature_latent_correlation_heatmap(
     targets=y_train_model,
     target_name=TARGET_LABEL,
     variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-    title=f"Latent correlations ({TARGET_LABEL}) – correlation heatmap",
+    variable_name=PATH_GRAPH_NODE_LABELS,
+    title=overall_group_label,
     output_path=overall_corr_heatmap_base,
+    output_formats=LATENT_CORRELATION_FORMATS,
     correlations=overall_corr,
     p_values=overall_pvals,
 )
@@ -1609,9 +1620,11 @@ overall_pval_fig, _overall_pval_ax = plot_feature_latent_correlation_heatmap(
     targets=y_train_model,
     target_name=TARGET_LABEL,
     variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-    title=f"Latent correlations ({TARGET_LABEL}) – p-value heatmap",
+    variable_name=PATH_GRAPH_NODE_LABELS,
+    title=overall_group_label,
     value="pvalue",
     output_path=overall_pval_heatmap_base,
+    output_formats=LATENT_CORRELATION_FORMATS,
     correlations=overall_corr,
     p_values=overall_pvals,
 )
@@ -1665,17 +1678,26 @@ for group_name, candidate_columns in VAR_GROUP_DICT.items():
     corr_heatmap_base = group_base.with_name(f"{group_base.name}_corr_heatmap")
     pval_heatmap_base = group_base.with_name(f"{group_base.name}_pvalue_heatmap")
 
+    group_label_candidates = {
+        PATH_GRAPH_NODE_GROUPS.get(feature, group_name.replace("_", " ").title())
+        for feature in group_features
+    }
+    group_label = (
+        group_label_candidates.pop()
+        if len(group_label_candidates) == 1
+        else group_name.replace("_", " ").title()
+    )
+
     bubble_fig, _bubble_ax = plot_feature_latent_correlation_bubble(
         model,
         X_train_model,
         targets=y_train_model,
         target_name=TARGET_LABEL,
         variables=group_features + [TARGET_LABEL],
-        title=(
-            f"Latent correlations ({TARGET_LABEL}) – "
-            f"{group_name.replace('_', ' ').title()} bubble"
-        ),
+        variable_name=PATH_GRAPH_NODE_LABELS,
+        title=group_label,
         output_path=bubble_base,
+        output_formats=LATENT_CORRELATION_FORMATS,
         correlations=group_corr,
         p_values=group_pvals,
     )
@@ -1687,11 +1709,10 @@ for group_name, candidate_columns in VAR_GROUP_DICT.items():
         targets=y_train_model,
         target_name=TARGET_LABEL,
         variables=group_features + [TARGET_LABEL],
-        title=(
-            f"Latent correlations ({TARGET_LABEL}) – "
-            f"{group_name.replace('_', ' ').title()} correlation"
-        ),
+        variable_name=PATH_GRAPH_NODE_LABELS,
+        title=group_label,
         output_path=corr_heatmap_base,
+        output_formats=LATENT_CORRELATION_FORMATS,
         correlations=group_corr,
         p_values=group_pvals,
     )
@@ -1703,12 +1724,11 @@ for group_name, candidate_columns in VAR_GROUP_DICT.items():
         targets=y_train_model,
         target_name=TARGET_LABEL,
         variables=group_features + [TARGET_LABEL],
-        title=(
-            f"Latent correlations ({TARGET_LABEL}) – "
-            f"{group_name.replace('_', ' ').title()} p-values"
-        ),
+        variable_name=PATH_GRAPH_NODE_LABELS,
+        title=group_label,
         value="pvalue",
         output_path=pval_heatmap_base,
+        output_formats=LATENT_CORRELATION_FORMATS,
         correlations=group_corr,
         p_values=group_pvals,
     )
@@ -1716,7 +1736,7 @@ for group_name, candidate_columns in VAR_GROUP_DICT.items():
 
     latent_group_outputs.append(
         (
-            group_name,
+            group_label,
             bubble_base.with_suffix(".png"),
             corr_heatmap_base.with_suffix(".png"),
             pval_heatmap_base.with_suffix(".png"),
@@ -1855,10 +1875,9 @@ elif INCLUDE_SUAVE_TRANSFER and not optuna_best_params:
 
 training_order = list(training_sets_numeric.keys())
 model_order = list(model_factories.keys())
-cmap = plt.get_cmap("tab10")
-training_color_map = {
-    name: cmap(idx % cmap.N) for idx, name in enumerate(training_order)
-}
+training_color_map = build_training_color_map(
+    training_order, palette=TRAINING_COLOR_PALETTE
+)
 
 
 def _is_trtr_dataset(name: str) -> bool:
