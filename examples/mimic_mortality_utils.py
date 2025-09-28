@@ -1086,8 +1086,8 @@ def render_optuna_parameter_grid(
             plot_parallel_coordinate,
             plot_slice,
         )
+        import plotly.graph_objects as go
         import plotly.io as pio
-        from plotly.subplots import make_subplots
     except ImportError as error:  # pragma: no cover - optional dependency guard
         print(f"Optuna visualisations unavailable: {error}")
         return
@@ -1098,71 +1098,28 @@ def render_optuna_parameter_grid(
         ("Parameter importance", plot_param_importances),
     )
 
-    subplot_titles = [objective_name for objective_name, _ in objective_targets]
-
-    for row_title, plot_fn in plot_specs:
-        # ``plot_parallel_coordinate`` renders ``parcoords`` traces, which must live inside a
-        # ``domain`` subplot. Other visualisations continue to use the default ``xy`` layout.
-        subplot_specs = None
-        if plot_fn is plot_parallel_coordinate:
-            subplot_specs = [[{"type": "domain"} for _ in objective_targets]]
-
-        row_fig = make_subplots(
-            rows=1,
-            cols=len(objective_targets),
-            subplot_titles=subplot_titles,
-            horizontal_spacing=0.08,
-            specs=subplot_specs,
-        )
-
-        for col_idx, (objective_name, target_fn) in enumerate(
-            objective_targets, start=1
-        ):
+    for plot_title, plot_fn in plot_specs:
+        for objective_name, target_fn in objective_targets:
             try:
-                subplot_fig = plot_fn(
-                    study, target=target_fn, target_name=objective_name
-                )
+                figure = plot_fn(study, target=target_fn, target_name=objective_name)
             except Exception as error:  # pragma: no cover - diagnostic aid
-                row_fig.add_annotation(
-                    text=f"Unable to render:<br>{error}",
-                    row=1,
-                    col=col_idx,
-                    showarrow=False,
-                )
-                row_fig.update_xaxes(visible=False, row=1, col=col_idx)
-                row_fig.update_yaxes(visible=False, row=1, col=col_idx)
-                continue
+                figure = go.Figure()
+                figure.add_annotation(text=f"Unable to render:<br>{error}", showarrow=False)
+                figure.update_xaxes(visible=False)
+                figure.update_yaxes(visible=False)
 
-            for trace in subplot_fig.data:
+            for trace in getattr(figure, "data", []):
                 try:
                     trace.showlegend = False
                 except ValueError:
                     pass
-                row_fig.add_trace(trace, row=1, col=col_idx)
 
-            # Attempt to propagate axis titles where available.
-            xaxis = getattr(subplot_fig.layout, "xaxis", None)
-            if xaxis and getattr(xaxis, "title", None):
-                row_fig.update_xaxes(
-                    title_text=xaxis.title.text,
-                    row=1,
-                    col=col_idx,
-                )
-            yaxis = getattr(subplot_fig.layout, "yaxis", None)
-            if yaxis and getattr(yaxis, "title", None):
-                row_fig.update_yaxes(
-                    title_text=yaxis.title.text,
-                    row=1,
-                    col=col_idx,
-                )
-
-        row_fig.update_layout(
-            title_text=row_title,
-            height=450,
-            width=520 * len(objective_targets),
-            showlegend=False,
-        )
-        pio.show(row_fig)
+            figure.update_layout(
+                title_text=f"{plot_title} — {objective_name}",
+                height=450,
+                showlegend=False,
+            )
+            pio.show(figure)
 
 
 def load_optuna_results(

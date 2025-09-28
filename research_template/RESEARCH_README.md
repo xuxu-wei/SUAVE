@@ -121,7 +121,7 @@
 - **执行要点**：
   1. 若存在历史最优 Trial，优先加载对应 JSON；否则使用默认超参重新搜索。
   2. 记录每个训练阶段（预训练、分类头、联合微调）的轮数、早停标准与耗时。
-  3. 导出参数重要性、收敛曲线、帕累托前沿图，并保存到 `03_optuna_search/figures/`。
+  3. 导出参数重要性、收敛曲线、帕累托前沿图，并保存到 `03_optuna_search/figures/`；交互式参数网格会按“指标 1 图 1、指标 2 图 1 … 指标 1 图 2”顺序逐张渲染，便于截图记录。
   4. 模板会在 `04_suave_training/` 下生成 `manual_param_setting.py`，用于登记交互式手动调参的覆盖项；如需生效，请将 `build_analysis_config()` 返回的 `interactive_manual_tuning` 配置指向该模块并填写 `manual_param_setting` 字典。若模块文件或该属性缺失，优化脚本会立即报错并终止运行，提醒补全手动覆写。
   5. 交互式运行可输入 `manual` 直接加载 `suave_manual_manifest_{label}.json` 中登记的模型与校准器；命令行同样支持 `--trial-id manual`。未指定 trial 时脚本会优先检查手动 manifest，再回退至最近保存的自动 trial，最后依据帕累托阈值自动挑选候选。手动 manifest 会固定写入 `"trial_number": "manual"` 字段，确保汇总表与加载逻辑能一致地标记其来源。
   6. 启用 `interactive_manual_tuning` 并以交互模式运行优化脚本时，会在启动 Optuna 之前展示手动模型与历史帕累托解的摘要表；此时可输入 `y/yes` 依据 `manual_param_setting` 直接训练并登记手动模型，输入 `manual` 复用磁盘中的手动 artefact，或输入 `n/no`/回车继续自动搜索。若在提示期间触发键盘中断，脚本会提示是否直接回退至 Optuna 搜索。
