@@ -207,7 +207,7 @@ print(train_labels.head())</code></pre>
 
 ### 缓存判定信息
 
-- `07_bootstrap_analysis/`：针对 SUAVE 主模型与临床基线的分类/校准评估，`evaluate_predictions` 会按“模型 × 数据集”落盘 `*_bootstrap.joblib`，其中包含 `overall`、`per_class` 等 DataFrame。命中缓存时直接读取；若设置 `FORCE_UPDATE_BOOTSTRAP=True` 则忽略缓存重新计算。
+- `07_bootstrap_analysis/`：针对 SUAVE 主模型与临床基线的分类/校准评估，`evaluate_predictions` 会按“模型 × 数据集”落盘 `*_bootstrap.joblib`，其中包含 `overall`、`per_class` 等 DataFrame。命中缓存时直接读取，避免重复触发 bootstrap 进度条；若设置 `FORCE_UPDATE_BOOTSTRAP=True` 则忽略缓存重新计算。
 - `10_tstr_trtr_transfer/training_sets/`：`build_tstr_training_sets` 保存 `manifest_{label}.json` 与对应的 TSV，manifest 内记录特征列、生成时间与 SUAVE manifest 的 SHA256。脚本会校验 manifest 与当前配置/生成器签名一致，若 `FORCE_UPDATE_SYNTHETIC_DATA=True` 或签名不匹配则重建训练集并刷新后续缓存。
 - `10_tstr_trtr_transfer/tstr_results_{label}.joblib`、`trtr_results_{label}.joblib`：存储真实/合成训练下的基线模型预测表与指标。缓存载荷包含 `training_manifest_signature` 与当前 SUAVE manifest 的 SHA256（`data_generator_signature`），命中缓存需与最新训练集一致；可通过 `FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL` 控制重新拟合。
 - `10_tstr_trtr_transfer/bootstrap_cache/`：`evaluate_transfer_baselines` 针对每个“训练方案 × 评估集 × 模型”单独缓存 bootstrap 明细。校验字段包含 `training_manifest_signature`、`data_generator_signature`、`prediction_signature`（基于概率与预测的哈希）及 `bootstrap_n`。任一信息变化或显式启用 `FORCE_UPDATE_TSTR_BOOTSTRAP` / `FORCE_UPDATE_TRTR_BOOTSTRAP` 时会重新执行 bootstrap。
