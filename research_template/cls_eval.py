@@ -16,7 +16,7 @@ import tempfile
 from datetime import datetime
 from os import PathLike
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union, Mapping
 
 import numpy as np
 import pandas as pd
@@ -1537,7 +1537,7 @@ def _prepare_three_line_sheet(
             )
         )
 
-    return formatted.fillna(fill_value)
+    return formatted
 
 
 def _write_three_line_workbook(
@@ -1632,6 +1632,316 @@ def _write_three_line_workbook(
 
     workbook.save(output_path)
     return Path(output_path)
+
+
+def _prepare_dataset_grouped_sheet(
+    df: pd.DataFrame,
+    *,
+    index_columns: Sequence[str],
+    dataset_column: str,
+    dataset_order: Optional[Sequence[str]] = None,
+    drop_columns: Optional[Sequence[str]] = None,
+    decimals: int = 3,
+    thousand_sep: bool = True,
+    fill_value: str = "NA",
+    ci_pairs: Optional[Sequence[Tuple[str, str, str]]] = None,
+    ci_label_text: str = "95%",
+    ci_only: bool = False,
+) -> pd.DataFrame:
+    """Return a dataset-grouped table with optional confidence interval columns."""
+
+    if dataset_column not in df.columns:
+        raise ValueError(f"'{dataset_column}' column not found in dataframe")
+    if not index_columns:
+        raise ValueError("'index_columns' must contain at least one column name")
+
+    missing_idx = [col for col in index_columns if col not in df.columns]
+    if missing_idx:
+        raise ValueError(
+            "Missing index columns for dataset grouped export: " + ", ".join(missing_idx)
+        )
+
+    work = df.copy()
+    if drop_columns:
+        drop_list = [c for c in drop_columns if c in work.columns]
+        if drop_list:
+            work = work.drop(columns=drop_list)
+
+    triplets = (
+        list(ci_pairs)
+        if ci_pairs is not None
+        else _auto_detect_ci_triplets(work.columns)
+    )
+    triplets = [t for t in triplets if len(t) == 3]
+    for base, low, high in triplets:
+        if base not in work.columns or low not in work.columns or high not in work.columns:
+            continue
+        combined = work.apply(
+            lambda row: _format_three_line_ci(
+                row.get(base),
+                row.get(low),
+                row.get(high),
+                decimals=decimals,
+                thousand_sep=thousand_sep,
+                fill_value=fill_value,
+            ),
+            axis=1,
+        )
+        label = f"{base} ({ci_label_text} CI)"
+        if label in work.columns:
+            work = work.drop(columns=[label])
+        base_pos = list(work.columns).index(base)
+        work = work.drop(columns=[low, high])
+        work.insert(base_pos + 1, label, combined)
+        if ci_only:
+            work = work.drop(columns=[base])
+
+    if dataset_order:
+        categories = list(dataset_order)
+        extras = [
+            value
+            for value in work[dataset_column].dropna().unique()
+            if value not in categories
+        ]
+        categories.extend(sorted(extras))
+        work[dataset_column] = pd.Categorical(
+            work[dataset_column], categories=categories, ordered=True
+        )
+
+    sort_cols = [dataset_column] + list(index_columns)
+    work = work.sort_values(sort_cols).reset_index(drop=True)
+
+    ordered_index = list(dict.fromkeys(index_columns))
+    value_columns = [
+        col
+        for col in work.columns
+        if col not in ([dataset_column] + ordered_index)
+    ]
+    column_order = [dataset_column] + ordered_index + value_columns
+    work = work.loc[:, column_order]
+
+    formatted = work.copy()
+    for col in [dataset_column] + ordered_index:
+        formatted[col] = formatted[col].apply(
+            lambda v: fill_value if pd.isna(v) else str(v)
+        )
+
+    for col in value_columns:
+        series = formatted[col]
+        if pd.api.types.is_numeric_dtype(series):
+            formatted[col] = series.apply(
+                lambda v: _format_three_line_number(
+                    v,
+                    decimals=decimals,
+                    use_decimals=True,
+                    thousand_sep=thousand_sep,
+                    fill_value=fill_value,
+                )
+            )
+        else:
+            formatted[col] = series.apply(
+                lambda v: fill_value if pd.isna(v) else str(v)
+            )
+
+    return formatted
+
+
+def _write_dataset_grouped_workbook(
+    sheets: Dict[str, pd.DataFrame],
+    output_path: Union[str, Path],
+    *,
+    dataset_column: str,
+    index_columns_map: Mapping[str, Sequence[str]],
+    fill_value: str = "NA",
+    font_name: str = "Times New Roman",
+) -> Path:
+    if not sheets:
+        raise ValueError("No sheets provided for dataset grouped export")
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, Side
+    from openpyxl.utils import get_column_letter
+
+    workbook = Workbook()
+    medium_side = Side(style="medium", color="000000")
+    thin_side = Side(style="thin", color="000000")
+
+    def _write_sheet(ws, name: str, data: pd.DataFrame) -> None:
+        ws.title = name
+        header_font = Font(name=font_name, bold=True)
+        body_font = Font(name=font_name, bold=False)
+        header_align = Alignment(horizontal="center", vertical="center")
+        left_align = Alignment(horizontal="left", vertical="center")
+        center_align = Alignment(horizontal="center", vertical="center")
+
+        for col_idx, column in enumerate(data.columns, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=column)
+            cell.font = header_font
+            cell.alignment = header_align
+
+        dataset_idx = (
+            data.columns.get_loc(dataset_column) + 1
+            if dataset_column in data.columns
+            else None
+        )
+        idx_cols = set(index_columns_map.get(name, []))
+
+        for row_idx, row in enumerate(data.itertuples(index=False, name=None), start=2):
+            for col_idx, value in enumerate(row, start=1):
+                cell_value = fill_value if value is None else value
+                cell = ws.cell(row=row_idx, column=col_idx, value=cell_value)
+                cell.font = body_font
+                if dataset_idx is not None and col_idx == dataset_idx:
+                    cell.alignment = center_align
+                elif data.columns[col_idx - 1] in idx_cols:
+                    cell.alignment = left_align
+                else:
+                    cell.alignment = center_align
+
+        n_cols = data.shape[1]
+        last_row = data.shape[0] + 1
+
+        for col_idx in range(1, n_cols + 1):
+            header_cell = ws.cell(row=1, column=col_idx)
+            header_cell.border = Border(
+                left=header_cell.border.left,
+                right=header_cell.border.right,
+                top=medium_side,
+                bottom=thin_side,
+            )
+            bottom_cell = ws.cell(row=last_row, column=col_idx)
+            bottom_cell.border = Border(
+                left=bottom_cell.border.left,
+                right=bottom_cell.border.right,
+                top=bottom_cell.border.top,
+                bottom=medium_side,
+            )
+
+            values = [
+                str(ws.cell(row=1, column=col_idx).value or ""),
+                *[
+                    str(ws.cell(row=r, column=col_idx).value or "")
+                    for r in range(2, last_row + 1)
+                ],
+            ]
+            max_len = max((len(val) for val in values), default=0)
+            width = min(max(max_len + 2, 10), 60)
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+        if dataset_idx is not None and data.shape[0] > 0:
+            dataset_values = [
+                ws.cell(row=row, column=dataset_idx).value
+                for row in range(2, last_row + 1)
+            ]
+            start_row = 2
+            current_value = dataset_values[0]
+            for offset, value in enumerate(dataset_values[1:], start=3):
+                if value != current_value:
+                    end_row = offset - 1
+                    if end_row > start_row:
+                        ws.merge_cells(
+                            start_row=start_row,
+                            start_column=dataset_idx,
+                            end_row=end_row,
+                            end_column=dataset_idx,
+                        )
+                    start_row = offset
+                    current_value = value
+            final_end = last_row
+            if final_end > start_row:
+                ws.merge_cells(
+                    start_row=start_row,
+                    start_column=dataset_idx,
+                    end_row=final_end,
+                    end_column=dataset_idx,
+                )
+
+    first = True
+    for sheet_name, table in sheets.items():
+        if table.empty:
+            continue
+        if first:
+            worksheet = workbook.active
+            _write_sheet(worksheet, sheet_name, table)
+            first = False
+        else:
+            worksheet = workbook.create_sheet(title=sheet_name)
+            _write_sheet(worksheet, sheet_name, table)
+
+    workbook.save(output_path)
+    return Path(output_path)
+
+
+def export_dataset_grouped_tables(
+    tables: Dict[str, pd.DataFrame],
+    output_path: Union[str, Path],
+    *,
+    index_columns: Dict[str, Sequence[str]],
+    dataset_column: str = "Dataset",
+    dataset_order: Optional[Sequence[str]] = None,
+    drop_columns: Optional[Sequence[str]] = ("Target",),
+    decimals: int = 3,
+    thousand_sep: bool = True,
+    fill_value: str = "NA",
+    ci_pairs: Optional[Dict[str, Sequence[Tuple[str, str, str]]]] = None,
+    ci_label_text: str = "95%",
+    ci_only: bool = False,
+) -> Path:
+    """Export tables with dataset-grouped rows and merged dataset cells.
+
+    Examples
+    --------
+    >>> df = pd.DataFrame({
+    ...     "Model": ["A", "B"],
+    ...     "Dataset": ["Test", "Test"],
+    ...     "accuracy": [0.9, 0.85],
+    ...     "accuracy_ci_low": [0.8, 0.75],
+    ...     "accuracy_ci_high": [0.95, 0.9],
+    ... })
+    >>> export_dataset_grouped_tables(
+    ...     {"Summary": df},
+    ...     "report.xlsx",
+    ...     index_columns={"Summary": ["Model"]},
+    ...     ci_only=True,
+    ... )
+    PosixPath('report.xlsx')
+    """
+
+    prepared: Dict[str, pd.DataFrame] = {}
+    index_map: Dict[str, Sequence[str]] = {}
+    for sheet_name, df in tables.items():
+        if df is None or df.empty:
+            continue
+        idx_cols = index_columns.get(sheet_name)
+        if not idx_cols:
+            raise ValueError(
+                f"Missing index columns configuration for sheet '{sheet_name}'"
+            )
+        ci_spec = ci_pairs.get(sheet_name) if ci_pairs else None
+        prepared[sheet_name] = _prepare_dataset_grouped_sheet(
+            df,
+            index_columns=idx_cols,
+            dataset_column=dataset_column,
+            dataset_order=dataset_order,
+            drop_columns=drop_columns,
+            decimals=decimals,
+            thousand_sep=thousand_sep,
+            fill_value=fill_value,
+            ci_pairs=ci_spec,
+            ci_label_text=ci_label_text,
+            ci_only=ci_only,
+        )
+        index_map[sheet_name] = list(idx_cols)
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return _write_dataset_grouped_workbook(
+        prepared,
+        output_path,
+        dataset_column=dataset_column,
+        index_columns_map=index_map,
+        fill_value=fill_value,
+    )
 
 
 def export_three_line_tables(
@@ -2075,5 +2385,6 @@ __all__ = [
     "evaluate_and_export",
     "evaluate_and_export_autoname",   # 新增导出
     "export_to_excel",
+    "export_dataset_grouped_tables",
     "export_three_line_tables",
 ]
