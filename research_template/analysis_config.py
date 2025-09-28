@@ -110,6 +110,11 @@ PARETO_MIN_VALIDATION_ROAUC: float = 0.81
 # 🟡 Maximum absolute AUROC gap between train and validation for Pareto members.
 PARETO_MAX_ABS_DELTA_AUC: float = 0.035
 
+# 🟡 Default plotting appearance. Set to ``None`` to keep Matplotlib defaults.
+PLOT_THEME: Optional[str] = "paper"
+PLOT_LATIN_FONT_FAMILY: str = "Times New Roman"
+PLOT_CHINESE_FONT_FAMILY: Optional[str] = "Microsoft YaHei"
+
 # 🟡 Candidate hidden-layer widths for the shared SUAVE backbone.
 HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
     "lean": (64, 32),
@@ -139,6 +144,15 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
     "optuna_study_prefix": "supervised",
     "optuna_storage": None,
     "output_dir_name": "research_outputs_supervised",
+    "plot_theme": PLOT_THEME,
+    "tstr_models": ("Logistic regression",),
+    "tstr_metric_labels": {
+        "accuracy": "Accuracy",
+        "roc_auc": "AUROC",
+        "delta_accuracy": "ΔAccuracy",
+        "delta_roc_auc": "ΔAUROC",
+    },
+    "training_color_palette": None,
 }
 
 # 🟡 Script-mode defaults that force regeneration of cached artefacts。
@@ -169,10 +183,10 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "evaluation_reports": "06_evaluation_metrics",
     "bootstrap_analysis": "07_bootstrap_analysis",
     "baseline_models": "08_baseline_models",
-    "tstr_trtr": "09_tstr_trtr_transfer",
-    "distribution_shift": "10_distribution_shift",
-    "privacy_assessment": "11_privacy_assessment",
-    "visualisations": "12_visualizations",
+    "interpretation": "09_interpretation",
+    "tstr_trtr": "10_tstr_trtr_transfer",
+    "distribution_shift": "11_distribution_shift",
+    "privacy_assessment": "12_privacy_assessment",
 }
 
 # =============================================================================

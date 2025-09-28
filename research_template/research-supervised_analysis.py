@@ -56,6 +56,7 @@ from analysis_config import (
     FORCE_UPDATE_FLAG_DEFAULTS,
     PARETO_MAX_ABS_DELTA_AUC,
     PARETO_MIN_VALIDATION_ROAUC,
+    PLOT_THEME,
     RANDOM_STATE,
     TARGET_COLUMNS,
     TARGET_LABEL,
@@ -100,19 +101,23 @@ from analysis_utils import (  # noqa: E402
     confirm_model_loading_plan_selection,
     resolve_suave_fit_kwargs,
     resolve_analysis_output_root,
+    configure_plot_theme,
     plot_benchmark_curves,
     plot_calibration_curves,
     plot_latent_space,
     plot_transfer_metric_boxes,
+    plot_transfer_metric_bars,
     load_tstr_training_sets_from_tsv,
     save_tstr_training_sets_to_tsv,
     collect_transfer_bootstrap_records,
+    compute_transfer_delta_bootstrap,
     prepare_features,
     render_dataframe,
     schema_to_dataframe,
     to_numeric_frame,
     load_model_manifest,
     record_model_manifest,
+    build_training_color_map,
     DISTRIBUTION_SHIFT_OVERALL_NOTE,
     DISTRIBUTION_SHIFT_PER_FEATURE_NOTE,
     _interpret_feature_shift,
@@ -155,6 +160,15 @@ from suave.plots import (  # noqa: E402
 TARGET_LABEL = "in_hospital_mortality"
 
 analysis_config = build_analysis_config()
+configure_plot_theme(analysis_config.get("plot_theme", PLOT_THEME))
+TSTR_METRIC_LABELS: Dict[str, str] = dict(
+    analysis_config.get("tstr_metric_labels", {})
+)
+TSTR_BASELINE_MODELS: Optional[Sequence[str]] = analysis_config.get("tstr_models")
+TRAINING_COLOR_PALETTE: Optional[Sequence[str] | str] = analysis_config.get(
+    "training_color_palette"
+)
+LATENT_CORRELATION_FORMATS: Tuple[str, ...] = ("jpg", "svg", "pdf", "png")
 IS_INTERACTIVE = is_interactive_session()
 
 DATASET_NAME_MAP = BASELINE_DATASET_LABELS
@@ -250,7 +264,7 @@ BASELINE_MODELS_DIR = analysis_dirs["baseline_models"]
 TSTR_TRTR_DIR = analysis_dirs["tstr_trtr"]
 DISTRIBUTION_SHIFT_DIR = analysis_dirs["distribution_shift"]
 PRIVACY_ASSESSMENT_DIR = analysis_dirs["privacy_assessment"]
-VISUALISATIONS_DIR = analysis_dirs["visualisations"]
+INTERPRETATION_DIR = analysis_dirs["interpretation"]
 
 analysis_config["optuna_storage"] = (
     f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
@@ -302,6 +316,12 @@ schema = define_schema(
 
 schema_df = schema_to_dataframe(schema).reset_index(drop=True)
 render_dataframe(schema_df, title="Schema overview", floatfmt=None)
+
+schema_dir = DATA_SCHEMA_DIR
+schema_dir.mkdir(parents=True, exist_ok=True)
+schema_excel_path = schema_dir / f"schema_{TARGET_LABEL}.xlsx"
+schema_df.to_excel(schema_excel_path, index=False)
+print("Saved schema workbook to", schema_excel_path)
 
 
 model_loading_plan: ModelLoadingPlan = resolve_model_loading_plan(
@@ -819,6 +839,17 @@ if external_features is not None and external_labels is not None:
     external_name = EXTERNAL_DATASET_NAME or "External validation"
     evaluation_datasets[external_name] = (external_features, external_labels)
 
+evaluation_cache_path = DATA_SCHEMA_DIR / f"evaluation_datasets_{TARGET_LABEL}.joblib"
+joblib.dump(
+    {
+        "target_label": TARGET_LABEL,
+        "feature_columns": list(FEATURE_COLUMNS),
+        "datasets": evaluation_datasets,
+    },
+    evaluation_cache_path,
+)
+print("Saved evaluation datasets to", evaluation_cache_path)
+
 probability_map: Dict[str, np.ndarray] = {}
 label_map: Dict[str, np.ndarray] = {}
 metrics_rows: List[Dict[str, object]] = []
@@ -878,7 +909,7 @@ benchmark_datasets = [
     )
     if name is not None
 ]
-benchmark_curve_paths: List[Path] = []
+benchmark_curve_paths: List[Tuple[str, Path]] = []
 
 for dataset_name in benchmark_datasets:
     if dataset_name not in label_map:
@@ -898,7 +929,7 @@ for dataset_name in benchmark_datasets:
         print(f"No model probabilities available for {dataset_name}.")
         continue
 
-    figure_path = plot_benchmark_curves(
+    figure_paths = plot_benchmark_curves(
         dataset_name,
         label_map[dataset_name],
         model_probabilities,
@@ -906,8 +937,9 @@ for dataset_name in benchmark_datasets:
         target_label=TARGET_LABEL,
         abbreviation_lookup=model_abbreviation_lookup,
     )
-    if figure_path is not None:
-        benchmark_curve_paths.append(figure_path)
+    if figure_paths is not None:
+        for curve_type, path in figure_paths.items():
+            benchmark_curve_paths.append((curve_type, path))
 
 
 # %% [markdown]
@@ -1488,6 +1520,244 @@ export_three_line_tables(
 
 print("Saved formatted three-line benchmark workbook to", three_line_benchmark_path)
 # %% [markdown]
+# ## SUAVE latent interpretation
+#
+# Summarise latent-feature-target relationships before exploring transfer
+# learning. Correlation tables and visualisations are written to the
+# interpretation directory so analysts can reconcile explainability artefacts
+# with downstream evaluations.
+
+# %%
+
+latent_correlation_base = (
+    INTERPRETATION_DIR / f"latent_clinical_correlation_{TARGET_LABEL}"
+)
+overall_corr_path = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_correlations.csv"
+)
+overall_pval_path = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_pvalues.csv"
+)
+overall_bubble_base = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_bubble"
+)
+overall_corr_heatmap_base = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_corr_heatmap"
+)
+overall_pval_heatmap_base = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_pvalue_heatmap"
+)
+
+overall_corr, overall_pvals = compute_feature_latent_correlation(
+    model,
+    X_train_model,
+    targets=y_train_model,
+    target_name=TARGET_LABEL,
+    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
+)
+overall_corr.to_csv(overall_corr_path)
+overall_pvals.to_csv(overall_pval_path)
+
+overall_path_graph_base = latent_correlation_base.with_name(
+    f"{latent_correlation_base.name}_path_graph"
+)
+overall_path_fig, _overall_path_ax = plot_feature_latent_outcome_path_graph(
+    model,
+    X_train_model,
+    y=y_train_model,
+    target_name=TARGET_LABEL,
+    node_label_mapping=PATH_GRAPH_NODE_LABELS,
+    node_color_mapping=PATH_GRAPH_NODE_COLORS,
+    node_group_mapping=PATH_GRAPH_NODE_GROUPS,
+    group_color_mapping=PATH_GRAPH_GROUP_COLORS,
+    edge_label_top_k=15,
+    figure_kwargs={"figsize": (14, 8)},
+)
+overall_path_graph_path = overall_path_graph_base.with_suffix(".png")
+overall_path_fig.savefig(overall_path_graph_path, dpi=300, bbox_inches="tight")
+overall_path_fig.savefig(
+    overall_path_graph_base.with_suffix(".pdf"), bbox_inches="tight"
+)
+plt.close(overall_path_fig)
+
+overall_group_label = PATH_GRAPH_NODE_GROUPS.get(TARGET_LABEL, TARGET_LABEL)
+
+overall_bubble_fig, _overall_bubble_ax = plot_feature_latent_correlation_bubble(
+    model,
+    X_train_model,
+    targets=y_train_model,
+    target_name=TARGET_LABEL,
+    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
+    variable_name=PATH_GRAPH_NODE_LABELS,
+    title=overall_group_label,
+    output_path=overall_bubble_base,
+    output_formats=LATENT_CORRELATION_FORMATS,
+    correlations=overall_corr,
+    p_values=overall_pvals,
+)
+plt.close(overall_bubble_fig)
+overall_bubble_path = overall_bubble_base.with_suffix(".png")
+
+overall_corr_fig, _overall_corr_ax = plot_feature_latent_correlation_heatmap(
+    model,
+    X_train_model,
+    targets=y_train_model,
+    target_name=TARGET_LABEL,
+    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
+    variable_name=PATH_GRAPH_NODE_LABELS,
+    title=overall_group_label,
+    output_path=overall_corr_heatmap_base,
+    output_formats=LATENT_CORRELATION_FORMATS,
+    correlations=overall_corr,
+    p_values=overall_pvals,
+)
+plt.close(overall_corr_fig)
+overall_corr_heatmap_path = overall_corr_heatmap_base.with_suffix(".png")
+
+overall_pval_fig, _overall_pval_ax = plot_feature_latent_correlation_heatmap(
+    model,
+    X_train_model,
+    targets=y_train_model,
+    target_name=TARGET_LABEL,
+    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
+    variable_name=PATH_GRAPH_NODE_LABELS,
+    title=overall_group_label,
+    value="pvalue",
+    output_path=overall_pval_heatmap_base,
+    output_formats=LATENT_CORRELATION_FORMATS,
+    correlations=overall_corr,
+    p_values=overall_pvals,
+)
+plt.close(overall_pval_fig)
+overall_pval_heatmap_path = overall_pval_heatmap_base.with_suffix(".png")
+
+feature_only_corr = overall_corr.drop(index=TARGET_LABEL, errors="ignore")
+has_latent_correlations = not feature_only_corr.empty
+if not has_latent_correlations:
+    print("Latent-clinical correlation heatmap could not be generated.")
+else:
+    top_correlated = (
+        feature_only_corr.abs().max(axis=1).sort_values(ascending=False).head(10)
+    )
+    render_dataframe(
+        top_correlated.rename("max_abs_correlation")
+        .reset_index()
+        .rename(columns={"index": "variable"}),
+        title="Top latent-clinical correlations (absolute)",
+        floatfmt=".3f",
+    )
+
+available_features = set(FEATURE_COLUMNS)
+latent_group_outputs: list[tuple[str, Path, Path, Path, Path, Path]] = []
+for group_name, candidate_columns in VAR_GROUP_DICT.items():
+    missing = sorted(set(candidate_columns) - available_features)
+    if missing:
+        print(f"Skipping unavailable variables for {group_name}: {', '.join(missing)}")
+    group_features = [
+        column for column in candidate_columns if column in available_features
+    ]
+    if not group_features:
+        continue
+
+    group_base = latent_correlation_base.with_name(
+        f"{latent_correlation_base.name}_{group_name}"
+    )
+    group_corr, group_pvals = compute_feature_latent_correlation(
+        model,
+        X_train_model,
+        targets=y_train_model,
+        target_name=TARGET_LABEL,
+        variables=group_features + [TARGET_LABEL],
+    )
+    corr_path = group_base.with_name(f"{group_base.name}_correlations.csv")
+    pval_path = group_base.with_name(f"{group_base.name}_pvalues.csv")
+    group_corr.to_csv(corr_path)
+    group_pvals.to_csv(pval_path)
+
+    bubble_base = group_base.with_name(f"{group_base.name}_bubble")
+    corr_heatmap_base = group_base.with_name(f"{group_base.name}_corr_heatmap")
+    pval_heatmap_base = group_base.with_name(f"{group_base.name}_pvalue_heatmap")
+
+    group_label_candidates = {
+        PATH_GRAPH_NODE_GROUPS.get(feature, group_name.replace("_", " ").title())
+        for feature in group_features
+    }
+    group_label = (
+        group_label_candidates.pop()
+        if len(group_label_candidates) == 1
+        else group_name.replace("_", " ").title()
+    )
+
+    bubble_fig, _bubble_ax = plot_feature_latent_correlation_bubble(
+        model,
+        X_train_model,
+        targets=y_train_model,
+        target_name=TARGET_LABEL,
+        variables=group_features + [TARGET_LABEL],
+        variable_name=PATH_GRAPH_NODE_LABELS,
+        title=group_label,
+        output_path=bubble_base,
+        output_formats=LATENT_CORRELATION_FORMATS,
+        correlations=group_corr,
+        p_values=group_pvals,
+    )
+    plt.close(bubble_fig)
+
+    corr_fig, _corr_ax = plot_feature_latent_correlation_heatmap(
+        model,
+        X_train_model,
+        targets=y_train_model,
+        target_name=TARGET_LABEL,
+        variables=group_features + [TARGET_LABEL],
+        variable_name=PATH_GRAPH_NODE_LABELS,
+        title=group_label,
+        output_path=corr_heatmap_base,
+        output_formats=LATENT_CORRELATION_FORMATS,
+        correlations=group_corr,
+        p_values=group_pvals,
+    )
+    plt.close(corr_fig)
+
+    pval_fig, _pval_ax = plot_feature_latent_correlation_heatmap(
+        model,
+        X_train_model,
+        targets=y_train_model,
+        target_name=TARGET_LABEL,
+        variables=group_features + [TARGET_LABEL],
+        variable_name=PATH_GRAPH_NODE_LABELS,
+        title=group_label,
+        value="pvalue",
+        output_path=pval_heatmap_base,
+        output_formats=LATENT_CORRELATION_FORMATS,
+        correlations=group_corr,
+        p_values=group_pvals,
+    )
+    plt.close(pval_fig)
+
+    latent_group_outputs.append(
+        (
+            group_label,
+            bubble_base.with_suffix(".png"),
+            corr_heatmap_base.with_suffix(".png"),
+            pval_heatmap_base.with_suffix(".png"),
+            corr_path,
+            pval_path,
+        )
+    )
+
+latent_features = {
+    name: features for name, (features, _) in evaluation_datasets.items()
+}
+latent_labels = {name: labels for name, (_, labels) in evaluation_datasets.items()}
+latent_path = INTERPRETATION_DIR / f"latent_{TARGET_LABEL}.png"
+plot_latent_space(
+    model,
+    latent_features,
+    latent_labels,
+    target_name=TARGET_LABEL,
+    output_path=latent_path,
+)
+# %% [markdown]
 # ## TSTR/TRTR, distribution shift, and privacy checks
 #
 # Compare models trained on synthetic versus real data while reproducing the
@@ -1581,7 +1851,11 @@ if external_features is not None and external_labels is not None:
         external_labels.reset_index(drop=True),
     )
 
-model_factories = dict(make_baseline_model_factories(RANDOM_STATE))
+model_factories = dict(
+    make_baseline_model_factories(
+        RANDOM_STATE, selected_models=TSTR_BASELINE_MODELS
+    )
+)
 if INCLUDE_SUAVE_TRANSFER and optuna_best_params:
     suave_fit_kwargs = resolve_suave_fit_kwargs(optuna_best_params)
 
@@ -1601,6 +1875,9 @@ elif INCLUDE_SUAVE_TRANSFER and not optuna_best_params:
 
 training_order = list(training_sets_numeric.keys())
 model_order = list(model_factories.keys())
+training_color_map = build_training_color_map(
+    training_order, palette=TRAINING_COLOR_PALETTE
+)
 
 
 def _is_trtr_dataset(name: str) -> bool:
@@ -1801,6 +2078,16 @@ combined_bootstrap_df = (
     if transfer_bootstrap_frames
     else pd.DataFrame()
 )
+delta_bootstrap_df = compute_transfer_delta_bootstrap(
+    combined_bootstrap_df,
+    baseline_training_dataset="TRTR (real)",
+    metrics=("accuracy", "roc_auc"),
+)
+augmented_bootstrap_df = (
+    pd.concat([combined_bootstrap_df, delta_bootstrap_df], ignore_index=True)
+    if not delta_bootstrap_df.empty
+    else combined_bootstrap_df
+)
 
 if not combined_summary_df.empty:
     render_dataframe(
@@ -1854,10 +2141,42 @@ if not combined_bootstrap_df.empty:
                 model_order=model_order,
                 output_dir=TSTR_TRTR_DIR,
                 target_label=TARGET_LABEL,
+                color_map=training_color_map,
+                metric_labels=TSTR_METRIC_LABELS,
             )
             if figure_path is not None:
                 tstr_figure_paths.append(figure_path)
                 tstr_plot_path = figure_path
+            bar_path = plot_transfer_metric_bars(
+                combined_summary_df,
+                metric=metric_name,
+                evaluation_dataset=evaluation_name,
+                training_order=training_order,
+                model_order=model_order,
+                output_dir=TSTR_TRTR_DIR,
+                target_label=TARGET_LABEL,
+                color_map=training_color_map,
+                metric_labels=TSTR_METRIC_LABELS,
+            )
+            if bar_path is not None:
+                tstr_figure_paths.append(bar_path)
+
+if not delta_bootstrap_df.empty:
+    for evaluation_name in evaluation_sets_numeric.keys():
+        for metric_name in ("delta_accuracy", "delta_roc_auc"):
+            figure_path = plot_transfer_metric_boxes(
+                delta_bootstrap_df,
+                metric=metric_name,
+                evaluation_dataset=evaluation_name,
+                training_order=training_order,
+                model_order=model_order,
+                output_dir=TSTR_TRTR_DIR,
+                target_label=TARGET_LABEL,
+                color_map=training_color_map,
+                metric_labels=TSTR_METRIC_LABELS,
+            )
+            if figure_path is not None:
+                tstr_figure_paths.append(figure_path)
 
 tstr_excel_path = TSTR_TRTR_DIR / "TSTR_TRTR_eval.xlsx"
 with pd.ExcelWriter(tstr_excel_path) as writer:
@@ -1865,8 +2184,12 @@ with pd.ExcelWriter(tstr_excel_path) as writer:
         combined_summary_df.to_excel(writer, sheet_name="summary", index=False)
     if not combined_plot_df.empty:
         combined_plot_df.to_excel(writer, sheet_name="metrics", index=False)
-    if not combined_bootstrap_df.empty:
-        combined_bootstrap_df.to_excel(writer, sheet_name="bootstrap", index=False)
+    if not augmented_bootstrap_df.empty:
+        augmented_bootstrap_df.to_excel(writer, sheet_name="bootstrap", index=False)
+    if not delta_bootstrap_df.empty:
+        delta_bootstrap_df.to_excel(
+            writer, sheet_name="bootstrap_delta", index=False
+        )
     if tstr_summary_df is not None and not tstr_summary_df.empty:
         tstr_summary_df.to_excel(writer, sheet_name="tstr_summary", index=False)
     if trtr_summary_df is not None and not trtr_summary_df.empty:
@@ -1971,7 +2294,7 @@ real_features_numeric = training_sets_numeric.get(
     "TRTR (real)", (pd.DataFrame(), pd.Series(dtype=float))
 )[0]
 synthesis_features_numeric = training_sets_numeric.get(
-    "TSTR synthesis", (pd.DataFrame(), pd.Series(dtype=float))
+    "TSTR", (pd.DataFrame(), pd.Series(dtype=float))
 )[0]
 
 c2st_model_factories = make_baseline_model_factories(RANDOM_STATE)
@@ -2258,240 +2581,6 @@ render_dataframe(
 
 
 # %% [markdown]
-# ## Latent space correlation analysis
-#
-# Quantify the relationship between latent representations and clinical
-# features using Spearman correlation. The multilayer path graph provides the
-# primary interpretation of latent-feature-target associations, with heatmaps
-# and bubble charts serving as supplementary summaries.
-
-# %%
-
-latent_correlation_base = (
-    VISUALISATIONS_DIR / f"latent_clinical_correlation_{TARGET_LABEL}"
-)
-overall_corr_path = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_correlations.csv"
-)
-overall_pval_path = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_pvalues.csv"
-)
-overall_bubble_base = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_bubble"
-)
-overall_corr_heatmap_base = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_corr_heatmap"
-)
-overall_pval_heatmap_base = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_pvalue_heatmap"
-)
-
-overall_corr, overall_pvals = compute_feature_latent_correlation(
-    model,
-    X_train_model,
-    targets=y_train_model,
-    target_name=TARGET_LABEL,
-    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-)
-overall_corr.to_csv(overall_corr_path)
-overall_pvals.to_csv(overall_pval_path)
-
-overall_path_graph_base = latent_correlation_base.with_name(
-    f"{latent_correlation_base.name}_path_graph"
-)
-overall_path_fig, _overall_path_ax = plot_feature_latent_outcome_path_graph(
-    model,
-    X_train_model,
-    y=y_train_model,
-    target_name=TARGET_LABEL,
-    node_label_mapping=PATH_GRAPH_NODE_LABELS,
-    node_color_mapping=PATH_GRAPH_NODE_COLORS,
-    node_group_mapping=PATH_GRAPH_NODE_GROUPS,
-    group_color_mapping=PATH_GRAPH_GROUP_COLORS,
-    edge_label_top_k=15,
-    figure_kwargs={"figsize": (14, 8)},
-)
-overall_path_graph_path = overall_path_graph_base.with_suffix(".png")
-overall_path_fig.savefig(overall_path_graph_path, dpi=300, bbox_inches="tight")
-overall_path_fig.savefig(
-    overall_path_graph_base.with_suffix(".pdf"), bbox_inches="tight"
-)
-plt.close(overall_path_fig)
-
-overall_bubble_fig, _overall_bubble_ax = plot_feature_latent_correlation_bubble(
-    model,
-    X_train_model,
-    targets=y_train_model,
-    target_name=TARGET_LABEL,
-    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-    title=f"Latent correlations ({TARGET_LABEL}) – bubble chart",
-    output_path=overall_bubble_base,
-    correlations=overall_corr,
-    p_values=overall_pvals,
-)
-plt.close(overall_bubble_fig)
-overall_bubble_path = overall_bubble_base.with_suffix(".png")
-
-overall_corr_fig, _overall_corr_ax = plot_feature_latent_correlation_heatmap(
-    model,
-    X_train_model,
-    targets=y_train_model,
-    target_name=TARGET_LABEL,
-    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-    title=f"Latent correlations ({TARGET_LABEL}) – correlation heatmap",
-    output_path=overall_corr_heatmap_base,
-    correlations=overall_corr,
-    p_values=overall_pvals,
-)
-plt.close(overall_corr_fig)
-overall_corr_heatmap_path = overall_corr_heatmap_base.with_suffix(".png")
-
-overall_pval_fig, _overall_pval_ax = plot_feature_latent_correlation_heatmap(
-    model,
-    X_train_model,
-    targets=y_train_model,
-    target_name=TARGET_LABEL,
-    variables=list(FEATURE_COLUMNS) + [TARGET_LABEL],
-    title=f"Latent correlations ({TARGET_LABEL}) – p-value heatmap",
-    value="pvalue",
-    output_path=overall_pval_heatmap_base,
-    correlations=overall_corr,
-    p_values=overall_pvals,
-)
-plt.close(overall_pval_fig)
-overall_pval_heatmap_path = overall_pval_heatmap_base.with_suffix(".png")
-
-feature_only_corr = overall_corr.drop(index=TARGET_LABEL, errors="ignore")
-has_latent_correlations = not feature_only_corr.empty
-if not has_latent_correlations:
-    print("Latent-clinical correlation heatmap could not be generated.")
-else:
-    top_correlated = (
-        feature_only_corr.abs().max(axis=1).sort_values(ascending=False).head(10)
-    )
-    render_dataframe(
-        top_correlated.rename("max_abs_correlation")
-        .reset_index()
-        .rename(columns={"index": "variable"}),
-        title="Top latent-clinical correlations (absolute)",
-        floatfmt=".3f",
-    )
-
-available_features = set(FEATURE_COLUMNS)
-latent_group_outputs: list[tuple[str, Path, Path, Path, Path, Path]] = []
-for group_name, candidate_columns in VAR_GROUP_DICT.items():
-    missing = sorted(set(candidate_columns) - available_features)
-    if missing:
-        print(f"Skipping unavailable variables for {group_name}: {', '.join(missing)}")
-    group_features = [
-        column for column in candidate_columns if column in available_features
-    ]
-    if not group_features:
-        continue
-
-    group_base = latent_correlation_base.with_name(
-        f"{latent_correlation_base.name}_{group_name}"
-    )
-    group_corr, group_pvals = compute_feature_latent_correlation(
-        model,
-        X_train_model,
-        targets=y_train_model,
-        target_name=TARGET_LABEL,
-        variables=group_features + [TARGET_LABEL],
-    )
-    corr_path = group_base.with_name(f"{group_base.name}_correlations.csv")
-    pval_path = group_base.with_name(f"{group_base.name}_pvalues.csv")
-    group_corr.to_csv(corr_path)
-    group_pvals.to_csv(pval_path)
-
-    bubble_base = group_base.with_name(f"{group_base.name}_bubble")
-    corr_heatmap_base = group_base.with_name(f"{group_base.name}_corr_heatmap")
-    pval_heatmap_base = group_base.with_name(f"{group_base.name}_pvalue_heatmap")
-
-    bubble_fig, _bubble_ax = plot_feature_latent_correlation_bubble(
-        model,
-        X_train_model,
-        targets=y_train_model,
-        target_name=TARGET_LABEL,
-        variables=group_features + [TARGET_LABEL],
-        title=(
-            f"Latent correlations ({TARGET_LABEL}) – "
-            f"{group_name.replace('_', ' ').title()} bubble"
-        ),
-        output_path=bubble_base,
-        correlations=group_corr,
-        p_values=group_pvals,
-    )
-    plt.close(bubble_fig)
-
-    corr_fig, _corr_ax = plot_feature_latent_correlation_heatmap(
-        model,
-        X_train_model,
-        targets=y_train_model,
-        target_name=TARGET_LABEL,
-        variables=group_features + [TARGET_LABEL],
-        title=(
-            f"Latent correlations ({TARGET_LABEL}) – "
-            f"{group_name.replace('_', ' ').title()} correlation"
-        ),
-        output_path=corr_heatmap_base,
-        correlations=group_corr,
-        p_values=group_pvals,
-    )
-    plt.close(corr_fig)
-
-    pval_fig, _pval_ax = plot_feature_latent_correlation_heatmap(
-        model,
-        X_train_model,
-        targets=y_train_model,
-        target_name=TARGET_LABEL,
-        variables=group_features + [TARGET_LABEL],
-        title=(
-            f"Latent correlations ({TARGET_LABEL}) – "
-            f"{group_name.replace('_', ' ').title()} p-values"
-        ),
-        value="pvalue",
-        output_path=pval_heatmap_base,
-        correlations=group_corr,
-        p_values=group_pvals,
-    )
-    plt.close(pval_fig)
-
-    latent_group_outputs.append(
-        (
-            group_name,
-            bubble_base.with_suffix(".png"),
-            corr_heatmap_base.with_suffix(".png"),
-            pval_heatmap_base.with_suffix(".png"),
-            corr_path,
-            pval_path,
-        )
-    )
-
-
-# %% [markdown]
-# ## Latent space interpretation
-#
-# Project latent representations using PCA for qualitative assessment of class
-# separation across cohorts.
-
-# %%
-
-latent_features = {
-    name: features for name, (features, _) in evaluation_datasets.items()
-}
-latent_labels = {name: labels for name, (_, labels) in evaluation_datasets.items()}
-latent_path = VISUALISATIONS_DIR / f"latent_{TARGET_LABEL}.png"
-plot_latent_space(
-    model,
-    latent_features,
-    latent_labels,
-    target_name=TARGET_LABEL,
-    output_path=latent_path,
-)
-
-
-# %% [markdown]
 # ## Reporting
 #
 # Collate metrics, Optuna summary, and artifact locations into a Markdown
@@ -2576,6 +2665,9 @@ if has_latent_correlations:
     summary_lines.append(
         f"Latent-clinical p-values: {overall_pval_path.relative_to(OUTPUT_DIR)}"
     )
+    summary_lines.append(
+        f"Latent-clinical path graph: {overall_path_graph_path.relative_to(OUTPUT_DIR)}"
+    )
     if latent_group_outputs:
         summary_lines.append("Latent-clinical group artefacts:")
         for (
@@ -2594,7 +2686,7 @@ if has_latent_correlations:
                 f"p_values={pval_path.relative_to(OUTPUT_DIR)}"
             )
 else:
-    summary_lines.append("Latent-clinical visualisations: unavailable")
+    summary_lines.append("Latent-clinical interpretation assets: unavailable")
 summary_lines.append(f"Latent projection: {latent_path.relative_to(OUTPUT_DIR)}")
 summary_lines.append("")
 
@@ -2656,8 +2748,10 @@ if membership_path.exists():
         f"- Membership inference: {membership_path.relative_to(OUTPUT_DIR)}"
     )
 summary_lines.append(f"- Baseline metrics: {baseline_path.relative_to(OUTPUT_DIR)}")
-for figure_path in benchmark_curve_paths:
-    summary_lines.append(f"- Benchmark curves: {figure_path.relative_to(OUTPUT_DIR)}")
+for curve_type, figure_path in benchmark_curve_paths:
+    summary_lines.append(
+        f"- Benchmark {curve_type} curve: {figure_path.relative_to(OUTPUT_DIR)}"
+    )
 summary_lines.append("")
 
 summary_path = OUTPUT_DIR / f"evaluation_summary_{TARGET_LABEL}.md"

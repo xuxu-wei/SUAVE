@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -29,8 +30,10 @@ import pandas as pd
 from IPython.display import display
 from matplotlib import pyplot as plt
 from matplotlib.patches import Patch
+from matplotlib.ticker import MultipleLocator
 from tabulate import tabulate
 from tqdm.auto import tqdm
+import seaborn as sns
 
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
@@ -81,6 +84,9 @@ DISTRIBUTION_SHIFT_PER_FEATURE_NOTE = (
 
 
 RANDOM_STATE: int = 20201021
+DEFAULT_PLOT_THEME: Optional[str] = "paper"
+PLOT_LATIN_FONT_FAMILY: str = "Times New Roman"
+PLOT_CHINESE_FONT_FAMILY: Optional[str] = "Microsoft YaHei"
 TARGET_COLUMNS: Tuple[str, str] = ("in_hospital_mortality", "28d_mortality")
 BENCHMARK_COLUMNS = (
     "APS_III",
@@ -129,6 +135,15 @@ DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
     "optuna_study_prefix": "supervised",
     "optuna_storage": None,
     "output_dir_name": "research_outputs_supervised",
+    "plot_theme": DEFAULT_PLOT_THEME,
+    "tstr_models": ("Logistic regression",),
+    "tstr_metric_labels": {
+        "accuracy": "Accuracy",
+        "roc_auc": "AUROC",
+        "delta_accuracy": "ΔAccuracy",
+        "delta_roc_auc": "ΔAUROC",
+    },
+    "training_color_palette": None,
 }
 
 #: Default script-mode flags that determine whether cached artefacts should be
@@ -158,11 +173,67 @@ ANALYSIS_SUBDIRECTORIES: Dict[str, str] = {
     "evaluation_reports": "06_evaluation_metrics",
     "bootstrap_analysis": "07_bootstrap_analysis",
     "baseline_models": "08_baseline_models",
-    "tstr_trtr": "09_tstr_trtr_transfer",
-    "distribution_shift": "10_distribution_shift",
-    "privacy_assessment": "11_privacy_assessment",
-    "visualisations": "12_visualizations",
+    "interpretation": "09_interpretation",
+    "tstr_trtr": "10_tstr_trtr_transfer",
+    "distribution_shift": "11_distribution_shift",
+    "privacy_assessment": "12_privacy_assessment",
 }
+
+
+# =============================================================================
+# === Plot theming utilities ==================================================
+# =============================================================================
+
+
+def configure_plot_theme(
+    theme: Optional[str] = DEFAULT_PLOT_THEME,
+    *,
+    base_font: str = PLOT_LATIN_FONT_FAMILY,
+    chinese_font: Optional[str] = PLOT_CHINESE_FONT_FAMILY,
+) -> None:
+    """Apply a consistent plotting theme across evaluation figures."""
+
+    plt.rcdefaults()
+    if theme is not None:
+        sns.set_theme(context=theme)
+    else:
+        plt.style.use("default")
+
+    font_families: List[str] = [base_font]
+    if chinese_font and chinese_font not in font_families:
+        font_families.append(chinese_font)
+    plt.rcParams["font.family"] = font_families
+    plt.rcParams["font.sans-serif"] = font_families
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+configure_plot_theme()
+
+
+# =============================================================================
+# === Palette helpers =========================================================
+# =============================================================================
+
+
+def build_training_color_map(
+    training_order: Sequence[str],
+    *,
+    palette: str | Sequence[str] | None = None,
+) -> Dict[str, str]:
+    """Return a colour mapping for training datasets using a Seaborn palette."""
+
+    if not training_order:
+        return {}
+
+    if palette is None:
+        colors = sns.color_palette(None, n_colors=len(training_order))
+    else:
+        colors = sns.color_palette(palette, n_colors=len(training_order))
+
+    if not colors:
+        colors = sns.color_palette("deep", n_colors=len(training_order))
+
+    return {name: colors[idx % len(colors)] for idx, name in enumerate(training_order)}
 
 
 # =============================================================================
@@ -373,6 +444,7 @@ __all__ = [
     "make_random_forest_pipeline",
     "make_gradient_boosting_pipeline",
     "make_baseline_model_factories",
+    "build_training_color_map",
     "mutual_information_feature",
     "plot_benchmark_curves",
     "plot_calibration_curves",
@@ -403,10 +475,12 @@ __all__ = [
     "load_tstr_training_sets_from_tsv",
     "save_tstr_training_sets_to_tsv",
     "collect_transfer_bootstrap_records",
+    "compute_transfer_delta_bootstrap",
     "evaluate_transfer_baselines",
     "build_suave_model",
     "resolve_suave_fit_kwargs",
     "resolve_classification_loss_weight",
+    "plot_transfer_metric_bars",
 ]
 
 
@@ -1787,14 +1861,23 @@ def make_gradient_boosting_pipeline(
 
 def make_baseline_model_factories(
     random_state: int,
+    selected_models: Optional[Sequence[str]] = None,
 ) -> Dict[str, Callable[[], Pipeline]]:
     """Return model factories for the supervised transfer comparison."""
 
-    return {
+    all_factories: Dict[str, Callable[[], Pipeline]] = {
         "Logistic regression": lambda: make_logistic_pipeline(random_state),
         "Random forest": lambda: make_random_forest_pipeline(random_state),
         "GBDT": lambda: make_gradient_boosting_pipeline(random_state),
     }
+    if selected_models is None:
+        return all_factories
+
+    filtered: Dict[str, Callable[[], Pipeline]] = {}
+    for name in selected_models:
+        if name in all_factories:
+            filtered[name] = all_factories[name]
+    return filtered if filtered else all_factories
 
 
 def define_schema(
@@ -2022,11 +2105,11 @@ def build_tstr_training_sets(
         labels=np.asarray(unconditional_labels),
     )
     synthesis_labels = pd.Series(unconditional_labels, name=real_label_series.name)
-    datasets["TSTR synthesis"] = (
+    datasets["TSTR"] = (
         to_numeric_frame(synthesis_features.copy()).reset_index(drop=True),
         synthesis_labels.copy(),
     )
-    raw_datasets["TSTR synthesis"] = (
+    raw_datasets["TSTR"] = (
         synthesis_features,
         synthesis_labels,
     )
@@ -2042,11 +2125,11 @@ def build_tstr_training_sets(
         labels=np.asarray(balanced_labels),
     )
     balance_labels = pd.Series(balanced_labels, name=real_label_series.name)
-    datasets["TSTR synthesis-balance"] = (
+    datasets["TSTR balance"] = (
         to_numeric_frame(balance_features.copy()).reset_index(drop=True),
         balance_labels.copy(),
     )
-    raw_datasets["TSTR synthesis-balance"] = (
+    raw_datasets["TSTR balance"] = (
         balance_features,
         balance_labels,
     )
@@ -2072,11 +2155,11 @@ def build_tstr_training_sets(
     augmented_labels_series = pd.concat(
         augmented_labels, ignore_index=True
     ).reset_index(drop=True)
-    datasets["TSTR synthesis-augment"] = (
+    datasets["TSTR augment"] = (
         to_numeric_frame(raw_augmented).reset_index(drop=True),
         augmented_labels_series,
     )
-    raw_datasets["TSTR synthesis-augment"] = (
+    raw_datasets["TSTR augment"] = (
         raw_augmented,
         augmented_labels_series.copy(),
     )
@@ -2093,11 +2176,11 @@ def build_tstr_training_sets(
         labels=np.asarray(five_x_labels),
     )
     five_x_series = pd.Series(five_x_labels, name=real_label_series.name)
-    datasets["TSTR synthesis-5x"] = (
+    datasets["TSTR 5x"] = (
         to_numeric_frame(five_x_features.copy()).reset_index(drop=True),
         five_x_series.copy(),
     )
-    raw_datasets["TSTR synthesis-5x"] = (
+    raw_datasets["TSTR 5x"] = (
         five_x_features,
         five_x_series,
     )
@@ -2113,13 +2196,56 @@ def build_tstr_training_sets(
         labels=np.asarray(five_x_balanced),
     )
     five_x_balance_labels = pd.Series(five_x_balanced, name=real_label_series.name)
-    datasets["TSTR synthesis-5x balance"] = (
+    datasets["TSTR 5x balance"] = (
         to_numeric_frame(five_x_balance_features.copy()).reset_index(drop=True),
         five_x_balance_labels.copy(),
     )
-    raw_datasets["TSTR synthesis-5x balance"] = (
+    raw_datasets["TSTR 5x balance"] = (
         five_x_balance_features,
         five_x_balance_labels,
+    )
+
+    ten_x = n_train * 10
+    ten_x_labels = np.random.default_rng(random_state + 40).choice(
+        label_array,
+        size=ten_x,
+        replace=True,
+    )
+    ten_x_features = sample_features(
+        ten_x,
+        conditional=True,
+        labels=np.asarray(ten_x_labels),
+    )
+    ten_x_series = pd.Series(ten_x_labels, name=real_label_series.name)
+    datasets["TSTR 10x"] = (
+        to_numeric_frame(ten_x_features.copy()).reset_index(drop=True),
+        ten_x_series.copy(),
+    )
+    raw_datasets["TSTR 10x"] = (
+        ten_x_features,
+        ten_x_series,
+    )
+
+    ten_x_balanced = _generate_balanced_labels(
+        label_array,
+        ten_x,
+        random_state=random_state + 50,
+    )
+    ten_x_balance_features = sample_features(
+        len(ten_x_balanced),
+        conditional=True,
+        labels=np.asarray(ten_x_balanced),
+    )
+    ten_x_balance_labels = pd.Series(
+        ten_x_balanced, name=real_label_series.name
+    )
+    datasets["TSTR 10x balance"] = (
+        to_numeric_frame(ten_x_balance_features.copy()).reset_index(drop=True),
+        ten_x_balance_labels.copy(),
+    )
+    raw_datasets["TSTR 10x balance"] = (
+        ten_x_balance_features,
+        ten_x_balance_labels,
     )
 
     if return_raw:
@@ -2247,20 +2373,92 @@ def collect_transfer_bootstrap_records(
                 bootstrap_df = result_map.get("bootstrap_overall_records")
                 if bootstrap_df is None or bootstrap_df.empty:
                     continue
+                iteration = (
+                    bootstrap_df["iteration"].to_numpy()
+                    if "iteration" in bootstrap_df.columns
+                    else np.arange(len(bootstrap_df))
+                )
                 for metric in metrics:
                     if metric not in bootstrap_df.columns:
                         continue
-                    for value in bootstrap_df[metric].dropna().to_numpy():
+                    metric_values = bootstrap_df[metric].to_numpy()
+                    for idx, value in zip(iteration, metric_values):
+                        if pd.isna(value):
+                            continue
                         rows.append(
                             {
                                 "training_dataset": training_name,
                                 "evaluation_dataset": evaluation_name,
                                 "model": model_name,
+                                "iteration": int(idx) if not pd.isna(idx) else None,
                                 "metric": metric,
                                 "value": float(value),
                             }
                         )
     return pd.DataFrame(rows)
+
+
+def compute_transfer_delta_bootstrap(
+    bootstrap_df: pd.DataFrame,
+    *,
+    baseline_training_dataset: str,
+    metrics: Sequence[str] = ("accuracy", "roc_auc"),
+) -> pd.DataFrame:
+    """Return bootstrap differences relative to ``baseline_training_dataset``."""
+
+    if bootstrap_df.empty:
+        return pd.DataFrame(columns=bootstrap_df.columns)
+
+    required = {"training_dataset", "evaluation_dataset", "model", "metric", "value"}
+    if not required.issubset(bootstrap_df.columns):
+        return pd.DataFrame(columns=bootstrap_df.columns)
+
+    base_df = bootstrap_df[
+        bootstrap_df["training_dataset"] == baseline_training_dataset
+    ].copy()
+    if base_df.empty:
+        return pd.DataFrame(columns=bootstrap_df.columns)
+
+    comparison_df = bootstrap_df[
+        bootstrap_df["training_dataset"] != baseline_training_dataset
+    ].copy()
+    if comparison_df.empty:
+        return pd.DataFrame(columns=bootstrap_df.columns)
+
+    metric_set = set(metrics)
+    comparison_df = comparison_df[
+        comparison_df["metric"].isin(metric_set)
+    ].copy()
+    base_df = base_df[base_df["metric"].isin(metric_set)].copy()
+    if comparison_df.empty or base_df.empty:
+        return pd.DataFrame(columns=bootstrap_df.columns)
+
+    merge_keys = ["evaluation_dataset", "model", "metric"]
+    if "iteration" in base_df.columns and "iteration" in comparison_df.columns:
+        merge_keys.append("iteration")
+
+    merged = comparison_df.merge(
+        base_df[
+            merge_keys
+            + (["value"] if "value" in base_df.columns else [])
+            + (["training_dataset"] if "training_dataset" in base_df.columns else [])
+        ].rename(columns={"value": "baseline_value"}),
+        on=merge_keys,
+        how="inner",
+        suffixes=("", "_baseline"),
+    )
+
+    if merged.empty:
+        return pd.DataFrame(columns=bootstrap_df.columns)
+
+    merged["value"] = merged["value"] - merged["baseline_value"]
+    merged["metric"] = merged["metric"].map(lambda name: f"delta_{name}")
+    drop_cols = ["baseline_value"]
+    baseline_training_col = "training_dataset_baseline"
+    if baseline_training_col in merged.columns:
+        drop_cols.append(baseline_training_col)
+    merged = merged.drop(columns=drop_cols)
+    return merged
 
 
 def evaluate_transfer_baselines(
@@ -2647,11 +2845,7 @@ def plot_calibration_curves(
 ) -> None:
     """Generate calibration curves with Brier scores annotated in the legend."""
 
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(
-        [0, 1], [0, 1], linestyle="--", color="tab:gray", label="Perfect calibration"
-    )
-
+    calibration_records: List[Tuple[str, np.ndarray, np.ndarray, float]] = []
     for dataset_name, probs in probability_map.items():
         labels = label_map[dataset_name]
         pos_probs = extract_positive_probabilities(probs)
@@ -2660,15 +2854,42 @@ def plot_calibration_curves(
         except ValueError:
             continue
         brier = brier_score_loss(labels, pos_probs)
-        ax.plot(
-            mean_pred,
-            frac_pos,
-            marker="o",
-            label=f"{dataset_name} (Brier={brier:.3f})",
-        )
+        calibration_records.append((dataset_name, mean_pred, frac_pos, brier))
 
-    ax.set_xlabel("Predicted probability")
-    ax.set_ylabel("Observed frequency")
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_aspect("equal", adjustable="box")
+
+    if not calibration_records:
+        ax.text(0.5, 0.5, "Insufficient variation", ha="center", va="center")
+        axis_min, axis_max = 0.0, 1.0
+    else:
+        x_values = np.concatenate([record[1] for record in calibration_records])
+        y_values = np.concatenate([record[2] for record in calibration_records])
+        combined = np.concatenate([x_values, y_values])
+        axis_min = float(np.nanmin(combined))
+        axis_max = float(np.nanmax(combined))
+        if axis_min == axis_max:
+            axis_min -= 0.05
+            axis_max += 0.05
+        padding = max((axis_max - axis_min) * 0.05, 1e-3)
+        axis_min -= padding
+        axis_max += padding
+
+        reference = np.linspace(axis_min, axis_max, 2)
+        ax.plot(reference, reference, linestyle="--", color="tab:gray", label="Perfect calibration")
+
+        for dataset_name, mean_pred, frac_pos, brier in calibration_records:
+            ax.plot(
+                mean_pred,
+                frac_pos,
+                marker="o",
+                label=f"{dataset_name} (Brier={brier:.3f})",
+            )
+
+    ax.set_xlim(axis_min, axis_max)
+    ax.set_ylim(axis_min, axis_max)
+    ax.set_xlabel("Mean predicted probability")
+    ax.set_ylabel("Observed probability")
     ax.set_title(f"Calibration: {target_name}")
     ax.legend()
     fig.tight_layout()
@@ -2749,25 +2970,22 @@ def plot_benchmark_curves(
     target_label: str,
     abbreviation_lookup: Optional[Mapping[str, str]] = None,
     n_bins: int = 10,
-) -> Optional[Path]:
-    """Plot ROC and calibration curves for the supplied dataset."""
+) -> Optional[Mapping[str, Path]]:
+    """Plot benchmark ROC and calibration curves for the supplied dataset."""
 
     unique_labels = np.unique(y_true)
     if unique_labels.size < 2:
         print(f"Skipping {dataset_name} curves because only one class is present.")
         return None
 
-    fig, (roc_ax, cal_ax) = plt.subplots(1, 2, figsize=(12, 5))
-
+    roc_fig, roc_ax = plt.subplots(figsize=(6, 6))
+    roc_ax.set_aspect("equal", adjustable="box")
     roc_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Chance")
     roc_ax.set_title(f"ROC – {dataset_name}")
     roc_ax.set_xlabel("False positive rate")
     roc_ax.set_ylabel("True positive rate")
 
-    cal_ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect")
-    cal_ax.set_title(f"Calibration – {dataset_name}")
-    cal_ax.set_xlabel("Mean predicted probability")
-    cal_ax.set_ylabel("Fraction of positives")
+    calibration_records: List[Tuple[str, np.ndarray, np.ndarray]] = []
 
     for model_name, probs in model_probability_lookup.items():
         abbrev = (
@@ -2788,19 +3006,63 @@ def plot_benchmark_curves(
                 f"Calibration curve for {model_name} on {dataset_name} skipped due to insufficient variation."
             )
         else:
-            cal_ax.plot(mean_pred, frac_pos, marker="o", label=abbrev)
+            calibration_records.append((abbrev, mean_pred, frac_pos))
 
     roc_ax.legend(loc="lower right")
-    cal_ax.legend(loc="upper left")
-    fig.suptitle(f"Benchmark ROC & calibration – {dataset_name}")
-    fig.tight_layout()
+    roc_fig.tight_layout()
 
     dataset_slug = dataset_name.lower().replace(" ", "_")
-    figure_path = output_dir / f"benchmark_curves_{dataset_slug}_{target_label}.png"
-    _save_figure_multiformat(fig, figure_path.with_suffix(""), use_tight_layout=True)
-    plt.close(fig)
-    print(f"Saved benchmark curves for {dataset_name} to {figure_path}")
-    return figure_path
+    roc_path = output_dir / f"benchmark_roc_{dataset_slug}_{target_label}.png"
+    _save_figure_multiformat(roc_fig, roc_path.with_suffix(""), use_tight_layout=True)
+    plt.close(roc_fig)
+    print(f"Saved benchmark ROC curves for {dataset_name} to {roc_path}")
+
+    calibration_paths: Optional[Path] = None
+    if calibration_records:
+        cal_fig, cal_ax = plt.subplots(figsize=(6, 6))
+        cal_ax.set_aspect("equal", adjustable="box")
+
+        x_values = np.concatenate([record[1] for record in calibration_records])
+        y_values = np.concatenate([record[2] for record in calibration_records])
+        combined = np.concatenate([x_values, y_values])
+        axis_min = float(np.nanmin(combined))
+        axis_max = float(np.nanmax(combined))
+        if axis_min == axis_max:
+            axis_min -= 0.05
+            axis_max += 0.05
+        padding = max((axis_max - axis_min) * 0.05, 1e-3)
+        axis_min -= padding
+        axis_max += padding
+
+        reference = np.linspace(axis_min, axis_max, 2)
+        cal_ax.plot(reference, reference, linestyle="--", color="tab:gray", label="Perfect calibration")
+
+        for abbrev, mean_pred, frac_pos in calibration_records:
+            cal_ax.plot(mean_pred, frac_pos, marker="o", label=abbrev)
+
+        cal_ax.set_xlim(axis_min, axis_max)
+        cal_ax.set_ylim(axis_min, axis_max)
+        cal_ax.set_title(f"Calibration – {dataset_name}")
+        cal_ax.set_xlabel("Mean predicted probability")
+        cal_ax.set_ylabel("Observed probability")
+        cal_ax.legend(loc="best")
+        cal_fig.tight_layout()
+
+        calibration_paths = (
+            output_dir / f"benchmark_calibration_{dataset_slug}_{target_label}.png"
+        )
+        _save_figure_multiformat(
+            cal_fig, calibration_paths.with_suffix(""), use_tight_layout=True
+        )
+        plt.close(cal_fig)
+        print(
+            f"Saved benchmark calibration curves for {dataset_name} to {calibration_paths}"
+        )
+
+    result: Dict[str, Path] = {"roc": roc_path}
+    if calibration_paths is not None:
+        result["calibration"] = calibration_paths
+    return result
 
 
 def plot_transfer_metric_boxes(
@@ -2813,6 +3075,10 @@ def plot_transfer_metric_boxes(
     output_dir: Path,
     target_label: str,
     color_map: Optional[Mapping[str, str]] = None,
+    metric_labels: Optional[Mapping[str, str]] = None,
+    y_padding: float = 0.02,
+    minor_tick: float = 0.05,
+    major_tick: float = 0.1,
 ) -> Optional[Path]:
     """Plot box plots of transfer metrics grouped by model and training dataset."""
 
@@ -2826,6 +3092,7 @@ def plot_transfer_metric_boxes(
         )
         return None
 
+    metric_labels = metric_labels or {}
     available_training = subset["training_dataset"].unique()
     training_order = [name for name in training_order if name in available_training]
     available_models = subset["model"].unique()
@@ -2839,15 +3106,12 @@ def plot_transfer_metric_boxes(
     model_count = len(model_order)
     dataset_count = len(training_order)
     if color_map is None:
-        cmap = plt.get_cmap("tab10")
-        color_map = {
-            name: cmap(idx % cmap.N)
-            for idx, name in enumerate(training_order)
-        }
+        color_map = build_training_color_map(training_order)
 
     fig_width = max(6.0, model_count * 2.5)
     fig, ax = plt.subplots(figsize=(fig_width, 6.0))
     legend_handles: Dict[str, Patch] = {}
+    collected_values: List[float] = []
 
     if model_count == 1:
         model_name = model_order[0]
@@ -2863,7 +3127,9 @@ def plot_transfer_metric_boxes(
             if dataset_values.empty:
                 continue
             positions.append(float(idx))
-            box_data.append(dataset_values.to_numpy())
+            values = dataset_values.to_numpy()
+            box_data.append(values)
+            collected_values.extend(values.tolist())
             color = color_map.get(dataset_name, "#1f77b4")
             colors.append(color)
             labels.append(dataset_name)
@@ -2884,12 +3150,18 @@ def plot_transfer_metric_boxes(
             positions=positions,
             widths=0.6,
             patch_artist=True,
+            showfliers=False,
+            boxprops={"linewidth": 1.0, "edgecolor": "black"},
+            whiskerprops={"linewidth": 1.0, "color": "black"},
+            capprops={"linewidth": 1.0, "color": "black"},
+            medianprops={"linewidth": 1.0, "color": "black"},
         )
         for patch, color in zip(bp["boxes"], colors):
             patch.set_facecolor(color)
             patch.set_alpha(0.6)
         ax.set_xticks(positions)
-        ax.set_xticklabels(labels, rotation=20, ha="right")
+        ax.set_xticklabels(labels, rotation=0, ha="center")
+        ax.set_xlabel("Training dataset")
     else:
         box_positions: List[float] = []
         box_data: List[np.ndarray] = []
@@ -2908,7 +3180,9 @@ def plot_transfer_metric_boxes(
                 offset = (dataset_idx - (dataset_count - 1) / 2) * width
                 position = float(model_idx) + offset
                 box_positions.append(position)
-                box_data.append(dataset_values.to_numpy())
+                values = dataset_values.to_numpy()
+                box_data.append(values)
+                collected_values.extend(values.tolist())
                 color = color_map.get(dataset_name, "#1f77b4")
                 box_colors.append(color)
                 if dataset_name not in legend_handles:
@@ -2928,20 +3202,51 @@ def plot_transfer_metric_boxes(
             positions=box_positions,
             widths=width,
             patch_artist=True,
+            showfliers=False,
+            boxprops={"linewidth": 1.0, "edgecolor": "black"},
+            whiskerprops={"linewidth": 1.0, "color": "black"},
+            capprops={"linewidth": 1.0, "color": "black"},
+            medianprops={"linewidth": 1.0, "color": "black"},
         )
         for patch, color in zip(bp["boxes"], box_colors):
             patch.set_facecolor(color)
             patch.set_alpha(0.6)
         ax.set_xticks(np.arange(len(model_order)))
-        ax.set_xticklabels(model_order, rotation=20, ha="right")
+        ax.set_xticklabels(model_order, rotation=0, ha="center")
         ax.set_xlabel("Model")
 
-    ax.set_ylabel(metric.upper())
-    ax.set_title(f"{metric.upper()} – {evaluation_dataset}")
+    display_label = metric_labels.get(metric, metric.replace("_", " ").upper())
+    ax.set_ylabel(display_label)
+    ax.set_title(f"{display_label} – {evaluation_dataset}")
     ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    if collected_values:
+        finite = np.asarray([value for value in collected_values if np.isfinite(value)])
+        if finite.size:
+            data_min = float(finite.min())
+            data_max = float(finite.max())
+        else:
+            data_min = data_max = 0.0
+        major_min = math.floor(data_min / major_tick) * major_tick
+        major_max = math.ceil(data_max / major_tick) * major_tick
+        if major_min == major_max:
+            major_max = major_min + major_tick
+        pad = max(y_padding, abs(major_max - major_min) * 0.05)
+        y_min = major_min - pad
+        y_max = major_max + pad
+        ax.set_ylim(y_min, y_max)
+        ax.yaxis.set_major_locator(MultipleLocator(major_tick))
+        ax.yaxis.set_minor_locator(MultipleLocator(minor_tick))
+
     if legend_handles:
-        ax.legend(handles=list(legend_handles.values()), title="Training dataset")
-    fig.tight_layout()
+        ax.legend(
+            handles=list(legend_handles.values()),
+            title="Training dataset",
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            frameon=False,
+        )
+    fig.tight_layout(rect=(0, 0, 0.85, 1))
 
     dataset_slug = slugify_identifier(evaluation_dataset)
     figure_path = (
@@ -2951,7 +3256,141 @@ def plot_transfer_metric_boxes(
     _save_figure_multiformat(fig, figure_path.with_suffix(""), use_tight_layout=True)
     plt.close(fig)
     print(
-        f"Saved {metric.upper()} box plot for {evaluation_dataset} to {figure_path}"
+        f"Saved {display_label} box plot for {evaluation_dataset} to {figure_path}"
+    )
+    return figure_path
+
+
+def plot_transfer_metric_bars(
+    summary_df: pd.DataFrame,
+    *,
+    metric: str,
+    evaluation_dataset: str,
+    training_order: Sequence[str],
+    model_order: Sequence[str],
+    output_dir: Path,
+    target_label: str,
+    color_map: Optional[Mapping[str, str]] = None,
+    metric_labels: Optional[Mapping[str, str]] = None,
+    y_limit: Tuple[float, float] = (0.5, 1.0),
+) -> Optional[Path]:
+    """Plot grouped bar charts for transfer metrics without error bars."""
+
+    if metric not in summary_df.columns:
+        return None
+
+    subset = summary_df[
+        (summary_df["evaluation_dataset"] == evaluation_dataset)
+        & summary_df[metric].notna()
+    ]
+    if subset.empty:
+        return None
+
+    metric_labels = metric_labels or {}
+    available_training = subset["training_dataset"].unique()
+    training_order = [name for name in training_order if name in available_training]
+    available_models = subset["model"].unique()
+    model_order = [name for name in model_order if name in available_models]
+    if not training_order or not model_order:
+        return None
+
+    model_count = len(model_order)
+    dataset_count = len(training_order)
+    if color_map is None:
+        color_map = build_training_color_map(training_order)
+
+    fig_width = max(6.0, model_count * 2.5)
+    fig, ax = plt.subplots(figsize=(fig_width, 6.0))
+    legend_handles: Dict[str, Patch] = {}
+
+    display_label = metric_labels.get(metric, metric.replace("_", " ").upper())
+
+    if model_count == 1:
+        model_name = model_order[0]
+        model_subset = subset[subset["model"] == model_name]
+        heights: List[float] = []
+        positions: List[float] = []
+        labels: List[str] = []
+        colors: List[str] = []
+        for idx, dataset_name in enumerate(training_order):
+            dataset_subset = model_subset[
+                model_subset["training_dataset"] == dataset_name
+            ]
+            if dataset_subset.empty:
+                continue
+            height = float(dataset_subset.iloc[0][metric])
+            heights.append(height)
+            positions.append(float(idx))
+            labels.append(dataset_name)
+            color = color_map.get(dataset_name, "#1f77b4")
+            colors.append(color)
+            if dataset_name not in legend_handles:
+                legend_handles[dataset_name] = Patch(
+                    facecolor=color,
+                    alpha=0.8,
+                    label=dataset_name,
+                )
+        if not heights:
+            plt.close(fig)
+            return None
+        ax.bar(positions, heights, color=colors, width=0.6)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(labels, rotation=0, ha="center")
+        ax.set_xlabel("Training dataset")
+    else:
+        base_positions = np.arange(model_count)
+        width = 0.8 / max(dataset_count, 1)
+        for dataset_idx, dataset_name in enumerate(training_order):
+            offsets = (dataset_idx - (dataset_count - 1) / 2) * width
+            heights: List[float] = []
+            positions: List[float] = []
+            for model_name, base_pos in zip(model_order, base_positions):
+                selection = subset[
+                    (subset["model"] == model_name)
+                    & (subset["training_dataset"] == dataset_name)
+                ]
+                if selection.empty:
+                    heights.append(np.nan)
+                    positions.append(base_pos + offsets)
+                    continue
+                heights.append(float(selection.iloc[0][metric]))
+                positions.append(base_pos + offsets)
+            color = color_map.get(dataset_name, "#1f77b4")
+            ax.bar(positions, heights, width=width, color=color, alpha=0.8, label=dataset_name)
+            if dataset_name not in legend_handles:
+                legend_handles[dataset_name] = Patch(
+                    facecolor=color,
+                    alpha=0.8,
+                    label=dataset_name,
+                )
+        ax.set_xticks(base_positions)
+        ax.set_xticklabels(model_order, rotation=0, ha="center")
+        ax.set_xlabel("Model")
+
+    ax.set_ylabel(display_label)
+    ax.set_title(f"{display_label} – {evaluation_dataset}")
+    ax.set_ylim(*y_limit)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    if legend_handles:
+        ax.legend(
+            handles=list(legend_handles.values()),
+            title="Training dataset",
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            frameon=False,
+        )
+    fig.tight_layout(rect=(0, 0, 0.85, 1))
+
+    dataset_slug = slugify_identifier(evaluation_dataset)
+    figure_path = (
+        output_dir
+        / f"tstr_trtr_{dataset_slug}_{metric.lower()}_bars_{slugify_identifier(target_label)}.png"
+    )
+    _save_figure_multiformat(fig, figure_path.with_suffix(""), use_tight_layout=True)
+    plt.close(fig)
+    print(
+        f"Saved {display_label} bar chart for {evaluation_dataset} to {figure_path}"
     )
     return figure_path
 

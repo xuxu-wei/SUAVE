@@ -33,7 +33,7 @@
 2. 外部验证集来自 eICU-CRD（`eicu-mortality-external_val.tsv`），采用与 MIMIC-IV 相同的纳入标准，同样聚焦于入院 24h 内满足 Sepsis-3 标准的患者。
 3. MIMIC-IV 测试集与 eICU 外部验证集仅用于最终评估，不参与 Optuna 搜索或其他超参选择流程。
 4. 所有 TSV 均需保留原始列名；主流程在 `examples/research_outputs_supervised/` 下派生的缓存、插补产物与评估文件应纳入审计归档，根目录仅保留研究整体的 Markdown 总结。
-5. `examples/research_outputs_supervised/` 采用与章节编号一致的分阶段目录结构：`01_data_and_schema/`、`02_feature_engineering/`、`03_optuna_search/`、`04_suave_training/`、`05_calibration_uncertainty/`、`06_evaluation_metrics/`、`07_bootstrap_analysis/`、`08_baseline_models/`、`09_tstr_trtr_transfer/`、`10_distribution_shift/`、`11_privacy_assessment/` 与 `12_visualizations/`。各阶段产物应写入对应子目录，便于审计检索。
+5. `examples/research_outputs_supervised/` 采用与章节编号一致的分阶段目录结构：`01_data_and_schema/`、`02_feature_engineering/`、`03_optuna_search/`、`04_suave_training/`、`05_calibration_uncertainty/`、`06_evaluation_metrics/`、`07_bootstrap_analysis/`、`08_baseline_models/`、`09_interpretation/`、`10_tstr_trtr_transfer/`、`11_distribution_shift/` 与 `12_privacy_assessment/`。各阶段产物应写入对应子目录，便于审计检索。
 
 ### 3. 准备阶段
 
@@ -51,11 +51,23 @@
 **目的**：验证原始特征的列名、类型与取值范围，为特征工程建立可靠的输入基线。
 **结果解读**：Schema 校验通过说明数据与脚本期望一致；若存在类型冲突需在日志中列明并修正。
 **输入**：读取 `01_data_and_schema/` 中缓存的 TSV 或直接访问原始数据集。
-**输出**：在 `01_data_and_schema/` 中保存 schema DataFrame、Markdown 与可选截图。
+**输出**：在 `01_data_and_schema/` 中保存 schema DataFrame 工作簿与可选截图。
 
 1. 调用 `load_dataset` 读取 MIMIC-IV 训练/测试及 eICU 外部验证集的 TSV，确保无缺失列并保留原始数据类型。
 2. 通过 `define_schema(train_df, FEATURE_COLUMNS, mode="interactive")` 生成初始 schema；对 BMI、呼吸支持等级（`Respiratory_Support`）和淋巴细胞百分比（`LYM%`）执行人工修正，以保证类型一致性。
-3. 使用 `schema_to_dataframe` 与 `render_dataframe` 输出列类型摘要并保存截图/Markdown，作为数据说明附件的一部分。
+ 3. 使用 `schema_to_dataframe` 与 `render_dataframe` 输出列类型摘要，并在 `01_data_and_schema/` 写入 `schema_{label}.xlsx`，保证审计时可直接查看结构化描述。
+ 4. 将 `evaluation_datasets` 字典缓存为 `evaluation_datasets_{label}.joblib`，其中包含模型评估阶段实际使用的特征矩阵与标签；如需手动加载，可执行：
+    <pre><code class="language-python">import joblib
+from pathlib import Path
+
+label = "in_hospital_mortality"  # 根据当前任务调整标签
+schema_root = Path("examples/research_outputs_supervised/01_data_and_schema")
+cache_path = schema_root / f"evaluation_datasets_{label}.joblib"
+payload = joblib.load(cache_path)
+datasets = payload["datasets"]
+train_features, train_labels = datasets["Train"]
+print(train_features.head())
+print(train_labels.head())</code></pre>
 
 ### 5. 特征构建与内部验证划分
 
@@ -80,7 +92,6 @@
 3. 脚本在 `08_baseline_models/` 下缓存拟合后的 `baseline_estimators_{label}.joblib`，二次运行时默认复用；若需强制重新训练，可在执行前将脚本顶部的 `FORCE_UPDATE_BENCHMARK_MODEL` 设为 `True`，或在 `analysis_config.py` / `mimic_mortality_utils.py` 中调整 `FORCE_UPDATE_FLAG_DEFAULTS`。交互式运行默认保留缓存，命令行批处理则按照该字典的设定决定是否覆盖。SUAVE 主模型及其校准器始终使用 `prepare_features` 产出的原始特征（即未经过该迭代插补管线），保持与生成器训练阶段的输入一致。
 4. 在临床基准方面，保留传统 ICU 评分（如数据集中现成的 SOFA 及相关器官支持指标）作为零参数对照：当 `mimic_mortality_utils.py` 中登记了此类 `baseline_probability_map` 项时，同样纳入基线汇总并在 `Notes` 中标记“临床评分”。`CLINICAL_SCORE_BENCHMARK_STRATEGY` 默认设为 `"imputed"`，针对每个评分独立地使用建模特征驱动的 `IterativeImputer` 进行缺失填补，确保不在评分之间泄露信息；若调至 `"observed"`，则在评估阶段跳过缺失评分的样本，维持原始分布。
 5. 输出的指标 CSV 与 Markdown 表格需包含训练/验证/测试/eICU 全量指标，若外部验证缺失标签需在脚注注明处理策略。
-
 
 ### 7. SUAVE 模型构建、调参与训练
 
@@ -113,59 +124,72 @@
 1. 通过 `fit_isotonic_calibrator` 在内部验证集上拟合专为 SUAVE 封装的等渗校准器（内部使用 `IsotonicRegression`，兼容缺失 `decision_function` 的估计器），必要时回退至逻辑回归温度缩放，并保存校准对象；若缓存缺失或校准器与模型不匹配，主流程会重新训练并自动序列化新的校准 artefact。
 2. 使用 `evaluate_predictions` 对训练、验证、MIMIC-IV 测试与 eICU 集执行 bootstrap（默认 1000 次）以估计指标置信区间，并生成 Excel 汇总；除表格主列的 AUC、ACC、SPE、SEN、Brier 外，Excel 中还会给出 `accuracy`、`balanced_accuracy`、`f1_macro`、`recall_macro`、`specificity_macro`、`sensitivity_pos`、`specificity_pos`、`roc_auc`、`pr_auc` 及其置信区间，以支撑不同风险偏好的诊断分析。若需要并排比较基线分类器，可从迭代插补 CSV 读取概率输出或重新调用 `evaluate_transfer_baselines`。
 3. 评估函数会同步导出 bootstrap 的原始采样记录：总体指标写入 `bootstrap_overall_records_{label}.csv`，逐类指标写入 `bootstrap_per_class_records_{label}.csv`，用于复核任意抽样迭代的轨迹。
-4. 将生成的 `evaluation_metrics.csv` 与 Excel 汇总保存至 `06_evaluation_metrics/`，校准曲线及相关图表保存为 PNG/SVG/PDF/JPG 四种格式并写入 `05_calibration_uncertainty/`，同时在实验日志中登记路径，便于后续报告引用与审计复核。
+4. 将生成的 `evaluation_metrics.csv` 与 Excel 汇总保存至 `06_evaluation_metrics/`，并在实验日志中登记路径，便于后续报告引用与审计复核。`plot_benchmark_curves` 会针对每个数据集分别输出 `benchmark_roc_{dataset}_{label}` 与 `benchmark_calibration_{dataset}_{label}` 图像（PNG/SVG/PDF/JPG 四种格式），统一写入 `06_evaluation_metrics/`。图像默认采用 Seaborn `paper` 主题与 Times New Roman 字体（含微软雅黑回退），ROC 与校准图保持 1:1 坐标比例。若需恢复 Matplotlib 默认主题，可在 `DEFAULT_ANALYSIS_CONFIG["plot_theme"]`（模板项目请修改 `analysis_config.PLOT_THEME`）设为 `None`。校准曲线的纵轴标签更新为 “Observed probability”，横纵坐标范围依据当前分箱的预测概率自适应扩展，避免固定在 `(0, 1)` 导致的留白。
 
-### 9. 合成数据 - TSTR/TRTR
+### 9. 潜空间相关性与解释
+
+**目的**：在迁移评估前审查 SUAVE 潜空间与临床特征、目标标签之间的耦合关系，沉淀可追踪的解释性 artefact。
+**结果解读**：相关系数及 `p` 值用于定位潜变量与关键临床变量的关联强度，路径图提供多层次因果假设，潜空间投影帮助识别不同数据集在生成特征空间的分布差异。
+**输入**：训练集潜空间嵌入、`VAR_GROUP_DICT` 中的特征分组映射、评估阶段构建的 `evaluation_datasets` 缓存。
+**输出**：在 `09_interpretation/` 写入 `latent_clinical_correlation_{label}` 前缀的 CSV/图像，以及 `latent_{label}.png` 投影图。
+
+1. 使用 `compute_feature_latent_correlation` 生成整体相关矩阵与 `p` 值，并导出 `*_correlations.csv`、`*_pvalues.csv`。泡泡图与热图的着色统一由相关系数驱动（`plt.cm.RdBu_r`，以 0 为色谱中点），气泡半径按 `-log10(p)` 线性缩放且仅保留 `p<0.1` 的关联，`p` 值热图在颜色保持相关系数的同时采用动态精度显示显著性（0.049–0.051 与 0.001–0.01 区间保留三位小数，小于 0.001 显示 `<0.001`，大于 0.99 显示 `>0.99`）。轴标签继承 `PATH_GRAPH_NODE_DEFINITIONS` 的中文/LaTeX 标注，潜变量刻度使用 `$z_{n}$` 并水平置于刻度正上方，色条统一置于图像下方。所有图像以 PNG、JPG、SVG、PDF 四种格式写入 `09_interpretation/`。
+2. 依照 `VAR_GROUP_DICT` 为每个临床分组重复相关性分析，输出分组级别的 CSV 与配套图像；若特征缺失，脚本会打印 `Skipping unavailable variables` 以提醒补齐或记录。
+3. 调用 `plot_latent_space` 将训练、验证、测试与 eICU 数据集的潜空间嵌入投影到统一图像，留存于 `latent_{label}.png` 以支持质性审查。
+
+### 10. 合成数据 - TSTR/TRTR
 
 **目的**：评估 SUAVE 生成数据对下游监督任务的实用性，并对比真实数据训练的基线表现。
 **结果解读**：重点关注 `roc_auc` 与 `accuracy` 的差异；若合成数据与真实数据性能接近，说明生成器具备迁移价值。
 **输入**：使用 `build_tstr_training_sets` 生成的训练集缓存、`02_feature_engineering/` 中的迭代插补特征（`iterative_imputed_{dataset}_{label}.csv`）以及 `INCLUDE_SUAVE_TRANSFER` 环境变量。
-**输出**：在 `09_tstr_trtr_transfer/` 缓存 `tstr_trtr_results_{label}.joblib`、`TSTR_TRTR_eval.xlsx` 与可视化结果。
+**输出**：在 `10_tstr_trtr_transfer/` 缓存 `tstr_trtr_results_{label}.joblib`、`TSTR_TRTR_eval.xlsx` 与可视化结果。
 
-1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR synthesis`、`TSTR synthesis-balance`、`TSTR synthesis-augment`、`TSTR synthesis-5x` 与 `TSTR synthesis-5x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
+1. 调用 `build_tstr_training_sets` 创建 `TRTR (real)`、`TSTR`、`TSTR balance`、`TSTR augment`、`TSTR 5x`、`TSTR 5x balance`、`TSTR 10x` 与 `TSTR 10x balance` 等方案，并在评估阶段对照 MIMIC-IV 测试集及（若标签可用）eICU 外部验证集。
 2. 通过 `make_baseline_model_factories` 注册 `Logistic regression`、`Random forest` 与 `GBDT` 三类下游分类器，对每个训练方案分别拟合并在 `evaluate_transfer_baselines` 中统计 `accuracy` 与 `roc_auc`（含置信区间）。
-3. 若需将 SUAVE 纳入迁移评估，可在运行脚本前设置 `INCLUDE_SUAVE_TRANSFER=1`，前提是 Optuna 已产出可用的最优超参；默认行为仅评估传统基线模型，以避免在 TSTR/TRTR 分析阶段重复拟合 SUAVE。
-4. `build_tstr_training_sets` 会在 `09_tstr_trtr_transfer/training_sets/` 生成 TSV + JSON manifest（`manifest_{label}.json`），复用 SUAVE 采样得到的各类训练集；`evaluate_transfer_baselines` 则分别缓存 `tstr_results_{label}.joblib` 与 `trtr_results_{label}.joblib`，避免重复训练下游基线。脚本模式下默认强制重算（`FORCE_UPDATE_SYNTHETIC_DATA=1`、`FORCE_UPDATE_TSTR_MODEL=1`、`FORCE_UPDATE_TRTR_MODEL=1`），交互模式默认复用缓存（上述变量默认为 `0`）。如需刷新单独阶段，可将 `FORCE_UPDATE_SYNTHETIC_DATA` 置为 `1` 以重建 TSV 并自动失效旧的 TSTR/TRTR 结果，或分别设置 `FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL` 以重新拟合下游模型。
+3. 若需将 SUAVE 纳入迁移评估，可在运行脚本前设置 `INCLUDE_SUAVE_TRANSFER=1`，前提是 Optuna 已产出可用的最优超参；默认行为仅评估 `analysis_config["tstr_models"]`（模板脚本同名配置项）列出的传统基线，以避免在 TSTR/TRTR 分析阶段重复拟合 SUAVE。配置项允许用户通过元组挑选参与 TSTR 的模型；当仅包含 1 个模型时，箱线图横轴展示训练数据集，若配置多个模型则横轴切换为模型名称、箱体按数据集着色。
+4. `build_tstr_training_sets` 会在 `10_tstr_trtr_transfer/training_sets/` 生成 TSV + JSON manifest（`manifest_{label}.json`），复用 SUAVE 采样得到的各类训练集；`evaluate_transfer_baselines` 则分别缓存 `tstr_results_{label}.joblib` 与 `trtr_results_{label}.joblib`，避免重复训练下游基线。脚本模式下默认强制重算（`FORCE_UPDATE_SYNTHETIC_DATA=1`、`FORCE_UPDATE_TSTR_MODEL=1`、`FORCE_UPDATE_TRTR_MODEL=1`），交互模式默认复用缓存（上述变量默认为 `0`）。如需刷新单独阶段，可将 `FORCE_UPDATE_SYNTHETIC_DATA` 置为 `1` 以重建 TSV 并自动失效旧的 TSTR/TRTR 结果，或分别设置 `FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL` 以重新拟合下游模型。
 
-5. 运行结束后会额外导出 bootstrap 抽样记录，并统一写入 `09_tstr_trtr_transfer/TSTR_TRTR_eval.xlsx`：`summary` 汇总各模型在所有训练方案下的 AUC/accuracy 与置信区间，`metrics` 保留长表结构以便绘图，`bootstrap` 存放逐次抽样的原始指标，`tstr_summary`/`trtr_summary` 按需拆分合成与真实训练集的结果，`bootstrap_overall` 与 `bootstrap_per_class` 则保留整体与分层自助采样明细。
+5. 运行结束后会额外导出 bootstrap 抽样记录，并统一写入 `10_tstr_trtr_transfer/TSTR_TRTR_eval.xlsx`：`summary` 汇总各模型在所有训练方案下的 Accuracy/AUROC 与置信区间，`metrics` 保留长表结构以便绘图，`bootstrap` 集成原始抽样指标与 ΔAccuracy/ΔAUROC 长表（相对 `TRTR (real)` 的差值），`bootstrap_delta` 独立存放差值明细，`tstr_summary`/`trtr_summary` 拆分合成与真实训练集的结果，`bootstrap_overall` 与 `bootstrap_per_class` 则保留整体与分层自助采样明细。
+6. `plot_transfer_metric_boxes` 在生成 Accuracy/AUROC/ΔAccuracy/ΔAUROC 箱线图时会按 `analysis_config["tstr_metric_labels"]`（模板项目改写 `analysis_config.TSTR_METRIC_LABELS`）设置纵轴标签，默认启用 0.1 间隔的主刻度、0.05 的次刻度并隐藏离群点；新增的 `plot_transfer_metric_bars` 则绘制无误差棒的绝对指标条形图，纵轴固定在 (0.5, 1)。
 6. `plot_transfer_metric_boxes` 会针对每个评估数据集绘制箱线图：横轴按模型分组，箱体颜色区分训练数据来源，当仅评估单个模型时横轴改为数据集标签。箱线图基于 bootstrap 样本的分布，更直观地展示生成数据对下游性能的影响；其输出与分布漂移指标无直接对应关系，应单列在报告的“生成数据迁移性能”小节中说明。
+
+7. TSTR/TRTR 可视化默认沿用当前 Seaborn 主题的调色板，脚本会根据训练数据集数量自动循环颜色；若需自定义配色，可在 `analysis_config["training_color_palette"]`（模板项目修改 `analysis_config.TRAINING_COLOR_PALETTE`）传入调色板名称或颜色序列，便于在不同环境中保持一致的图例颜色。
 
 
 ### 10. 合成数据 - 分布漂移分析
 
 **目的**：量化生成数据与真实数据之间的分布差异，定位潜在的失真特征。
 **结果解读**：GBDT C2ST AUC 作为主要指标，若接近 0.5 表示难以区分；全局/逐列统计的 `p` 值指导进一步修正。
-**输入**：复用 `09_tstr_trtr_transfer/` 中的训练数据拆分、`make_baseline_model_factories` 输出的下游模型以及 `suave.evaluate` 中的分布漂移函数。
-**输出**：在 `10_distribution_shift/` 保存 `c2st_metrics.xlsx` 与 `distribution_metrics.xlsx`，并在 `11_privacy_assessment/` 记录隐私攻击结果。
+**输入**：复用 `10_tstr_trtr_transfer/` 中的训练数据拆分、`make_baseline_model_factories` 输出的下游模型以及 `suave.evaluate` 中的分布漂移函数。
+**输出**：在 `11_distribution_shift/` 保存 `c2st_metrics.xlsx` 与 `distribution_metrics.xlsx`，并在 `12_privacy_assessment/` 记录隐私攻击结果。
 
-1. 分布漂移的主要结局指标采用 `classifier_two_sample_test`：以 `TRTR (real)` 与 `TSTR synthesis` 作为两类样本，复用 `make_baseline_model_factories` 中的 Logistic、Random Forest 与 GBDT pipeline（保持默认超参）。其中 **GBDT ROC-AUC** 为首要指标，逻辑回归与随机森林的 ROC-AUC 作为敏感性补充。分析过程中会显示针对模型/特征的进度条，便于追踪耗时步骤。
+1. 分布漂移的主要结局指标采用 `classifier_two_sample_test`：以 `TRTR (real)` 与 `TSTR` 作为两类样本，复用 `make_baseline_model_factories` 中的 Logistic、Random Forest 与 GBDT pipeline（保持默认超参）。其中 **GBDT ROC-AUC** 为首要指标，逻辑回归与随机森林的 ROC-AUC 作为敏感性补充。分析过程中会显示针对模型/特征的进度条，便于追踪耗时步骤。
 2. 次要结局指标包括全局 `rbf_mmd` 与 `energy_distance`，均基于置换检验给出 `p` 值，用于量化生成数据与真实分布之间的整体偏移程度。
 3. `rbf_mmd`、`energy_distance` 与 `mutual_information_feature` 继续按特征逐列计算，定位非单调差异或潜在信息泄露风险的列，并与 C2ST 结果交叉验证。
-4. 分布相似性相关的所有产物分布在两个工作簿中：`10_distribution_shift/c2st_metrics.xlsx` 汇总所有模型的 C2ST ROC-AUC、置信区间、bootstrap 次数以及真实/合成样本量；`10_distribution_shift/distribution_metrics.xlsx` 的 `overall` 工作表报告全局 MMD、能量距离与互信息（附解释列），`per_feature` 工作表逐列列出 `rbf_mmd`、能量距离、互信息与对应解读。每个工作表尾部额外空一行，并写入指标判读提示（p 值阈值与特征级启发式），与 `analysis_utils._interpret_global_shift` / `_interpret_feature_shift` 中的逻辑保持一致。配套的分布漂移可视化图表需在同一目录以 PNG/SVG/PDF/JPG 四种格式保存，纳入附录及复现包。脚本模式默认重算 C2ST 和漂移统计（`FORCE_UPDATE_C2ST_MODEL=1`、`FORCE_UPDATE_DISTRIBUTION_SHIFT=1`），交互模式默认复用缓存（上述变量默认为 `0`）；如需刷新结果，可显式设置相应环境变量。
-5. 在生成数据性能分析后运行 `simple_membership_inference`，补充隐私攻击基线并记录攻击 AUC/阈值，结果导出至 `11_privacy_assessment/membership_inference.xlsx`。
+4. 分布相似性相关的所有产物分布在两个工作簿中：`11_distribution_shift/c2st_metrics.xlsx` 汇总所有模型的 C2ST ROC-AUC、置信区间、bootstrap 次数以及真实/合成样本量；`11_distribution_shift/distribution_metrics.xlsx` 的 `overall` 工作表报告全局 MMD、能量距离与互信息（附解释列），`per_feature` 工作表逐列列出 `rbf_mmd`、能量距离、互信息与对应解读。每个工作表尾部额外空一行，并写入指标判读提示（p 值阈值与特征级启发式），与 `analysis_utils._interpret_global_shift` / `_interpret_feature_shift` 中的逻辑保持一致。配套的分布漂移可视化图表需在同一目录以 PNG/SVG/PDF/JPG 四种格式保存，纳入附录及复现包。脚本模式默认重算 C2ST 和漂移统计（`FORCE_UPDATE_C2ST_MODEL=1`、`FORCE_UPDATE_DISTRIBUTION_SHIFT=1`），交互模式默认复用缓存（上述变量默认为 `0`）；如需刷新结果，可显式设置相应环境变量。
+5. 在生成数据性能分析后运行 `simple_membership_inference`，补充隐私攻击基线并记录攻击 AUC/阈值，结果导出至 `12_privacy_assessment/membership_inference.xlsx`。
 
 
-### 11. 潜空间可视化、报告生成与归档
+### 12. 报告生成与归档
 
-**目的**：整合模型性能与潜空间解释结果，形成可交付的研究报告与可视化资产。
-**结果解读**：潜空间图用于定性评估生成特征区分度，相关性图揭示潜变量与临床特征的联系。
-**输入**：读取 `04_suave_training/`、`05_calibration_uncertainty/` 与 `06_evaluation_metrics/` 的模型与指标结果。
-**输出**：在 `12_visualizations/` 保存图像，在输出根目录生成 `evaluation_summary_{label}.md` 与关联 CSV。
+**目的**：整合模型性能、潜空间解释（参见第 9 节）与迁移评估结果，生成可交付的 Markdown 报告与归档材料。
+**结果解读**：`evaluation_summary_{label}.md` 汇总最优 Trial、指标表、解释性 artefact 路径与 TSTR/分布漂移结论，为技术报告或审计提供统一入口。
+**输入**：`06_evaluation_metrics/` 中的指标表、`07_bootstrap_analysis/` 的区间统计、`09_interpretation/` 的解释性 artefact、`10_tstr_trtr_transfer/` 与 `11_distribution_shift/` 的迁移分析结果。
+**输出**：输出根目录下的 `evaluation_summary_{label}.md` 与关联 CSV/图像；根据需要将最终图表整理至 `reports/` 或论文附录。
 
-1. 借助 `plot_latent_space` 对潜空间执行 PCA/UMAP（视脚本配置）投影，输出训练、验证、测试与外部集的可视化比较，图像写入 `12_visualizations/`。
-2. 使用 `dataframe_to_markdown`、`render_dataframe` 与 `write_results_to_excel_unique` 汇总评估结果，最终通过 `build_prediction_dataframe` 与 `evaluate_predictions` 生成 `evaluation_summary_{label}.md` 技术报告草稿，并在 `06_evaluation_metrics/` 同步保存 Excel/Markdown 版本。
-3. 在归档目录保留所有原始数据引用、模型权重（`.pt`/`.joblib`）、插补缓存、图表、Markdown 报告及运行日志，以支持第三方审计与论文附录撰写。
-4. 在潜空间解释章节调用 `suave.plots.compute_feature_latent_correlation` 计算潜空间与临床特征（含目标标签）的 Spearman 相关性，依托 statsmodels 进行 FDR/Bonferroni/Holm 校正。将 `compute_feature_latent_correlation` 的结果导出为相关系数/`p` 值 CSV，并以 `plot_feature_latent_outcome_path_graph` 绘制特征→潜变量→结局的多层次路径图（显著性水平 0.05，临床特征按定义的 group/color 映射着色），作为潜空间解释章节的核心可视化。`plot_feature_latent_correlation_heatmap(..., value="correlation")`、`plot_feature_latent_correlation_heatmap(..., value="pvalue")` 与 `plot_feature_latent_correlation_bubble` 作为补充结果，仍按 VAR_GROUP_DICT 分组生成热图与气泡图，用于量化隐空间与关键临床变量的相关性分布。
+1. 调用 `dataframe_to_markdown`、`render_dataframe` 与 `write_results_to_excel_unique` 汇总评估结果，并在 `06_evaluation_metrics/` 保留 Excel/Markdown 版本。
+2. 执行脚本结尾的汇总逻辑，将 Optuna trial 信息、校准曲线、潜空间解释 artefact（`09_interpretation/`）以及 TSTR/分布漂移输出路径逐条写入 `evaluation_summary_{label}.md`。
+3. 在归档目录保留所有原始数据引用、模型权重（`.pt`/`.joblib`）、插补缓存、解释性 CSV/图像、TSTR/TRTR 工作簿以及运行日志，确保第三方复核可追溯。
 
 ## 缓存机制
 
 ### 缓存判定信息
 
 - `07_bootstrap_analysis/`：针对 SUAVE 主模型与临床基线的分类/校准评估，`evaluate_predictions` 会按“模型 × 数据集”落盘 `*_bootstrap.joblib`，其中包含 `overall`、`per_class` 等 DataFrame。命中缓存时直接读取；若设置 `FORCE_UPDATE_BOOTSTRAP=True` 则忽略缓存重新计算。
-- `09_tstr_trtr_transfer/training_sets/`：`build_tstr_training_sets` 保存 `manifest_{label}.json` 与对应的 TSV，manifest 内记录特征列、生成时间与 SUAVE manifest 的 SHA256。脚本会校验 manifest 与当前配置/生成器签名一致，若 `FORCE_UPDATE_SYNTHETIC_DATA=True` 或签名不匹配则重建训练集并刷新后续缓存。
-- `09_tstr_trtr_transfer/tstr_results_{label}.joblib`、`trtr_results_{label}.joblib`：存储真实/合成训练下的基线模型预测表与指标。缓存载荷包含 `training_manifest_signature` 与当前 SUAVE manifest 的 SHA256（`data_generator_signature`），命中缓存需与最新训练集一致；可通过 `FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL` 控制重新拟合。
-- `09_tstr_trtr_transfer/bootstrap_cache/`：`evaluate_transfer_baselines` 针对每个“训练方案 × 评估集 × 模型”单独缓存 bootstrap 明细。校验字段包含 `training_manifest_signature`、`data_generator_signature`、`prediction_signature`（基于概率与预测的哈希）及 `bootstrap_n`。任一信息变化或显式启用 `FORCE_UPDATE_TSTR_BOOTSTRAP` / `FORCE_UPDATE_TRTR_BOOTSTRAP` 时会重新执行 bootstrap。
-- `10_distribution_shift/`：`classifier_two_sample_test` 与分布漂移统计分别写入 `c2st_metrics_{label}.joblib` 与 `distribution_metrics_{label}.joblib`。缓存载荷记录特征列顺序、模型顺序及相关指标，若检测到配置变化或设置了 `FORCE_UPDATE_C2ST_MODEL`、`FORCE_UPDATE_DISTRIBUTION_SHIFT`，则重新计算。
+- `10_tstr_trtr_transfer/training_sets/`：`build_tstr_training_sets` 保存 `manifest_{label}.json` 与对应的 TSV，manifest 内记录特征列、生成时间与 SUAVE manifest 的 SHA256。脚本会校验 manifest 与当前配置/生成器签名一致，若 `FORCE_UPDATE_SYNTHETIC_DATA=True` 或签名不匹配则重建训练集并刷新后续缓存。
+- `10_tstr_trtr_transfer/tstr_results_{label}.joblib`、`trtr_results_{label}.joblib`：存储真实/合成训练下的基线模型预测表与指标。缓存载荷包含 `training_manifest_signature` 与当前 SUAVE manifest 的 SHA256（`data_generator_signature`），命中缓存需与最新训练集一致；可通过 `FORCE_UPDATE_TSTR_MODEL`、`FORCE_UPDATE_TRTR_MODEL` 控制重新拟合。
+- `10_tstr_trtr_transfer/bootstrap_cache/`：`evaluate_transfer_baselines` 针对每个“训练方案 × 评估集 × 模型”单独缓存 bootstrap 明细。校验字段包含 `training_manifest_signature`、`data_generator_signature`、`prediction_signature`（基于概率与预测的哈希）及 `bootstrap_n`。任一信息变化或显式启用 `FORCE_UPDATE_TSTR_BOOTSTRAP` / `FORCE_UPDATE_TRTR_BOOTSTRAP` 时会重新执行 bootstrap。
+- `11_distribution_shift/`：`classifier_two_sample_test` 与分布漂移统计分别写入 `c2st_metrics_{label}.joblib` 与 `distribution_metrics_{label}.joblib`。缓存载荷记录特征列顺序、模型顺序及相关指标，若检测到配置变化或设置了 `FORCE_UPDATE_C2ST_MODEL`、`FORCE_UPDATE_DISTRIBUTION_SHIFT`，则重新计算。
 - SUAVE 模型目录（`04_suave_training/`）与 Optuna artefact：默认读取已有的 `suave_best_{label}.pt` 与 manifest；当设置 `FORCE_UPDATE_SUAVE=True` 且 Optuna 产物缺失时，会跳过缓存并强制重新训练模型。
 
 ### FORCE_UPDATE 参数对照
@@ -174,7 +198,7 @@
 | --- | --- |
 | `FORCE_UPDATE_BENCHMARK_MODEL` | 重新训练并覆盖 `08_baseline_models/` 下的 `baseline_estimators_{label}.joblib` 及基线指标表，避免沿用旧的临床/传统模型。 |
 | `FORCE_UPDATE_BOOTSTRAP` | 忽略 `07_bootstrap_analysis/` 中的 `*_bootstrap.joblib`，强制重新计算 SUAVE 与基线的分类/校准 bootstrap 指标。 |
-| `FORCE_UPDATE_SYNTHETIC_DATA` | 重建 `09_tstr_trtr_transfer/training_sets/` 的 TSV 与 manifest，同步失效依赖该签名的 TSTR/TRTR 结果与 bootstrap 缓存。 |
+| `FORCE_UPDATE_SYNTHETIC_DATA` | 重建 `10_tstr_trtr_transfer/training_sets/` 的 TSV 与 manifest，同步失效依赖该签名的 TSTR/TRTR 结果与 bootstrap 缓存。 |
 | `FORCE_UPDATE_TSTR_MODEL` | 重新拟合并写入 `tstr_results_{label}.joblib`，常用于生成器或训练集更新后刷新合成数据基线。 |
 | `FORCE_UPDATE_TRTR_MODEL` | 重新拟合并写入 `trtr_results_{label}.joblib`，确保真实数据训练的对照基线与最新特征/标签一致。 |
 | `FORCE_UPDATE_TSTR_BOOTSTRAP` | 对 TSTR 结果禁用 `bootstrap_cache/` 复用，依据最新预测重新计算并缓存 bootstrap 明细。 |
@@ -184,3 +208,116 @@
 | `FORCE_UPDATE_SUAVE` | 在 Optuna 产物缺失或需替换生成器时，指示脚本放弃加载已有 `suave_best_{label}.pt`，触发模型重训。 |
 
 上述参数的默认值由脚本顶部或 `FORCE_UPDATE_FLAG_DEFAULTS` 决定：批处理模式通常将耗时阶段设为 `True` 以确保结果最新，而交互式探索默认复用缓存以缩短迭代时间。根据研究需要调整开关时，请同步记录触发原因与时间以便审计追踪。
+
+## 预期输出
+
+| 分析流程 | 输出产物名称 | 类型（报表、图像） | 描述 | 原始数据 | 缓存的原始数据 | 缓存数据结构说明 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8. 分类/校准评估与不确定性量化（Bootstrap） | Benchmark ROC曲线（逐数据集） | 图像 | 每个数据集写出 `benchmark_roc_{dataset}_{label}`，比较 SUAVE 与经典基线的 ROC 表现，图像统一使用 Seaborn `paper` 主题并保持 1:1 坐标比例 | 各数据集的预测概率与标签映射（`probability_map`、`baseline_probability_map`、`label_map`） | `examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/05_calibration_uncertainty/isotonic_calibrator_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/08_baseline_models/baseline_estimators_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+payload = joblib.load(Path("examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib"))
+datasets = payload["datasets"]
+calibrator = joblib.load(Path("examples/research_outputs_supervised/05_calibration_uncertainty/isotonic_calibrator_in_hospital_mortality.joblib"))
+baselines = joblib.load(Path("examples/research_outputs_supervised/08_baseline_models/baseline_estimators_in_hospital_mortality.joblib"))
+for name, (features, labels) in datasets.items():
+    suave_probs = calibrator.predict_proba(features)
+    print(name, suave_probs.shape, labels.shape)
+</code></pre> |
+| 8. 分类/校准评估与不确定性量化（Bootstrap） | 校准曲线（逐数据集） | 图像 | `plot_calibration_curves` 生成的图像和 `benchmark_calibration_{dataset}_{label}` 采用相同主题与 1:1 坐标比例，纵轴标签为 “Observed probability”，坐标范围依据分箱概率自适应调整 | 经过校准的预测概率与真实标签（`probability_map`、`label_map`） | `examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/05_calibration_uncertainty/isotonic_calibrator_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+import numpy as np
+
+payload = joblib.load(Path("examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib"))
+datasets = payload["datasets"]
+calibrator = joblib.load(Path("examples/research_outputs_supervised/05_calibration_uncertainty/isotonic_calibrator_in_hospital_mortality.joblib"))
+probability_map = {name: calibrator.predict_proba(features) for name, (features, _) in datasets.items()}
+label_map = {name: np.asarray(labels) for name, (_, labels) in datasets.items()}
+print(probability_map.keys(), label_map["Train"].shape)
+</code></pre> |
+| 8. 分类/校准评估与不确定性量化（Bootstrap） | bootstrap benchmark excel报表 | 报表 | 汇总各模型在 Train/Validation/MIMIC/eICU 的 bootstrap 置信区间、原始记录与告警 | `evaluate_predictions` 生成的 bootstrap 结果字典（`overall`、`per_class`、`bootstrap_*_records`） | `examples/research_outputs_supervised/07_bootstrap_analysis/SUAVE/`*`*_bootstrap.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+cache_dir = Path("examples/research_outputs_supervised/07_bootstrap_analysis/SUAVE")
+for cache_path in sorted(cache_dir.glob("*_bootstrap.joblib")):
+    payload = joblib.load(cache_path)
+    print(cache_path.name, payload.keys())
+</code></pre> |
+| 10. 合成数据 - TSTR/TRTR | TSTR/TRTR箱线图 | 图像 | `plot_transfer_metric_boxes` 生成的 Accuracy/AUROC 与 ΔAccuracy/ΔAUROC 箱线图；单模型时按训练数据集排布，多模型时横轴展示模型、箱体按数据集着色 | TSTR/TRTR bootstrap 明细表（`combined_bootstrap_df`、`delta_bootstrap_df`） | `examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+tstr_payload = joblib.load(Path("examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib"))
+tstr_bootstrap = tstr_payload.get("bootstrap_df")
+if tstr_bootstrap is not None:
+    print(tstr_bootstrap.head())
+trtr_payload = joblib.load(Path("examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib"))
+trtr_bootstrap = trtr_payload.get("bootstrap_df")
+if trtr_bootstrap is not None:
+    print(trtr_bootstrap.head())
+</code></pre> |
+| 10. 合成数据 - TSTR/TRTR | TSTR/TRTR条形图 | 图像 | `plot_transfer_metric_bars` 生成的 Accuracy/AUROC 无误差棒条形图，纵轴固定在 (0.5, 1)，便于比较各训练方案的绝对表现 | TSTR/TRTR 指标摘要表（`combined_summary_df`） | `examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+payload = joblib.load(Path("examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib"))
+summary_df = payload.get("summary_df")
+print(summary_df[["training_dataset", "model", "accuracy", "roc_auc"]].head())
+</code></pre> |
+| 10. 合成数据 - TSTR/TRTR | TSTR_TRTR_eval报表 | 报表 | `TSTR_TRTR_eval.xlsx` 汇总 TSTR/TRTR 指标长表、图表输入与 bootstrap（含 `bootstrap_delta`）记录 | TSTR/TRTR 评估结果（`summary_df`、`plot_df`、`bootstrap_df`、`nested_results`） | `examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+for path in [
+    Path("examples/research_outputs_supervised/10_tstr_trtr_transfer/tstr_results_in_hospital_mortality.joblib"),
+    Path("examples/research_outputs_supervised/10_tstr_trtr_transfer/trtr_results_in_hospital_mortality.joblib"),
+]:
+    payload = joblib.load(path)
+    print(path.name, payload.keys())
+</code></pre> |
+| 11. 合成数据 - 分布漂移分析 | c2st_metrics.xlsx报表 | 报表 | 记录 C2ST 分类器在真实 vs 合成特征上的 AUC 及置信区间 | C2ST 统计与明细（`metrics`、`results_df`） | `examples/research_outputs_supervised/11_distribution_shift/c2st_metrics_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+payload = joblib.load(Path("examples/research_outputs_supervised/11_distribution_shift/c2st_metrics_in_hospital_mortality.joblib"))
+print(payload.keys())
+print(payload["results_df"].head())
+</code></pre> |
+| 11. 合成数据 - 分布漂移分析 | distribution_metrics.xlsx报表 | 报表 | 汇总全局/逐特征的 MMD、能量距离、互信息统计及判读备注 | 分布漂移结果（`overall_df`、`per_feature_df`） | `examples/research_outputs_supervised/11_distribution_shift/distribution_metrics_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+payload = joblib.load(Path("examples/research_outputs_supervised/11_distribution_shift/distribution_metrics_in_hospital_mortality.joblib"))
+print(payload["overall_df"].head())
+print(payload["per_feature_df"].head())
+</code></pre> |
+| 11. 合成数据 - 分布漂移分析 | membership_inference.xlsx报表 | 报表 | 基于 SUAVE 训练/测试概率对比的成员推断基线指标 | 训练/测试概率向量与标签（`probability_map["Train"]`、`probability_map["MIMIC test"]`、`y_train_model`、`y_test`） | `examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/05_calibration_uncertainty/isotonic_calibrator_in_hospital_mortality.joblib` | <pre><code class="language-python">from pathlib import Path
+import joblib
+
+payload = joblib.load(Path("examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib"))
+datasets = payload["datasets"]
+calibrator = joblib.load(Path("examples/research_outputs_supervised/05_calibration_uncertainty/isotonic_calibrator_in_hospital_mortality.joblib"))
+train_probs = calibrator.predict_proba(datasets["Train"][0])
+test_probs = calibrator.predict_proba(datasets["MIMIC test"][0])
+print(train_probs.shape, test_probs.shape)
+</code></pre> |
+| 9. 潜空间相关性与解释 | 潜空间投影比较图 | 图像 | `plot_latent_space` 输出的 SUAVE 潜空间可视化（PCA/UMAP 对比） | 各评估数据集的潜空间输入特征与标签字典（`latent_features`、`latent_labels`） | `examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/04_suave_training/suave_model_manifest_in_hospital_mortality.json` | <pre><code class="language-python">from pathlib import Path
+import joblib, json
+
+manifest = json.loads(Path("examples/research_outputs_supervised/04_suave_training/suave_model_manifest_in_hospital_mortality.json").read_text())
+print(manifest.keys())
+payload = joblib.load(Path("examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib"))
+print(payload["datasets"].keys())
+</code></pre> |
+| 9. 潜空间相关性与解释 | 特征-预测目标-潜空间相关性气泡图 | 图像 | `plot_feature_latent_correlation_bubble` 绘制的总体相关性气泡图，颜色表示相关系数（RdBu_r，0 为中点），气泡大小按 `-log10(p)` 缩放且省略 `p≥0.1` 的关联，标签来源 `PATH_GRAPH_NODE_DEFINITIONS`，潜变量刻度渲染为 `$z_{n}$`；图像输出 PNG/JPG/SVG/PDF 四种格式 | 潜变量-特征-结局的相关矩阵与显著性矩阵（`overall_corr`、`overall_pvals`） | `examples/research_outputs_supervised/09_interpretation/latent_clinical_correlation_in_hospital_mortality_correlations.csv`<br>`examples/research_outputs_supervised/09_interpretation/latent_clinical_correlation_in_hospital_mortality_pvalues.csv` | <pre><code class="language-python">from pathlib import Path
+import pandas as pd
+
+corr_path = Path("examples/research_outputs_supervised/09_interpretation/latent_clinical_correlation_in_hospital_mortality_correlations.csv")
+pval_path = Path("examples/research_outputs_supervised/09_interpretation/latent_clinical_correlation_in_hospital_mortality_pvalues.csv")
+print(pd.read_csv(corr_path, index_col=0).head())
+print(pd.read_csv(pval_path, index_col=0).head())
+</code></pre> |
+| 9. 潜空间相关性与解释 | 特征→潜变量→结局的多层次路径图 | 图像 | `plot_feature_latent_outcome_path_graph` 生成的多层次路径网络图 | SUAVE 模型与训练特征/标签（`model`、`X_train_model`、`y_train_model`） | `examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib`<br>`examples/research_outputs_supervised/04_suave_training/suave_model_manifest_in_hospital_mortality.json` | <pre><code class="language-python">from pathlib import Path
+import joblib, json
+
+payload = joblib.load(Path("examples/research_outputs_supervised/01_data_and_schema/evaluation_datasets_in_hospital_mortality.joblib"))
+train_features, train_labels = payload["datasets"]["Train"]
+print(train_features.shape, train_labels.shape)
+manifest = json.loads(Path("examples/research_outputs_supervised/04_suave_training/suave_model_manifest_in_hospital_mortality.json").read_text())
+print(manifest["model_path"])
+</code></pre> |
