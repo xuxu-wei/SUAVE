@@ -213,6 +213,56 @@ def test_joint_classification_weight_warmup(monkeypatch):
     assert recorded_weights[: len(expected)] == pytest.approx(expected)
 
 
+def test_joint_finetune_patience_respects_warmup(monkeypatch):
+    X, y, schema = _toy_dataset()
+    recorded_weights: list[float | None] = []
+
+    def tracking_scores(self, *args, classification_loss_weight=None, **kwargs):
+        if classification_loss_weight is not None:
+            recorded_weights.append(float(classification_loss_weight))
+        return {
+            "nll": 1.0,
+            "classification_loss": 0.5,
+            "joint_objective": 1.5,
+            "reconstruction": 0.0,
+            "categorical_kl": 0.0,
+            "gaussian_kl": 0.0,
+            "brier": float("nan"),
+            "ece": float("nan"),
+            "auroc": float("nan"),
+        }
+
+    monkeypatch.setattr(SUAVE, "_compute_validation_scores", tracking_scores)
+
+    model = SUAVE(
+        schema=schema,
+        latent_dim=3,
+        n_components=2,
+        batch_size=2,
+        classification_loss_weight=1.0,
+        class_weight_warmup_epochs=2,
+    )
+
+    monkeypatch.setattr(
+        model, "_is_better_metrics", lambda current, best: False, raising=False
+    )
+
+    model.fit(
+        X,
+        y,
+        warmup_epochs=0,
+        head_epochs=0,
+        finetune_epochs=3,
+        early_stop_patience=0,
+    )
+
+    assert len(recorded_weights) == 4
+    assert recorded_weights[0] == pytest.approx(0.25)
+    assert recorded_weights[1] < recorded_weights[2]
+    assert recorded_weights[2] == pytest.approx(1.0)
+    assert recorded_weights[3] == pytest.approx(1.0)
+
+
 def test_head_phase_early_stop_restores_best(monkeypatch):
     X, y, schema = _toy_dataset()
     loss_sequence = [1.0, 0.9, 0.95, 0.8, 0.7]
