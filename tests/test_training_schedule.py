@@ -2,7 +2,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from suave import SUAVE, Schema
+from suave.modules.heads import ClassificationHead
 
 
 def _toy_dataset() -> tuple[pd.DataFrame, pd.Series, Schema]:
@@ -130,6 +136,111 @@ def test_classification_weight_heuristic_clipping():
     assert SUAVE._derive_classification_loss_weight(10.0, 2.0) == pytest.approx(5.0)
     assert SUAVE._derive_classification_loss_weight(1.0, 1e-6) == pytest.approx(1000.0)
     assert SUAVE._derive_classification_loss_weight(1.0, 1e3) == pytest.approx(0.1)
+
+
+def test_joint_classification_weight_warmup(monkeypatch):
+    X, y, schema = _toy_dataset()
+    recorded_weights: list[float | None] = []
+
+    def tracking_scores(self, *args, classification_loss_weight=None, **kwargs):
+        if classification_loss_weight is not None:
+            recorded_weights.append(float(classification_loss_weight))
+        return {
+            "nll": 0.5,
+            "classification_loss": 0.25,
+            "joint_objective": float("nan"),
+            "reconstruction": 0.0,
+            "categorical_kl": 0.0,
+            "gaussian_kl": 0.0,
+            "brier": float("nan"),
+            "ece": float("nan"),
+            "auroc": float("nan"),
+        }
+
+    monkeypatch.setattr(SUAVE, "_compute_validation_scores", tracking_scores)
+
+    model = SUAVE(
+        schema=schema,
+        latent_dim=3,
+        n_components=2,
+        batch_size=2,
+        classification_loss_weight=2.0,
+        class_weight_start_frac=0.25,
+        class_weight_warmup_epochs=2,
+        class_weight_schedule="linear",
+    )
+
+    model.fit(
+        X,
+        y,
+        warmup_epochs=0,
+        head_epochs=0,
+        finetune_epochs=2,
+        early_stop_patience=5,
+    )
+
+    expected = [0.5, 1.25, 2.0]
+    assert len(recorded_weights) >= len(expected)
+    assert recorded_weights[: len(expected)] == pytest.approx(expected)
+
+
+def test_head_phase_early_stop_restores_best(monkeypatch):
+    X, y, schema = _toy_dataset()
+    loss_sequence = [1.0, 0.9, 0.95, 0.8, 0.7]
+    initial_length = len(loss_sequence)
+    batches_processed = {"count": 0}
+    captured: list[tuple[int, object]] = []
+    restored: list[object] = []
+
+    def fake_loss(self, logits, targets):
+        batches_processed["count"] += 1
+        value = loss_sequence.pop(0)
+        return logits.sum() * 0 + logits.new_tensor(value)
+
+    original_state_to_cpu = SUAVE._state_dict_to_cpu
+
+    def tracking_state_to_cpu(module):
+        state = original_state_to_cpu(module)
+        if isinstance(module, ClassificationHead) and batches_processed["count"] > 0:
+            epoch_index = batches_processed["count"] - 1
+            captured.append((epoch_index, state))
+        return state
+
+    original_load = ClassificationHead.load_state_dict
+
+    def tracking_load(self, state):
+        restored.append(state)
+        return original_load(self, state)
+
+    monkeypatch.setattr(ClassificationHead, "loss", fake_loss)
+    monkeypatch.setattr(SUAVE, "_state_dict_to_cpu", staticmethod(tracking_state_to_cpu))
+    monkeypatch.setattr(ClassificationHead, "load_state_dict", tracking_load)
+
+    model = SUAVE(
+        schema=schema,
+        latent_dim=3,
+        n_components=2,
+        batch_size=2,
+        head_early_stop_patience=0,
+    )
+    model.fit(
+        X,
+        y,
+        warmup_epochs=0,
+        head_epochs=5,
+        finetune_epochs=0,
+        early_stop_patience=1,
+    )
+
+    # Expect early stopping before exhausting the queued loss values
+    assert 0 < len(loss_sequence) < initial_length
+    assert batches_processed["count"] < 5
+    assert captured
+    assert captured[0][0] == 0
+    assert captured[1][0] == 1
+    assert restored
+    assert restored[-1] is captured[1][1]
+    assert model.head_early_stop_patience == 0
 
 
 def test_joint_finetune_early_stops_on_joint_objective(monkeypatch):
