@@ -63,7 +63,7 @@ _DEFAULT_RANDOM_STATE = 0
 _DEFAULT_GUMBEL_TEMPERATURE = 1.0
 _DEFAULT_WARMUP_EPOCHS = 10
 _DEFAULT_HEAD_EPOCHS = 5
-_DEFAULT_FINETUNE_EPOCHS = 10
+_DEFAULT_FINETUNE_EPOCHS = 20
 _DEFAULT_JOINT_DECODER_LR_SCALE = 0.1
 _DEFAULT_EARLY_STOP_PATIENCE = 5
 
@@ -2049,14 +2049,21 @@ class SUAVE:
                     classification_loss_weight=current_weight,
                 )
 
+            warmup_complete = (
+                warmup_duration <= 0
+                or weight_target <= 0.0
+                or (epoch + 1) > warmup_duration
+            )
+
             if best_metrics is None or self._is_better_metrics(metrics, best_metrics):
                 best_metrics = metrics
                 best_state = self._capture_model_state()
                 patience_counter = 0
             else:
-                patience_counter += 1
-                if patience_counter > early_stop_patience:
-                    break
+                if warmup_complete:
+                    patience_counter += 1
+                    if patience_counter > early_stop_patience:
+                        break
 
         if best_state is not None:
             self._restore_model_state(best_state, device)
