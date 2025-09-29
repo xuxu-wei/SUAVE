@@ -65,6 +65,35 @@ def test_training_schedule_runs_all_phases():
     assert model._classifier is not None
 
 
+def test_save_load_preserves_beta_and_gumbel_temperature(tmp_path):
+    X, y, schema = _toy_dataset()
+    model = SUAVE(
+        schema=schema,
+        latent_dim=3,
+        n_components=2,
+        batch_size=2,
+        beta=2.75,
+        gumbel_temperature=0.42,
+    )
+
+    model.fit(
+        X,
+        y,
+        warmup_epochs=1,
+        head_epochs=1,
+        finetune_epochs=1,
+        early_stop_patience=0,
+    )
+
+    path = tmp_path / "model.pt"
+    model.save(path)
+
+    restored = SUAVE.load(path)
+
+    assert restored.beta == pytest.approx(model.beta)
+    assert restored.gumbel_temperature == pytest.approx(model.gumbel_temperature)
+
+
 def test_training_monitor_keeps_elbo_semantics(monkeypatch):
     X, y, schema = _toy_dataset()
     updates: list[tuple[int, dict[str, float | None], dict[str, float | None]]] = []

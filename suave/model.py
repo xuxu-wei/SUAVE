@@ -3818,6 +3818,7 @@ class SUAVE:
             "behaviour": self.behaviour,
             "latent_dim": self.latent_dim,
             "n_components": self.n_components,
+            "beta": self.beta,
             "hidden_dims": list(self.hidden_dims),
             "head_hidden_dims": list(self.head_hidden_dims),
             "dropout": self.dropout,
@@ -3827,6 +3828,7 @@ class SUAVE:
             "val_split": self.val_split,
             "stratify": self.stratify,
             "random_state": self.random_state,
+            "gumbel_temperature": self.gumbel_temperature,
             "tau_start": self._tau_start,
             "tau_min": self._tau_min,
             "tau_decay": self._tau_decay,
@@ -4022,6 +4024,7 @@ class SUAVE:
         for key in (
             "latent_dim",
             "n_components",
+            "beta",
             "hidden_dims",
             "head_hidden_dims",
             "classification_loss_weight",
@@ -4032,6 +4035,7 @@ class SUAVE:
             "val_split",
             "stratify",
             "random_state",
+            "gumbel_temperature",
             "tau_start",
             "tau_min",
             "tau_decay",
@@ -4048,6 +4052,8 @@ class SUAVE:
                 elif key == "head_hidden_dims":
                     value = tuple(int(v) for v in value)
                 elif key in {
+                    "beta",
+                    "gumbel_temperature",
                     "tau_start",
                     "tau_min",
                     "tau_decay",
