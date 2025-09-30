@@ -35,7 +35,7 @@ DEFAULT_PHASE_PALETTE: tuple[tuple[str, str], ...] = (
     ("VAE warmup", "#ff980e"),
     ("Classification head", "#531f9c"),
     ("Joint fine-tuning", "#b89bd9"),
-    ("Decoder refining", "#faddb2"),
+    ("Decoder refining", "#8D6E63"),
 )
 
 
@@ -181,7 +181,7 @@ class TrainingPlotMonitor:
         self._history: dict[str, dict[str, list[float]]] = {}
         self._phase_palette = _prepare_phase_palette(phase_palette)
         self._phase_colors = {name: color for name, color in self._phase_palette}
-        self._phase_alpha = 0.2
+        self._phase_alpha = 0.3
         self._active_phase: str | None = None
         self._active_phase_start: float | None = None
         self._active_phase_last_epoch: float | None = None
