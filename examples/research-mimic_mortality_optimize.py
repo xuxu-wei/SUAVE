@@ -156,8 +156,8 @@ analysis_config["optuna_storage"] = (
     f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
 )
 
-train_df = load_dataset(DATA_DIR / "mimic-mortality-train.tsv")
-test_df = load_dataset(DATA_DIR / "mimic-mortality-test.tsv")
+train_df = load_dataset(DATA_DIR / "mimic-mortality-train.tsv").sample(1000)
+test_df = load_dataset(DATA_DIR / "mimic-mortality-test.tsv").sample(1000)
 
 if TARGET_LABEL not in TARGET_COLUMNS:
     raise ValueError(
@@ -317,6 +317,8 @@ def run_optuna_search(
         trial.suggest_int("kl_warmup_epochs", 0, 20)
         trial.suggest_int("head_epochs", 20, 80)
         trial.suggest_int("finetune_epochs", 1, 40)
+        trial.suggest_categorical('decoder_refine_mode', ["decoder_only", "decoder_prior", "prior_em_only", "prior_em_decoder"])
+        trial.suggest_categorical("decoder_refine_epochs", [0, 40, 60, 100, None])
         trial.suggest_int("early_stop_patience", 5, 10)
         trial.suggest_float("joint_decoder_lr_scale", 0.01, 1.0, log=False)
 
@@ -460,11 +462,6 @@ y_validation = y_validation.reset_index(drop=True)
 # %%
 
 manual_config = analysis_config.get("interactive_manual_tuning", {})
-override_on_history = (
-    bool(manual_config.get("override_on_history", False))
-    if isinstance(manual_config, Mapping)
-    else False
-)
 manual_action = "optuna"
 
 if IS_INTERACTIVE and manual_config:
@@ -528,9 +525,10 @@ if IS_INTERACTIVE and manual_config:
             study_prefix=analysis_config.get("optuna_study_prefix"),
             storage=analysis_config.get("optuna_storage"),
         )
-        if override_on_history and not (manual_overrides or base_params):
+        if not manual_overrides and not base_params:
             print(
-                "Manual overrides and Optuna history were both empty; continuing with Optuna search."
+                "Manual overrides were empty and no Optuna parameters were found; "
+                "continuing with Optuna search."
             )
             manual_action = "optuna"
         else:
@@ -539,7 +537,6 @@ if IS_INTERACTIVE and manual_config:
                     target_label=TARGET_LABEL,
                     manual_overrides=manual_overrides,
                     base_params=base_params,
-                    override_on_history=override_on_history,
                     schema=schema,
                     feature_columns=FEATURE_COLUMNS,
                     X_train=X_train_model,

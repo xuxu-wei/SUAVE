@@ -4624,6 +4624,8 @@ def build_suave_model(
         batch_size=int(params.get("batch_size", 256)),
         beta=float(params.get("beta", 1.5)),
         classification_loss_weight=classification_loss_weight,
+        decoder_refine_mode=params.get("decoder_refine_mode", 'decoder_only'),
+        decoder_refine_epochs=params.get("decoder_refine_epochs", None),
         random_state=random_state,
         behaviour="supervised",
     )
