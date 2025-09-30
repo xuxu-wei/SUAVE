@@ -1416,6 +1416,7 @@ class SUAVE:
                     train_metrics={},
                     val_metrics=val_metrics,
                     beta=self.beta,
+                    phase=("VAE warmup" if self.behaviour == "supervised" else None),
                 )
             final_temperature = temperature if temperature is not None else 1.0
             return {"final_temperature": float(final_temperature), "history": history}
@@ -1518,6 +1519,14 @@ class SUAVE:
                         "kl": metrics.get("categorical_kl", 0.0)
                         + metrics.get("gaussian_kl", 0.0),
                     }
+                phase_name = None
+                if self.behaviour == "supervised":
+                    kl_phase_limit = max(
+                        0, min(int(kl_warmup_epochs), int(warmup_epochs))
+                    )
+                    phase_name = (
+                        "KL annealing" if epoch < kl_phase_limit else "VAE warmup"
+                    )
                 plot_monitor.update(
                     epoch=epoch_offset + epoch,
                     train_metrics={
@@ -1528,6 +1537,7 @@ class SUAVE:
                     },
                     val_metrics=val_metrics,
                     beta=last_beta_scale if warmup_steps > 0 else self.beta,
+                    phase=phase_name,
                 )
 
         final_temperature = final_temperature if final_temperature is not None else 1.0
@@ -1827,6 +1837,7 @@ class SUAVE:
                     },
                     val_metrics=val_metrics,
                     beta=self.beta,
+                    phase="Classification head",
                 )
 
         if not was_training:
@@ -2034,6 +2045,7 @@ class SUAVE:
                     val_metrics=val_metrics,
                     beta=self.beta,
                     classification_loss_weight=classification_weight,
+                    phase="Joint fine-tuning",
                 )
 
             if best_metrics is None or self._is_better_metrics(metrics, best_metrics):
@@ -2187,6 +2199,7 @@ class SUAVE:
                     val_metrics=val_metrics,
                     beta=self.beta,
                     classification_loss_weight=classification_weight,
+                    phase="Decoder refining",
                 )
             if mode == "prior_em_only":
                 return 1, stats_for_cache
@@ -2375,6 +2388,7 @@ class SUAVE:
                         val_metrics=val_metrics,
                         beta=self.beta,
                         classification_loss_weight=classification_weight,
+                        phase="Decoder refining",
                     )
 
                 if decorated_metrics is not None and (
