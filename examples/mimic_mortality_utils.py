@@ -4613,7 +4613,7 @@ def build_suave_model(
         head_hidden_key, HEAD_HIDDEN_DIMENSION_OPTIONS["medium"]
     )
     # classification_loss_weight = resolve_classification_loss_weight(params)
-    classification_loss_weight = params.get("classification_loss_weight", None),
+    classification_loss_weight = params.get("classification_loss_weight", None)
     return SUAVE(
         schema=schema,
         latent_dim=int(params.get("latent_dim", 16)),
