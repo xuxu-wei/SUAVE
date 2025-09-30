@@ -322,11 +322,6 @@ class TrainingPlotMonitor:
             return
 
         def _clear_active_phase() -> None:
-            for patch in self._active_phase_patches.values():
-                try:
-                    patch.remove()
-                except ValueError:
-                    pass
             self._active_phase_patches = {}
             self._active_phase = None
             self._active_phase_start = None
