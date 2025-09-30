@@ -134,9 +134,12 @@ HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
     "deep": (128, 64, 32),
 }
 
-INTERACTIVE_MANUAL_TUNING: Dict[str, str] = {
+INTERACTIVE_MANUAL_TUNING: Dict[str, object] = {
     "module": "manual_param_setting",
     "attribute": "manual_param_setting",
+    # ``override_on_history`` toggles whether manual overrides build on the
+    # persisted Optuna parameters (``True``) or start from SUAVE defaults (``False``).
+    "override_on_history": False,
 }
 
 
@@ -2005,6 +2008,7 @@ def run_manual_override_training(
     target_label: str,
     manual_overrides: Mapping[str, Any],
     base_params: Optional[Mapping[str, Any]],
+    override_on_history: bool = False,
     schema: Schema,
     feature_columns: Sequence[str],
     X_train: pd.DataFrame,
@@ -2015,15 +2019,20 @@ def run_manual_override_training(
     calibration_dir: Path,
     random_state: int,
 ) -> Dict[str, Any]:
-    """Train and persist a manual SUAVE model using ``manual_overrides``."""
+    """Train and persist a manual SUAVE model using ``manual_overrides``.
+
+    Parameters
+    ----------
+    override_on_history
+        When ``True``, merge ``base_params`` from the latest Optuna history
+        before applying manual overrides. Leave as ``False`` to rely solely on
+        the overrides (falling back to SUAVE defaults when empty).
+    """
 
     merged_params: Dict[str, Any] = {}
-    if base_params:
+    if override_on_history and base_params:
         merged_params.update(dict(base_params))
     merged_params.update(dict(manual_overrides))
-
-    if not merged_params:
-        raise ValueError("Manual overrides and baseline parameters are empty.")
 
     model = build_suave_model(merged_params, schema, random_state=random_state)
     model.fit(X_train, y_train, plot_monitor=is_interactive_session(), **resolve_suave_fit_kwargs(merged_params))

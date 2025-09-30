@@ -8,7 +8,7 @@ import types
 
 import importlib
 import json
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import pytest
 import numpy as np
@@ -275,6 +275,121 @@ def test_collect_manual_and_optuna_overview(
     assert "Validation ROAUC" in ranked_df.columns
     assert "TSTR/TRTR ΔAUC" in ranked_df.columns
     assert pytest.approx(ranked_df.iloc[0]["Validation ROAUC"]) == 0.9
+
+
+@pytest.mark.parametrize(
+    "module_path",
+    [
+        "examples.mimic_mortality_utils",
+        "research_template.analysis_utils",
+    ],
+)
+def test_run_manual_override_training_history_flag(
+    tmp_path: Path, module_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Manual training should optionally start from Optuna history."""
+
+    module = importlib.import_module(module_path)
+
+    X_train = pd.DataFrame({"feature": [0.1, 0.2, 0.3, 0.4]})
+    y_train = pd.Series([0, 1, 0, 1])
+    X_validation = pd.DataFrame({"feature": [0.15, 0.25]})
+    y_validation = pd.Series([0, 1])
+
+    captured_params: List[Dict[str, Any]] = []
+    manifest_params: List[Dict[str, Any]] = []
+
+    class _DummyModel:
+        def __init__(self, params: Mapping[str, Any]):
+            self.params = dict(params)
+
+        def fit(self, *_args: object, **_kwargs: object) -> None:  # pragma: no cover - stub
+            return None
+
+        def save(self, path: Path) -> None:
+            Path(path).write_text("model", encoding="utf-8")
+
+    class _DummyCalibrator:
+        def predict_proba(self, features: pd.DataFrame) -> np.ndarray:  # pragma: no cover - stub
+            return np.tile(np.array([[0.4, 0.6]]), (len(features), 1))
+
+    def _build(params: Mapping[str, Any], *_args: object, **_kwargs: object) -> _DummyModel:
+        captured_params.append(dict(params))
+        return _DummyModel(params)
+
+    def _record(
+        model_dir: Path,
+        target_label: str,
+        *,
+        params: Mapping[str, Any],
+        **_: object,
+    ) -> Path:
+        manifest_params.append(dict(params))
+        manifest_path = model_dir / f"manifest_{target_label}.json"
+        manifest_path.write_text(json.dumps({"params": dict(params)}), encoding="utf-8")
+        return manifest_path
+
+    def _evaluate(model: _DummyModel, **_: object) -> Dict[str, Any]:
+        return {
+            "validation_metrics": {"ROAUC": 0.8},
+            "tstr_metrics": {"auroc": 0.79},
+            "trtr_metrics": {"auroc": 0.78},
+            "values": (0.8, 0.01),
+        }
+
+    monkeypatch.setattr(module, "build_suave_model", _build)
+    monkeypatch.setattr(module, "resolve_suave_fit_kwargs", lambda params: {})
+    monkeypatch.setattr(module, "is_interactive_session", lambda: False)
+    monkeypatch.setattr(module, "fit_isotonic_calibrator", lambda *args, **kwargs: _DummyCalibrator())
+    monkeypatch.setattr(module.joblib, "dump", lambda obj, path: Path(path).write_text("cal", encoding="utf-8"))
+    monkeypatch.setattr(module, "evaluate_candidate_model_performance", _evaluate)
+    monkeypatch.setattr(module, "record_manual_model_manifest", _record)
+
+    model_dir = tmp_path / "model_dir"
+    calibration_dir = tmp_path / "calibration_dir"
+
+    base_params = {"learning_rate": 0.01}
+    manual_overrides = {"dropout": 0.2}
+
+    history_result = module.run_manual_override_training(
+        target_label="mortality",
+        manual_overrides=manual_overrides,
+        base_params=base_params,
+        override_on_history=True,
+        schema={},
+        feature_columns=["feature"],
+        X_train=X_train,
+        y_train=y_train,
+        X_validation=X_validation,
+        y_validation=y_validation,
+        model_dir=model_dir,
+        calibration_dir=calibration_dir,
+        random_state=0,
+    )
+
+    assert captured_params[0] == {"learning_rate": 0.01, "dropout": 0.2}
+    assert manifest_params[0] == captured_params[0]
+    assert history_result["params"] == captured_params[0]
+
+    fresh_result = module.run_manual_override_training(
+        target_label="mortality",
+        manual_overrides=manual_overrides,
+        base_params=base_params,
+        override_on_history=False,
+        schema={},
+        feature_columns=["feature"],
+        X_train=X_train,
+        y_train=y_train,
+        X_validation=X_validation,
+        y_validation=y_validation,
+        model_dir=model_dir,
+        calibration_dir=calibration_dir,
+        random_state=0,
+    )
+
+    assert captured_params[1] == {"dropout": 0.2}
+    assert manifest_params[1] == captured_params[1]
+    assert fresh_result["params"] == captured_params[1]
 
 
 @pytest.mark.parametrize(
