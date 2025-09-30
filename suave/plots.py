@@ -20,7 +20,7 @@ from matplotlib.colors import (
     is_color_like,
 )
 from matplotlib.lines import Line2D
-from matplotlib.patches import FancyArrowPatch
+from matplotlib.patches import FancyArrowPatch, Rectangle
 from matplotlib.path import Path as BezierPath
 import numpy as np
 import pandas as pd
@@ -29,6 +29,14 @@ from statsmodels.stats.multitest import multipletests
 
 
 _ISSUE_ACTIONS = {"ignore", "warn", "error"}
+
+DEFAULT_PHASE_PALETTE: tuple[tuple[str, str], ...] = (
+    ("KL annealing", "#e55109"),
+    ("VAE warmup", "#ff980e"),
+    ("Classification head", "#531f9c"),
+    ("Joint fine-tuning", "#b89bd9"),
+    ("Decoder refining", "#faddb2"),
+)
 
 
 def _is_fdr_adjustment(method: str | None) -> bool:
@@ -53,6 +61,34 @@ def _handle_data_issue(action: str, message: str) -> None:
         warnings.warn(message, UserWarning, stacklevel=3)
         return
     raise ValueError(message)
+
+
+def _prepare_phase_palette(
+    palette: Mapping[str, str] | Sequence[tuple[str, str]] | None,
+) -> list[tuple[str, str]]:
+    """Validate and normalise the shading palette configuration."""
+
+    if palette is None:
+        return []
+
+    if isinstance(palette, Mapping):
+        items = list(palette.items())
+    else:
+        items = list(palette)
+
+    prepared: list[tuple[str, str]] = []
+    for name, color in items:
+        if color is None:
+            continue
+        if not is_color_like(color):
+            warnings.warn(
+                f"Ignoring invalid colour {color!r} for phase {name!r}",
+                UserWarning,
+                stacklevel=3,
+            )
+            continue
+        prepared.append((str(name), str(color)))
+    return prepared
 
 
 def _resolve_variable_label(
@@ -120,7 +156,11 @@ def _display_figure(figure: plt.Figure) -> object | None:
 class TrainingPlotMonitor:
     """Visualise training and validation metrics during ``fit``."""
 
-    def __init__(self, behaviour: str) -> None:
+    def __init__(
+        self,
+        behaviour: str,
+        phase_palette: Mapping[str, str] | Sequence[tuple[str, str]] | None = DEFAULT_PHASE_PALETTE,
+    ) -> None:
         self._behaviour = behaviour
         self._is_notebook = _in_notebook()
         rows, cols = (2, 3) if behaviour == "supervised" else (1, 3)
@@ -139,6 +179,14 @@ class TrainingPlotMonitor:
         self._axes: dict[str, Axes] = {}
         self._lines: dict[str, dict[str, Line2D | None]] = {}
         self._history: dict[str, dict[str, list[float]]] = {}
+        self._phase_palette = _prepare_phase_palette(phase_palette)
+        self._phase_colors = {name: color for name, color in self._phase_palette}
+        self._phase_alpha = 0.2
+        self._active_phase: str | None = None
+        self._active_phase_start: float | None = None
+        self._active_phase_patches: dict[str, object] = {}
+        self._phase_legend = None
+        self._tight_layout_rect: tuple[float, float, float, float] | None = None
 
         for axis, metric in zip(axes, self._metrics):
             axis.set_title(self._format_metric_title(metric["name"]))
@@ -173,7 +221,31 @@ class TrainingPlotMonitor:
         for axis in axes[len(self._metrics) :]:
             axis.axis("off")
 
-        self._figure.tight_layout()
+        if self._phase_palette:
+            handles = [
+                Rectangle(
+                    (0, 0),
+                    1,
+                    1,
+                    facecolor=self._phase_colors[name],
+                    edgecolor="none",
+                    alpha=self._phase_alpha,
+                )
+                for name, _ in self._phase_palette
+            ]
+            labels = [name for name, _ in self._phase_palette]
+            self._phase_legend = self._figure.legend(
+                handles,
+                labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, -0.02),
+                ncol=max(1, len(handles)),
+                frameon=False,
+                title="Training phases",
+            )
+            self._tight_layout_rect = (0.0, 0.08, 1.0, 1.0)
+
+        self._apply_layout()
         self._display_handle = (
             _display_figure(self._figure) if self._is_notebook else None
         )
@@ -189,11 +261,14 @@ class TrainingPlotMonitor:
         val_metrics: Mapping[str, float | int | None] | None = None,
         beta: float | None = None,
         classification_loss_weight: float | None = None,
+        phase: str | None = None,
     ) -> None:
         """Append metrics for ``epoch`` and refresh the visualisation."""
 
         train_metrics = train_metrics or {}
         val_metrics = val_metrics or {}
+
+        self._update_phase_shading(float(epoch), phase)
 
         if beta is not None and math.isfinite(float(beta)):
             self._coefficients["beta"] = float(beta)
@@ -228,8 +303,47 @@ class TrainingPlotMonitor:
 
             axis.set_title(self._format_metric_title(name))
 
-        self._figure.tight_layout()
+        self._apply_layout()
         self._refresh()
+
+    def _apply_layout(self) -> None:
+        """Apply tight layout while preserving space for the legend when needed."""
+
+        if self._tight_layout_rect is not None:
+            self._figure.tight_layout(rect=self._tight_layout_rect)
+        else:
+            self._figure.tight_layout()
+
+    def _update_phase_shading(self, epoch: float, phase: str | None) -> None:
+        """Synchronise phase shading across all axes."""
+
+        if not self._phase_palette:
+            return
+        if phase is None or phase not in self._phase_colors:
+            self._active_phase = None
+            self._active_phase_start = None
+            self._active_phase_patches = {}
+            return
+
+        if self._active_phase != phase:
+            self._active_phase = phase
+            self._active_phase_start = epoch
+            self._active_phase_patches = {}
+
+        start = self._active_phase_start if self._active_phase_start is not None else epoch
+        color = self._phase_colors.get(phase)
+        if color is None:
+            return
+
+        end = epoch
+        start = float(start)
+        end = float(end)
+        for metric_name, axis in self._axes.items():
+            previous = self._active_phase_patches.get(metric_name)
+            if previous is not None:
+                previous.remove()
+            patch = axis.axvspan(start, end, facecolor=color, alpha=self._phase_alpha, zorder=0)
+            self._active_phase_patches[metric_name] = patch
 
     def _refresh(self) -> None:
         """Redraw the figure to reflect the latest metric values."""
