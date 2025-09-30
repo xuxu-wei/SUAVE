@@ -1594,6 +1594,7 @@ def _build_trial_summary_rows(
 def _build_manual_optuna_ranked_table(
     *,
     manual_manifest: Mapping[str, Any],
+    model_manifest: Optional[Mapping[str, Any]],
     pareto_candidates: Sequence[Mapping[str, Any]],
     trials_df: pd.DataFrame,
     model_dir: Path,
@@ -1602,7 +1603,7 @@ def _build_manual_optuna_ranked_table(
 
     rows, metric_columns, param_columns = _build_trial_summary_rows(
         list(pareto_candidates),
-        manifest={},
+        manifest=model_manifest or {},
         manual_manifest=manual_manifest,
         model_dir=model_dir,
         capture_params=True,
@@ -1728,6 +1729,7 @@ def collect_manual_and_optuna_overview(
 
     ranked_df = _build_manual_optuna_ranked_table(
         manual_manifest=manual_manifest,
+        model_manifest=model_manifest,
         pareto_candidates=pareto_candidates,
         trials_df=trials_df,
         model_dir=model_dir,
