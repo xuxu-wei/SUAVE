@@ -140,9 +140,12 @@ HEAD_HIDDEN_DIMENSION_OPTIONS: Dict[str, Tuple[int, ...]] = {
 # 🟡 Caution: only update this hook when you need to override the manual tuning
 #     script and fully understand the downstream impact. Blind edits may break
 #     batch workflows.
-INTERACTIVE_MANUAL_TUNING: Dict[str, str] = {
+INTERACTIVE_MANUAL_TUNING: Dict[str, object] = {
     "module": "manual_param_setting",
     "attribute": "manual_param_setting",
+    # ``override_on_history`` controls whether manual overrides extend from the most
+    # recent Optuna trial (``True``) or start from SUAVE defaults (``False``).
+    "override_on_history": False,
 }
 
 # 🟡 Default configuration passed to :func:`build_analysis_config`.

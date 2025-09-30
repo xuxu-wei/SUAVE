@@ -460,6 +460,11 @@ y_validation = y_validation.reset_index(drop=True)
 # %%
 
 manual_config = analysis_config.get("interactive_manual_tuning", {})
+override_on_history = (
+    bool(manual_config.get("override_on_history", False))
+    if isinstance(manual_config, Mapping)
+    else False
+)
 manual_action = "optuna"
 
 if IS_INTERACTIVE and manual_config:
@@ -523,10 +528,9 @@ if IS_INTERACTIVE and manual_config:
             study_prefix=analysis_config.get("optuna_study_prefix"),
             storage=analysis_config.get("optuna_storage"),
         )
-        if not manual_overrides and not base_params:
+        if override_on_history and not (manual_overrides or base_params):
             print(
-                "Manual overrides were empty and no Optuna parameters were found; "
-                "continuing with Optuna search."
+                "Manual overrides and Optuna history were both empty; continuing with Optuna search."
             )
             manual_action = "optuna"
         else:
@@ -535,6 +539,7 @@ if IS_INTERACTIVE and manual_config:
                     target_label=TARGET_LABEL,
                     manual_overrides=manual_overrides,
                     base_params=base_params,
+                    override_on_history=override_on_history,
                     schema=schema,
                     feature_columns=FEATURE_COLUMNS,
                     X_train=X_train_model,
