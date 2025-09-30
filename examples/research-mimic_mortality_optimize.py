@@ -303,23 +303,22 @@ def run_optuna_search(
         trial.suggest_categorical("latent_dim", [6, 8, 16, 24])
         trial.suggest_categorical("n_components", [1, 2, 3, 4, 5, 6, 7, 8])
         trial.suggest_categorical("hidden_dims", list(HIDDEN_DIMENSION_OPTIONS.keys()))
-        trial.suggest_categorical(
-            "head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys())
-        )
-        trial.suggest_float("beta", 0.5, 6.0)
-        trial.suggest_categorical("use_classification_loss_weight", [True, False])
-        if trial.params.get("use_classification_loss_weight"):
-            trial.suggest_float("classification_loss_weight", 1.0, 1000.0, log=True)
+        trial.suggest_categorical("head_hidden_dims", list(HEAD_HIDDEN_DIMENSION_OPTIONS.keys()))
+        trial.suggest_float("beta", 0.5, 10.0)
+        # trial.suggest_categorical("use_classification_loss_weight", [True, False])
+        # if trial.params.get("use_classification_loss_weight"):
+        #     trial.suggest_float("classification_loss_weight", 1.0, 1000.0, log=True)
+        trial.suggest_float("classification_loss_weight", 1.0, 1000.0, log=True) # 手动调参确认范围后改为直接调参，不再使用 `use_classification_loss_weight` 辅助
         trial.suggest_float("dropout", 0.0, 0.5)
         trial.suggest_float("learning_rate", 1e-5, 5e-2, log=False)
-        trial.suggest_categorical("batch_size", [64, 128, 256])
-        trial.suggest_int("warmup_epochs", 2, 60)
+        trial.suggest_categorical("batch_size", [128, 256])
+        trial.suggest_int("warmup_epochs", 15, 100)
         trial.suggest_int("kl_warmup_epochs", 0, 20)
         trial.suggest_int("head_epochs", 20, 80)
-        trial.suggest_int("finetune_epochs", 1, 40)
+        trial.suggest_int("finetune_epochs", 5, 100)
         trial.suggest_categorical('decoder_refine_mode', ["decoder_only", "decoder_prior", "prior_em_only", "prior_em_decoder"])
         trial.suggest_categorical("decoder_refine_epochs", [0, 40, 60, 100, None])
-        trial.suggest_int("early_stop_patience", 5, 10)
+        trial.suggest_int("early_stop_patience", 5, 8)
         trial.suggest_float("joint_decoder_lr_scale", 0.01, 1.0, log=False)
 
         model = build_suave_model(trial.params, schema, random_state=random_state)
