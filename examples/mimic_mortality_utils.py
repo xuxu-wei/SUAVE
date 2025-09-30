@@ -144,7 +144,7 @@ INTERACTIVE_MANUAL_TUNING: Dict[str, object] = {
 
 
 DEFAULT_ANALYSIS_CONFIG: Dict[str, object] = {
-    "optuna_trials": 50,
+    "optuna_trials": 1,
     "optuna_timeout": 3600 * 48,
     "optuna_study_prefix": "supervised",
     "optuna_storage": None,

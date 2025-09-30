@@ -156,8 +156,8 @@ analysis_config["optuna_storage"] = (
     f"sqlite:///{OPTUNA_DIR}/{analysis_config['optuna_study_prefix']}_optuna.db"
 )
 
-train_df = load_dataset(DATA_DIR / "mimic-mortality-train.tsv").sample(1000)
-test_df = load_dataset(DATA_DIR / "mimic-mortality-test.tsv").sample(1000)
+train_df = load_dataset(DATA_DIR / "mimic-mortality-train.tsv")
+test_df = load_dataset(DATA_DIR / "mimic-mortality-test.tsv")
 
 if TARGET_LABEL not in TARGET_COLUMNS:
     raise ValueError(
