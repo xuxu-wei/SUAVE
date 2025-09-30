@@ -32,7 +32,7 @@
 
 4. **运行 Optuna 搜索**
    - 执行 `python research-suave_optimize.py` 生成帕累托前沿、最优 Trial JSON 与调参可视化。目录结构遵循 `analysis_config.py` 的 `ANALYSIS_SUBDIRECTORIES` 定义。
-  - 交互模式下的手动调参概览会复用帕累托摘要表展示本地保存状态，并仅呈现验证集 ROAUC 与 TSTR/TRTR ΔAUC 两个核心指标，同时展开 Optuna CSV 中的全部参数列，并在表格下方按验证集 ROAUC 与 TSTR/TRTR ΔAUC 绘制参数切片、平行坐标与参数重要性图（3 行 × 2 列），辅助人工覆写。为兼容 Plotly `parcoords` trace 的子图要求，平行坐标行会自动切换至 `domain` 类型，避免旧版本后端出现“Trace type 'parcoords' is not compatible with subplot type 'xy'”错误。
+  - 交互模式下的手动调参概览会复用帕累托摘要表展示本地保存状态，并仅呈现验证集 ROAUC 与 TSTR/TRTR ΔAUC 两个核心指标，同时展开 Optuna CSV 中的全部参数列，并在表格下方按验证集 ROAUC 与 TSTR/TRTR ΔAUC 绘制参数切片、平行坐标与参数重要性图（3 行 × 2 列），辅助人工覆写。为兼容 Plotly `parcoords` trace 的子图要求，平行坐标行会自动切换至 `domain` 类型，避免旧版本后端出现“Trace type 'parcoords' is not compatible with subplot type 'xy'”错误；当存在已持久化的 Optuna Trial manifest 时，“Saved locally” 列会与帕累托摘要共享同一 manifest 信息，确保已保存的 Trial 显示为 `✅`。
 
 5. **执行主分析**
    - 运行 `python research-supervised_analysis.py [--trial-id N]` 以加载或训练目标模型、拟合校准器并完成下游评估。交互模式会提示选择 Trial，脚本模式可通过参数或环境变量控制缓存策略。使用 `--help` 查看命令行提示，可知传入 `manual` 可直接加载手动模型 manifest。

@@ -345,6 +345,7 @@ class TrainingPlotMonitor:
             self._active_phase_start if self._active_phase_start is not None else float(epoch)
         )
         last_epoch = self._active_phase_last_epoch
+
         color = self._phase_colors.get(phase)
         if color is None:
             return
@@ -360,13 +361,13 @@ class TrainingPlotMonitor:
         end = float(epoch) + span
         if end < start:
             end = start
+
         for metric_name, axis in self._axes.items():
             previous = self._active_phase_patches.get(metric_name)
             if previous is not None:
                 previous.remove()
             patch = axis.axvspan(start, end, facecolor=color, alpha=self._phase_alpha, zorder=0)
             self._active_phase_patches[metric_name] = patch
-
         self._active_phase_last_epoch = float(epoch)
 
     def _refresh(self) -> None:
