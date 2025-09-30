@@ -17,6 +17,12 @@ SUAVE（Supervised, Unified, Augmented Variational Embedding）旨在为临床�
 1. **Warm-up**：仅优化生成模型，逐步增加 KL 权重（KL annealing）稳定训练。
 2. **Head 训练**：冻结生成器，训练分类头以最小化监督损失。
 3. **联合微调**：小学习率联合优化生成器与分类头，实现更好的生成—判别折衷。
+4. **Decoder Refine**：在监督模式下追加的解码器/先验细化阶段，可配置训练轮次（`decoder_refine_epochs`）和模式（`decoder_refine_mode`）。
+   - `decoder_only`：冻结先验，仅以 warm-up 学习率对解码器做额外梯度更新。
+   - `decoder_prior`：同时更新解码器与先验，并对先验参数添加 L2 锚点（`decoder_refine_prior_lambda`）以防漂移。
+   - `prior_em_only`：跳过梯度步骤，基于责任度量执行一次闭式 EM/矩匹配更新，然后直接进入缓存统计。
+   - `prior_em_decoder`：先执行上述闭式先验更新，再在冻结先验的前提下细化解码器。
+   该阶段沿用 warm-up 的学习率与早停耐心，监控验证集 ELBO 并在结束时恢复最佳 checkpoint，从而避免对训练数据过拟合。
 
 ### 2.3 自洽的校准与评估
 - 内置温度缩放（Temperature Scaling）对 logits 进行后验校准。
@@ -84,6 +90,21 @@ $$
 - 解码器针对不同类型特征输出的参数都是潜向量 $z$ 的函数，即使后验是对角的，多个特征也通过共同的潜表示隐式耦合——当潜空间的某个维度发生变化时，会同时影响多个重建分布的参数。
 - 在 warm-up 之后的监督和联合阶段，分类损失提供跨特征的梯度信号，使得与标签相关的一组特征会共同调整潜空间的同一方向，进一步编码统计依赖。
 
+#### 5.1.1 解码器细化阶段的先验 EM 更新
+
+当选择 `prior_em_only` 或 `prior_em_decoder` 模式时，SUAVE 会依据 `_collect_posterior_statistics` 产生的责任度量 $\gamma_{nk}$、后验均值 $m_{nk}$ 与对数方差 $\log v_{nk}$ 对混合先验做一次闭式矩匹配更新。令 $N$ 为样本总数，则新的混合权重、均值和方差按下式计算：
+
+$$
+\pi_k^{\text{new}} = \frac{1}{N} \sum_{n=1}^N \gamma_{nk}, \qquad
+\mu_k^{\text{new}} = \frac{\sum_{n=1}^N \gamma_{nk} m_{nk}}{\sum_{n=1}^N \gamma_{nk}}, \qquad
+\sigma_{k, d}^{2,\text{new}} = \frac{\sum_{n=1}^N \gamma_{nk} \left( e^{\log v_{nk,d}} + m_{nk,d}^2 \right)}{\sum_{n=1}^N \gamma_{nk}} - (\mu_{k,d}^{\text{new}})^2.
+$$
+
+上述公式分别对混合权重做归一化、对先验均值执行加权平均，并通过“二阶矩减去均值平方”的方式获得对角方差，实现与责任统计的一次矩匹配。在实现中会对权重和方差加以截断（`\ge 1\times10^{-6}`）以避免数值不稳定，所得的 $\pi_k^{\text{new}}$、$\mu_k^{\text{new}}$、$\log \sigma_{k}^{2,\text{new}}$ 直接覆盖先验参数。
+
+若选择 `decoder_prior` 模式，则除了常规的梯度下降之外，还会对每个先验参数引入 L2 锚定项 $\lambda \lVert \theta - \theta^{(0)} \rVert_2^2$（$\theta^{(0)}$ 为阶段起始快照，$\lambda = \text{decoder\_refine\_prior\_lambda}$），确保细化过程不会破坏既有的潜在聚类结构。
+
+
 
 ### 5.2 证据下界（ELBO）
 SUAVE 的无监督训练目标采用掩码感知的 ELBO：
@@ -116,6 +137,13 @@ $$
 - 对数项 $\log \sigma^{2,(r)}_{\theta,i}(z)$ 与常数 $\log(2\pi)$ 构成高斯分布的归一化部分，指出方差越小、常数项越负，代表模型对该特征越有把握。
 - 求和符号 $\sum_i$ 表示对所有实值特征维度累计这些贡献，再整体评估重建质量。
 这一拆解展示了 ELBO 如何同时关注预测准确度与不确定性量化。
+
+#### 5.2.1 实现细节：损失聚合与归一化
+- **重构项的聚合方式**：每个特征头都会返回按样本排列的对数似然向量，`sum_reconstruction_terms` 将它们在特征维度求和，因此重构分数在一个样本内部是对所有已观测特征对数似然的直接求和。【F:suave/modules/losses.py†L10-L23】掩码张量在构建这些似然时已经排除了缺失列，所以未观测条目不会对重构贡献造成偏差。
+- **KL 分解与缩放**：SUAVE 单独计算类别分配的 KL (`categorical_kl`) 与连续潜变量的 KL (`gaussian_kl`)，两者相加后乘以当前的 `beta_scale`，再从重构总和中扣除；实现上使用 `total_kl = beta_scale * total_kl_unscaled` 的形式维持退火机制。【F:suave/model.py†L1568-L1600】
+- **批次归一化策略**：闭式表达中的重构—KL 差值对每个样本得到的 ELBO 先求和，再对批次大小取平均（`loss = -elbo_value.mean()`），从而使优化器看到的目标是“每样本”的负 ELBO；训练循环会按样本计数将各项累加并除以样本数，确保日志指标也以平均每样本的尺度呈现。【F:suave/model.py†L1601-L1647】【F:suave/model.py†L1915-L1970】
+- **优点**：这种“按样本求和、按批次取平均”的做法与变分下界的理论定义一致，既方便解释为 sum(log p_theta(x)) 减去 KL，又避免额外的经验性权重；在掩码的帮助下还可以自然处理不规则缺失。
+- **潜在缺点与权衡**：由于每个样本的重构分数是所有观测特征对数似然的合计，拥有更多观测列或取值尺度较大的模态会在 ELBO 中占更大权重；若希望“每列”贡献均衡，需要额外对重构项按观测数或模态维度进行归一化，这会改变目标函数与对数似然的量纲，并可能破坏与 β 退火策略的直观对应。类似地，KL 的线性缩放虽然便于调参，但会让潜空间约束强度完全由单个超参数控制；替代方案是分别为类别与连续 KL 设定不同的缩放或利用自动调节比率（如 adaptive KL control），代价是需要更多监控指标与调参工作。
 
 ### 5.3 监督损失与温度校准
 对于带标签的样本 $(x, y)$，分类头产生 logits $f_\psi(z)$，监督损失为：

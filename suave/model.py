@@ -144,6 +144,20 @@ class SUAVE:
     finetune_epochs : int, optional
         Duration of the joint fine-tuning phase performed after the head stage.
         ``None`` activates heuristic scheduling.
+    decoder_refine_epochs : int, optional
+        Length of the decoder/prior-only refinement performed after joint
+        training in supervised mode. When omitted, the value mirrors
+        :paramref:`warmup_epochs`. Ignored when ``behaviour='unsupervised'``.
+    decoder_refine_mode : {"decoder_only", "decoder_prior", "prior_em_only", "prior_em_decoder"}, default "decoder_prior"
+        Strategy applied during the refinement stage. ``"decoder_only"`` keeps the
+        prior fixed while optimising the decoder. ``"decoder_prior"`` updates both
+        decoder and prior parameters with an L2 anchor on the prior. ``"prior_em_only"``
+        skips gradient steps and performs an EM-style closed-form prior refresh.
+        ``"prior_em_decoder"`` first applies the closed-form update and then
+        fine-tunes the decoder with the prior frozen.
+    decoder_refine_prior_lambda : float, default 1e-4
+        Strength of the L2 anchoring term applied to the prior during
+        ``decoder_refine_mode="decoder_prior"``. Ignored for the other modes.
     early_stop_patience : int, optional
         Patience of the validation early-stopping monitor used during joint
         fine-tuning before the best checkpoint is restored.  ``None`` activates
@@ -225,14 +239,25 @@ class SUAVE:
        - Early stopping is applied with ``early_stop_patience`` on validation
          metrics; the best checkpoint is restored at the end.
 
+    4) Decoder refinement (supervised mode only):
+       Controlled by ``decoder_refine_epochs`` (ignored in unsupervised mode).
+       - Encoder and classifier parameters are frozen; only the decoder and
+         prior continue training at the warm-up learning rate.
+       - Validation ELBO is monitored with the same patience budget to avoid
+         overfitting. The best checkpoint from this phase is restored.
+
     Visual timeline (supervised):
-        [ ELBO warm-up ]  ->  [ head-only ]  ->  [ joint fine-tune ]
-        warmup_epochs         head_epochs          finetune_epochs
+        [ ELBO warm-up ]  ->  [ head-only ]  ->  [ joint fine-tune ]  ->  [ decoder refine ]
+        warmup_epochs         head_epochs          finetune_epochs          decoder_refine_epochs
+
+        The final stage supports multiple refinement strategies controlled by
+        :paramref:`decoder_refine_mode`, ranging from decoder-only gradient updates
+        to closed-form prior refreshes followed by optional decoder fine-tuning.
 
     Visual timeline (unsupervised):
         [ ELBO warm-up only ]
         warmup_epochs
-        (``head_epochs`` and ``finetune_epochs`` are ignored)
+        (``head_epochs``, ``finetune_epochs`` and ``decoder_refine_epochs`` are ignored)
 
     Examples
     --------
@@ -267,6 +292,14 @@ class SUAVE:
         kl_warmup_epochs: Optional[int] = None,
         head_epochs: Optional[int] = None,
         finetune_epochs: Optional[int] = None,
+        decoder_refine_epochs: Optional[int] = None,
+        decoder_refine_mode: Literal[
+            "decoder_only",
+            "decoder_prior",
+            "prior_em_only",
+            "prior_em_decoder",
+        ] = "decoder_prior",
+        decoder_refine_prior_lambda: float = 1e-4,
         early_stop_patience: Optional[int] = None,
         joint_decoder_lr_scale: float = _DEFAULT_JOINT_DECODER_LR_SCALE,
         val_split: float = _DEFAULT_VAL_SPLIT,
@@ -373,6 +406,32 @@ class SUAVE:
             raise ValueError("finetune_epochs must be non-negative")
         self.finetune_epochs = finetune_value
 
+        decoder_refine_user = decoder_refine_epochs is not None
+        decoder_refine_value = int(
+            warmup_value if decoder_refine_epochs is None else decoder_refine_epochs
+        )
+        if decoder_refine_value < 0:
+            raise ValueError("decoder_refine_epochs must be non-negative")
+        self.decoder_refine_epochs = decoder_refine_value
+
+        valid_refine_modes = {
+            "decoder_only",
+            "decoder_prior",
+            "prior_em_only",
+            "prior_em_decoder",
+        }
+        if decoder_refine_mode not in valid_refine_modes:
+            raise ValueError(
+                "decoder_refine_mode must be one of 'decoder_only', "
+                "'decoder_prior', 'prior_em_only' or 'prior_em_decoder'"
+            )
+        self.decoder_refine_mode = decoder_refine_mode
+
+        lambda_value = float(decoder_refine_prior_lambda)
+        if lambda_value < 0.0:
+            raise ValueError("decoder_refine_prior_lambda must be non-negative")
+        self.decoder_refine_prior_lambda = lambda_value
+
         patience_user = early_stop_patience is not None
         patience_value = int(
             _DEFAULT_EARLY_STOP_PATIENCE
@@ -412,6 +471,7 @@ class SUAVE:
             "finetune_epochs": not finetune_user,
             "early_stop_patience": not patience_user,
         }
+        self._decoder_refine_epochs_user = decoder_refine_user
 
         self._tau_start: float | None = None
         self._tau_min: float | None = None
@@ -832,6 +892,7 @@ class SUAVE:
         warmup_epochs: Optional[int] = None,
         head_epochs: Optional[int] = None,
         finetune_epochs: Optional[int] = None,
+        decoder_refine_epochs: Optional[int] = None,
         joint_decoder_lr_scale: Optional[float] = None,
         early_stop_patience: Optional[int] = None,
         plot_monitor: bool = False,
@@ -869,6 +930,10 @@ class SUAVE:
         finetune_epochs : int, optional
             Duration of the joint fine-tuning stage. Ignored in unsupervised
             mode.
+        decoder_refine_epochs : int, optional
+            Number of decoder/prior-only refinement epochs executed after joint
+            optimisation. Defaults to :paramref:`warmup_epochs` when not
+            provided and is ignored in unsupervised mode.
         joint_decoder_lr_scale : float, optional
             Decoder/prior learning-rate multiplier to use during joint
             fine-tuning.
@@ -941,6 +1006,7 @@ class SUAVE:
         warmup_override = warmup_epochs is not None or epochs_override
         head_override = head_epochs is not None
         finetune_override = finetune_epochs is not None
+        decoder_refine_override = decoder_refine_epochs is not None
         batch_override = batch_size is not None
         kl_override = kl_warmup_epochs is not None
         patience_override = early_stop_patience is not None
@@ -953,6 +1019,11 @@ class SUAVE:
         schedule_head = self.head_epochs if head_epochs is None else int(head_epochs)
         schedule_finetune = (
             self.finetune_epochs if finetune_epochs is None else int(finetune_epochs)
+        )
+        schedule_decoder_refine = (
+            self.decoder_refine_epochs
+            if decoder_refine_epochs is None
+            else int(decoder_refine_epochs)
         )
         schedule_lr_scale = (
             self.joint_decoder_lr_scale
@@ -975,6 +1046,7 @@ class SUAVE:
             "warmup_epochs": schedule_warmup,
             "head_epochs": schedule_head,
             "finetune_epochs": schedule_finetune,
+            "decoder_refine_epochs": schedule_decoder_refine,
         }.items():
             if value < 0:
                 raise ValueError(f"{name} must be non-negative")
@@ -986,6 +1058,7 @@ class SUAVE:
         if self.behaviour == "unsupervised":
             schedule_head = 0
             schedule_finetune = 0
+            schedule_decoder_refine = 0
 
         self._joint_val_metrics = None
 
@@ -1068,12 +1141,20 @@ class SUAVE:
             early_stop_patience=schedule_patience,
         )
 
+        if decoder_refine_override:
+            schedule_decoder_refine = int(decoder_refine_epochs)
+        elif self._decoder_refine_epochs_user:
+            schedule_decoder_refine = int(self.decoder_refine_epochs)
+        else:
+            schedule_decoder_refine = int(schedule_warmup)
+
         if _reset_prior:
             self._reset_prior_parameters()
 
         if self.behaviour == "unsupervised":
             schedule_head = 0
             schedule_finetune = 0
+            schedule_decoder_refine = 0
 
         device = self._select_device()
         self._move_prior_parameters_to_device(device)
@@ -1228,13 +1309,31 @@ class SUAVE:
             )
             epoch_cursor += max(schedule_finetune, 0)
 
-            cache_stats = self._collect_posterior_statistics(
+            refine_epochs_completed, refine_stats = self._refine_decoder_after_joint(
+                schedule_decoder_refine,
                 encoder_inputs,
+                data_tensors,
+                mask_tensors,
+                val_encoder_inputs,
+                val_data_tensors,
+                val_mask_tensors,
                 batch_size=batch_size,
-                temperature=(
-                    self._inference_tau if self.behaviour == "unsupervised" else None
-                ),
+                patience=schedule_patience,
+                plot_monitor=monitor,
+                epoch_offset=epoch_cursor,
             )
+            epoch_cursor += max(refine_epochs_completed, 0)
+
+            if refine_stats is not None:
+                cache_stats = refine_stats
+            else:
+                cache_stats = self._collect_posterior_statistics(
+                    encoder_inputs,
+                    batch_size=batch_size,
+                    temperature=(
+                        self._inference_tau if self.behaviour == "unsupervised" else None
+                    ),
+                )
         else:
             cache_stats = posterior_stats
             history = warmup_history.get("history", [])
@@ -1247,6 +1346,7 @@ class SUAVE:
         self.warmup_epochs = schedule_warmup
         self.head_epochs = schedule_head
         self.finetune_epochs = schedule_finetune
+        self.decoder_refine_epochs = schedule_decoder_refine
         self.joint_decoder_lr_scale = schedule_lr_scale
         self.early_stop_patience = schedule_patience
 
@@ -1948,6 +2048,348 @@ class SUAVE:
         if best_state is not None:
             self._restore_model_state(best_state, device)
             self._joint_val_metrics = best_metrics
+
+    def _refine_decoder_after_joint(
+        self,
+        epochs: int,
+        encoder_inputs: Tensor,
+        data_tensors: dict[str, dict[str, Tensor]],
+        mask_tensors: dict[str, dict[str, Tensor]],
+        val_inputs: Tensor,
+        val_data_tensors: dict[str, dict[str, Tensor]],
+        val_mask_tensors: dict[str, dict[str, Tensor]],
+        *,
+        batch_size: int,
+        patience: int,
+        plot_monitor: TrainingPlotMonitor | None = None,
+        epoch_offset: int = 0,
+    ) -> tuple[int, dict[str, Tensor] | None]:
+        """Fine-tune the decoder and/or prior after joint optimisation.
+
+        Behaviour differs according to :attr:`decoder_refine_mode`:
+
+        - ``"decoder_only"`` freezes all prior tensors and only updates the
+          decoder parameters with gradient descent, keeping the prior snapshot
+          identical to the joint stage.
+        - ``"decoder_prior"`` performs gradient updates on both the decoder and
+          prior while adding an L2 penalty that anchors each prior tensor to the
+          checkpoint captured at the start of the phase. This mitigates drift in
+          the latent clustering structure while still allowing small corrections.
+        - ``"prior_em_only"`` skips gradient optimisation entirely and instead
+          calls :meth:`_collect_posterior_statistics` followed by
+          :meth:`_closed_form_prior_update_from_stats` to execute a single
+          expectation–maximisation style refresh of the prior parameters.
+        - ``"prior_em_decoder"`` first performs the closed-form prior update as
+          in ``"prior_em_only"`` and then unfreezes the decoder for the
+          remaining epochs while the prior stays fixed.
+
+        The method returns the number of epochs consumed (counting the EM pass
+        when relevant) alongside any cached statistics needed for persistence.
+        """
+
+        if self.behaviour != "supervised" or epochs <= 0:
+            return 0, None
+
+        n_samples = encoder_inputs.size(0)
+        if n_samples == 0:
+            return 0, None
+
+        device = encoder_inputs.device
+        patience = max(int(patience), 0)
+        mode = self.decoder_refine_mode
+
+        stats_for_cache: dict[str, Tensor] | None = None
+        metrics_after_update: dict[str, float] | None = None
+
+        def _decorate_metrics(metrics: dict[str, float]) -> dict[str, float]:
+            decorated = dict(metrics)
+            if decorated.get("joint_objective") is None and decorated.get("nll") is not None:
+                decorated["joint_objective"] = decorated.get("nll")
+            decorated.setdefault("classification_loss", None)
+            return decorated
+
+        consumed_em_epoch = False
+        if mode in {"prior_em_only", "prior_em_decoder"}:
+            stats_for_cache = self._collect_posterior_statistics(
+                encoder_inputs,
+                batch_size=batch_size,
+                temperature=None,
+            )
+            self._closed_form_prior_update_from_stats(stats_for_cache, device=device)
+            metrics_after_update = self._compute_elbo_on_dataset(
+                val_inputs,
+                val_data_tensors,
+                val_mask_tensors,
+                batch_size=batch_size,
+                temperature=None,
+            )
+            if plot_monitor is not None:
+                val_metrics = {}
+                if metrics_after_update:
+                    val_metrics = dict(metrics_after_update)
+                    val_metrics["total_loss"] = val_metrics.get("nll")
+                    if val_metrics.get("joint_objective") is None:
+                        val_metrics["joint_objective"] = val_metrics.get("nll")
+                    val_metrics["kl"] = (
+                        val_metrics.get("categorical_kl", 0.0)
+                        + val_metrics.get("gaussian_kl", 0.0)
+                    )
+                plot_monitor.update(
+                    epoch=epoch_offset,
+                    train_metrics={
+                        "total_loss": None,
+                        "joint_objective": None,
+                        "reconstruction": None,
+                        "kl": None,
+                    },
+                    val_metrics=val_metrics,
+                    beta=self.beta,
+                )
+            if mode == "prior_em_only":
+                return 1, stats_for_cache
+            consumed_em_epoch = True
+
+        decoder_params = list(self._decoder.parameters())
+        prior_params = self._prior_parameters_for_optimizer()
+        if not decoder_params and not prior_params:
+            return (1 if consumed_em_epoch else 0), stats_for_cache
+
+        encoder_requires_grad = [
+            param.requires_grad for param in self._encoder.parameters()
+        ]
+        classifier_requires_grad: list[bool] = []
+        if self._classifier is not None:
+            classifier_requires_grad = [
+                param.requires_grad for param in self._classifier.parameters()
+            ]
+        prior_requires_grad = [param.requires_grad for param in prior_params]
+
+        decoder_was_training = self._decoder.training
+        if not decoder_was_training:
+            self._decoder.train()
+
+        for param in self._encoder.parameters():
+            param.requires_grad = False
+        if self._classifier is not None:
+            for param in self._classifier.parameters():
+                param.requires_grad = False
+
+        train_prior = mode == "decoder_prior"
+        if not train_prior:
+            for param in prior_params:
+                param.requires_grad = False
+
+        param_groups: list[dict[str, Any]] = []
+        if decoder_params:
+            param_groups.append({"params": decoder_params, "lr": self.learning_rate})
+        if train_prior and prior_params:
+            param_groups.append({"params": prior_params, "lr": self.learning_rate})
+        if not param_groups:
+            if not decoder_was_training:
+                self._decoder.eval()
+            for param, flag in zip(self._encoder.parameters(), encoder_requires_grad):
+                param.requires_grad = flag
+            if self._classifier is not None:
+                for param, flag in zip(
+                    self._classifier.parameters(), classifier_requires_grad
+                ):
+                    param.requires_grad = flag
+            for param, flag in zip(prior_params, prior_requires_grad):
+                param.requires_grad = flag
+            return 0, stats_for_cache
+
+        optimizer = Adam(param_groups)
+        anchor_snapshots: list[Tensor] | None = None
+        if train_prior and prior_params:
+            anchor_snapshots = [param.detach().clone() for param in prior_params]
+
+        best_state = self._capture_model_state()
+        epochs_completed = 0
+        patience_counter = 0
+        effective_batch = min(batch_size, n_samples)
+        baseline_metrics = metrics_after_update or self._compute_elbo_on_dataset(
+            val_inputs,
+            val_data_tensors,
+            val_mask_tensors,
+            batch_size=batch_size,
+            temperature=None,
+        )
+        best_metrics = (
+            _decorate_metrics(baseline_metrics) if baseline_metrics else None
+        )
+
+        training_epoch_offset = epoch_offset + (1 if consumed_em_epoch else 0)
+
+        try:
+            progress = tqdm(range(epochs), desc="Decoder refine", leave=False)
+            for epoch in progress:
+                permutation = torch.randperm(n_samples, device=device)
+                epoch_loss = 0.0
+                epoch_samples = 0
+                epoch_recon_total = 0.0
+                epoch_cat_kl_total = 0.0
+                epoch_gauss_kl_total = 0.0
+                for start in range(0, n_samples, max(effective_batch, 1)):
+                    batch_indices = permutation[start : start + effective_batch]
+                    batch_input = encoder_inputs[batch_indices]
+                    batch_data = {
+                        key: {
+                            column: tensor[batch_indices]
+                            for column, tensor in tensors.items()
+                        }
+                        for key, tensors in data_tensors.items()
+                    }
+                    batch_masks = {
+                        key: {
+                            column: tensor[batch_indices]
+                            for column, tensor in tensors.items()
+                        }
+                        for key, tensors in mask_tensors.items()
+                    }
+                    outputs = self._forward_elbo_batch(
+                        batch_input,
+                        batch_data,
+                        batch_masks,
+                        beta_scale=self.beta,
+                        temperature=None,
+                    )
+                    loss = outputs["loss"]
+                    if train_prior and anchor_snapshots:
+                        anchor_penalty = loss.new_tensor(0.0)
+                        for param, snapshot in zip(prior_params, anchor_snapshots):
+                            anchor_penalty = anchor_penalty + F.mse_loss(
+                                param,
+                                snapshot.to(param.device),
+                                reduction="mean",
+                            )
+                        loss = loss + float(self.decoder_refine_prior_lambda) * anchor_penalty
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    batch_count = batch_indices.numel()
+                    epoch_loss += float(loss.item()) * batch_count
+                    epoch_samples += batch_count
+                    epoch_recon_total += float(outputs["reconstruction"].sum().item())
+                    epoch_cat_kl_total += float(outputs["categorical_kl"].sum().item())
+                    epoch_gauss_kl_total += float(outputs["gaussian_kl"].sum().item())
+
+                epochs_completed = epoch + 1
+                average_loss = epoch_loss / max(epoch_samples, 1)
+                average_recon = epoch_recon_total / max(epoch_samples, 1)
+                average_cat_kl = epoch_cat_kl_total / max(epoch_samples, 1)
+                average_gauss_kl = epoch_gauss_kl_total / max(epoch_samples, 1)
+                progress.set_postfix({"loss": average_loss})
+
+                metrics = self._compute_elbo_on_dataset(
+                    val_inputs,
+                    val_data_tensors,
+                    val_mask_tensors,
+                    batch_size=batch_size,
+                    temperature=None,
+                )
+                decorated_metrics = _decorate_metrics(metrics) if metrics else None
+
+                if plot_monitor is not None:
+                    val_metrics = {}
+                    if metrics:
+                        val_metrics = dict(metrics)
+                        val_metrics["total_loss"] = val_metrics.get("nll")
+                        if val_metrics.get("joint_objective") is None:
+                            val_metrics["joint_objective"] = val_metrics.get("nll")
+                        val_metrics["kl"] = (
+                            val_metrics.get("categorical_kl", 0.0)
+                            + val_metrics.get("gaussian_kl", 0.0)
+                        )
+                    plot_monitor.update(
+                        epoch=training_epoch_offset + epoch,
+                        train_metrics={
+                            "total_loss": average_loss,
+                            "joint_objective": average_loss,
+                            "reconstruction": average_recon,
+                            "kl": average_cat_kl + average_gauss_kl,
+                        },
+                        val_metrics=val_metrics,
+                        beta=self.beta,
+                    )
+
+                if decorated_metrics is not None and (
+                    best_metrics is None
+                    or self._is_better_metrics(decorated_metrics, best_metrics)
+                ):
+                    best_metrics = decorated_metrics
+                    best_state = self._capture_model_state()
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience > 0 and patience_counter > patience:
+                        break
+        finally:
+            if best_state is not None:
+                self._restore_model_state(best_state, device)
+            if not decoder_was_training:
+                self._decoder.eval()
+            for param, flag in zip(self._encoder.parameters(), encoder_requires_grad):
+                param.requires_grad = flag
+            if self._classifier is not None:
+                for param, flag in zip(
+                    self._classifier.parameters(), classifier_requires_grad
+                ):
+                    param.requires_grad = flag
+            for param, flag in zip(prior_params, prior_requires_grad):
+                param.requires_grad = flag
+
+        total_epochs = epochs_completed + (1 if consumed_em_epoch else 0)
+        return total_epochs, stats_for_cache
+
+    def _closed_form_prior_update_from_stats(
+        self, stats: dict[str, Tensor] | None, *, device: torch.device
+    ) -> None:
+        """Refresh prior parameters using posterior responsibilities."""
+
+        if (
+            stats is None
+            or self._prior_component_logits is None
+            or self._prior_component_mu is None
+            or self._prior_component_logvar is None
+        ):
+            return
+
+        probs = stats.get("probs")
+        component_mu = stats.get("component_mu")
+        component_logvar = stats.get("component_logvar")
+        if probs is None or component_mu is None or component_logvar is None:
+            return
+        if probs.numel() == 0:
+            return
+
+        weights = probs.sum(dim=0)
+        total_weight = float(weights.sum().item())
+        if total_weight <= 0.0:
+            return
+
+        mixture = torch.clamp(weights / total_weight, min=1e-6)
+        component_weight = torch.clamp(weights.unsqueeze(-1), min=1e-6)
+        means = (probs.unsqueeze(-1) * component_mu).sum(dim=0) / component_weight
+        second_moment = (
+            probs.unsqueeze(-1)
+            * (torch.exp(component_logvar) + component_mu.pow(2))
+        ).sum(dim=0) / component_weight
+        variances = torch.clamp(second_moment - means.pow(2), min=1e-6)
+        logvar = torch.log(variances)
+        logits = torch.log(mixture)
+
+        self._prior_component_logits.data.copy_(
+            logits.to(device=self._prior_component_logits.device, dtype=self._prior_component_logits.dtype)
+        )
+        self._prior_component_mu.data.copy_(
+            means.to(device=self._prior_component_mu.device, dtype=self._prior_component_mu.dtype)
+        )
+        self._prior_component_logvar.data.copy_(
+            logvar.to(
+                device=self._prior_component_logvar.device,
+                dtype=self._prior_component_logvar.dtype,
+            )
+        )
 
     def _compute_elbo_on_dataset(
         self,
@@ -3836,6 +4278,9 @@ class SUAVE:
             "warmup_epochs": self.warmup_epochs,
             "head_epochs": self.head_epochs,
             "finetune_epochs": self.finetune_epochs,
+            "decoder_refine_epochs": self.decoder_refine_epochs,
+            "decoder_refine_mode": self.decoder_refine_mode,
+            "decoder_refine_prior_lambda": self.decoder_refine_prior_lambda,
             "joint_decoder_lr_scale": self.joint_decoder_lr_scale,
             "early_stop_patience": self.early_stop_patience,
             "classification_loss_weight": self.classification_loss_weight,
@@ -4042,6 +4487,9 @@ class SUAVE:
             "warmup_epochs",
             "head_epochs",
             "finetune_epochs",
+            "decoder_refine_epochs",
+            "decoder_refine_mode",
+            "decoder_refine_prior_lambda",
             "joint_decoder_lr_scale",
             "early_stop_patience",
         ):
@@ -4059,6 +4507,7 @@ class SUAVE:
                     "tau_decay",
                     "joint_decoder_lr_scale",
                     "classification_loss_weight",
+                    "decoder_refine_prior_lambda",
                 }:
                     value = float(value)
                 elif key in {
@@ -4069,6 +4518,7 @@ class SUAVE:
                     "warmup_epochs",
                     "head_epochs",
                     "finetune_epochs",
+                    "decoder_refine_epochs",
                     "early_stop_patience",
                 }:
                     value = int(value)
