@@ -2101,6 +2101,49 @@ class SUAVE:
         stats_for_cache: dict[str, Tensor] | None = None
         metrics_after_update: dict[str, float] | None = None
 
+        classification_weight: float | None = None
+        weight_candidate = getattr(self, "classification_loss_weight", None)
+        if weight_candidate is not None:
+            try:
+                resolved_weight = float(weight_candidate)
+            except (TypeError, ValueError):
+                resolved_weight = float("nan")
+            if math.isfinite(resolved_weight):
+                classification_weight = resolved_weight
+
+        frozen_classification_loss: float | None = None
+        joint_metrics = getattr(self, "_joint_val_metrics", None)
+        if isinstance(joint_metrics, dict):
+            class_loss_value = joint_metrics.get("classification_loss")
+            if class_loss_value is not None:
+                try:
+                    resolved_loss = float(class_loss_value)
+                except (TypeError, ValueError):
+                    resolved_loss = float("nan")
+                if math.isfinite(resolved_loss):
+                    frozen_classification_loss = resolved_loss
+
+        def _apply_frozen_classification(
+            metrics: dict[str, float] | None,
+        ) -> dict[str, float] | None:
+            if not metrics:
+                return metrics
+            combined = dict(metrics)
+            if classification_weight is not None and frozen_classification_loss is not None:
+                combined["classification_loss"] = float(frozen_classification_loss)
+                nll_value = combined.get("nll")
+                if nll_value is not None:
+                    try:
+                        nll_float = float(nll_value)
+                    except (TypeError, ValueError):
+                        nll_float = float("nan")
+                    if math.isfinite(nll_float):
+                        combined["joint_objective"] = float(
+                            nll_float
+                            + classification_weight * float(frozen_classification_loss)
+                        )
+            return combined
+
         def _decorate_metrics(metrics: dict[str, float]) -> dict[str, float]:
             decorated = dict(metrics)
             if decorated.get("joint_objective") is None and decorated.get("nll") is not None:
@@ -2123,13 +2166,12 @@ class SUAVE:
                 batch_size=batch_size,
                 temperature=None,
             )
+            metrics_after_update = _apply_frozen_classification(metrics_after_update)
             if plot_monitor is not None:
                 val_metrics = {}
                 if metrics_after_update:
                     val_metrics = dict(metrics_after_update)
                     val_metrics["total_loss"] = val_metrics.get("nll")
-                    if val_metrics.get("joint_objective") is None:
-                        val_metrics["joint_objective"] = val_metrics.get("nll")
                     val_metrics["kl"] = (
                         val_metrics.get("categorical_kl", 0.0)
                         + val_metrics.get("gaussian_kl", 0.0)
@@ -2144,6 +2186,7 @@ class SUAVE:
                     },
                     val_metrics=val_metrics,
                     beta=self.beta,
+                    classification_loss_weight=classification_weight,
                 )
             if mode == "prior_em_only":
                 return 1, stats_for_cache
@@ -2214,6 +2257,7 @@ class SUAVE:
             batch_size=batch_size,
             temperature=None,
         )
+        baseline_metrics = _apply_frozen_classification(baseline_metrics)
         best_metrics = (
             _decorate_metrics(baseline_metrics) if baseline_metrics else None
         )
@@ -2287,6 +2331,7 @@ class SUAVE:
                     batch_size=batch_size,
                     temperature=None,
                 )
+                metrics = _apply_frozen_classification(metrics)
                 decorated_metrics = _decorate_metrics(metrics) if metrics else None
 
                 if plot_monitor is not None:
@@ -2294,22 +2339,42 @@ class SUAVE:
                     if metrics:
                         val_metrics = dict(metrics)
                         val_metrics["total_loss"] = val_metrics.get("nll")
-                        if val_metrics.get("joint_objective") is None:
-                            val_metrics["joint_objective"] = val_metrics.get("nll")
                         val_metrics["kl"] = (
                             val_metrics.get("categorical_kl", 0.0)
                             + val_metrics.get("gaussian_kl", 0.0)
                         )
+                        if classification_weight is not None and frozen_classification_loss is not None:
+                            val_metrics.setdefault(
+                                "classification_loss",
+                                float(frozen_classification_loss),
+                            )
                     plot_monitor.update(
                         epoch=training_epoch_offset + epoch,
                         train_metrics={
                             "total_loss": average_loss,
-                            "joint_objective": average_loss,
+                            # The classifier stays frozen during refinement so we reuse the
+                            # stored validation loss to keep the joint-objective plot meaningful.
+                            "joint_objective": (
+                                float(average_loss)
+                                + classification_weight * float(frozen_classification_loss)
+                                if (
+                                    classification_weight is not None
+                                    and frozen_classification_loss is not None
+                                    and math.isfinite(float(average_loss))
+                                )
+                                else (float(average_loss) if math.isfinite(float(average_loss)) else None)
+                            ),
+                            "classification_loss": (
+                                float(frozen_classification_loss)
+                                if frozen_classification_loss is not None
+                                else None
+                            ),
                             "reconstruction": average_recon,
                             "kl": average_cat_kl + average_gauss_kl,
                         },
                         val_metrics=val_metrics,
                         beta=self.beta,
+                        classification_loss_weight=classification_weight,
                     )
 
                 if decorated_metrics is not None and (
