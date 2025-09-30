@@ -122,19 +122,6 @@ class SUAVE:
         automatic heuristic that scales the classification term to match the
         warm-up validation ELBO by comparing it against the held-out
         cross-entropy measured after the head-only phase.
-    class_weight_start_frac : float, default 0.25
-        Fraction of the target classification weight applied at the start of
-        the joint fine-tuning stage. The weight linearly or cosine-anneals from
-        this fraction towards the full target value over
-        :paramref:`class_weight_warmup_epochs`.
-    class_weight_warmup_epochs : int, default 10
-        Number of joint-finetuning epochs allocated to annealing the
-        classification weight from :paramref:`class_weight_start_frac` up to the
-        full target weight.
-    class_weight_schedule : {"linear", "cosine"}, default "linear"
-        Shape of the annealing schedule applied to the classification weight
-        during joint fine-tuning. ``"linear"`` follows a straight interpolation
-        whereas ``"cosine"`` applies a half-cosine ramp.
     dropout : float, optional
         Dropout probability applied inside the neural modules.  When omitted a
         dataset-size-aware default is selected during :meth:`fit`.
@@ -161,10 +148,6 @@ class SUAVE:
         Patience of the validation early-stopping monitor used during joint
         fine-tuning before the best checkpoint is restored.  ``None`` activates
         heuristic scheduling.
-    head_early_stop_patience : int, optional
-        Patience for the classifier-head-only optimisation stage. When omitted
-        the value defaults to ``max(5, floor(early_stop_patience / 2))`` to keep
-        the head checkpoint in sync with the joint stage monitor.
     joint_decoder_lr_scale : float, default 0.1
         Multiplicative factor applied to the decoder and prior learning rates
         during joint fine-tuning relative to the encoder rate.
@@ -277,9 +260,6 @@ class SUAVE:
         hidden_dims: Optional[Iterable[int]] = None,
         head_hidden_dims: Iterable[int] = _DEFAULT_HEAD_HIDDEN_DIMS,
         classification_loss_weight: Optional[float] = None,
-        class_weight_start_frac: float = 0.25,
-        class_weight_warmup_epochs: int = 10,
-        class_weight_schedule: Literal["linear", "cosine"] = "linear",
         dropout: Optional[float] = None,
         learning_rate: Optional[float] = None,
         batch_size: Optional[int] = None,
@@ -288,7 +268,6 @@ class SUAVE:
         head_epochs: Optional[int] = None,
         finetune_epochs: Optional[int] = None,
         early_stop_patience: Optional[int] = None,
-        head_early_stop_patience: Optional[int] = None,
         joint_decoder_lr_scale: float = _DEFAULT_JOINT_DECODER_LR_SCALE,
         val_split: float = _DEFAULT_VAL_SPLIT,
         stratify: bool = _DEFAULT_STRATIFY,
@@ -341,19 +320,6 @@ class SUAVE:
             weight_value = None
         self._classification_loss_weight_user = classification_loss_weight is not None
         self.classification_loss_weight = weight_value
-
-        start_frac_value = float(class_weight_start_frac)
-        if not (0.0 <= start_frac_value <= 1.0):
-            raise ValueError("class_weight_start_frac must lie in [0, 1]")
-        warmup_epochs_value = int(class_weight_warmup_epochs)
-        if warmup_epochs_value < 0:
-            raise ValueError("class_weight_warmup_epochs must be non-negative")
-        schedule_normalised = class_weight_schedule.lower()
-        if schedule_normalised not in {"linear", "cosine"}:
-            raise ValueError("class_weight_schedule must be 'linear' or 'cosine'")
-        self.class_weight_start_frac = start_frac_value
-        self.class_weight_warmup_epochs = warmup_epochs_value
-        self.class_weight_schedule = schedule_normalised
 
         dropout_user = dropout is not None
         dropout_value = float(_DEFAULT_DROPOUT if dropout is None else dropout)
@@ -417,16 +383,6 @@ class SUAVE:
             raise ValueError("early_stop_patience must be non-negative")
         self.early_stop_patience = patience_value
 
-        head_patience_user = head_early_stop_patience is not None
-        head_patience_value = (
-            int(head_early_stop_patience)
-            if head_early_stop_patience is not None
-            else max(5, patience_value // 2)
-        )
-        if head_patience_value < 0:
-            raise ValueError("head_early_stop_patience must be non-negative")
-        self.head_early_stop_patience = head_patience_value
-
         if joint_decoder_lr_scale <= 0:
             raise ValueError("joint_decoder_lr_scale must be positive")
         self.joint_decoder_lr_scale = float(joint_decoder_lr_scale)
@@ -455,9 +411,7 @@ class SUAVE:
             "head_epochs": not head_user,
             "finetune_epochs": not finetune_user,
             "early_stop_patience": not patience_user,
-            "head_early_stop_patience": not head_patience_user,
         }
-        self._head_early_stop_patience_user = head_patience_user
 
         self._tau_start: float | None = None
         self._tau_min: float | None = None
@@ -644,9 +598,6 @@ class SUAVE:
             or not math.isfinite(float(ce_scale))
             or float(ce_scale) <= 0.0
         ):
-            LOGGER.warning(
-                "Failed to estimate classification_loss_weight; falling back to 1.0"
-            )
             return 1.0
         return self._derive_classification_loss_weight(
             float(warmup_elbo_scale), float(ce_scale)
@@ -1117,19 +1068,12 @@ class SUAVE:
             early_stop_patience=schedule_patience,
         )
 
-        if self._head_early_stop_patience_user:
-            schedule_head_patience = int(self.head_early_stop_patience)
-        else:
-            schedule_head_patience = max(5, schedule_patience // 2)
-            self.head_early_stop_patience = schedule_head_patience
-
         if _reset_prior:
             self._reset_prior_parameters()
 
         if self.behaviour == "unsupervised":
             schedule_head = 0
             schedule_finetune = 0
-            schedule_head_patience = 0
 
         device = self._select_device()
         self._move_prior_parameters_to_device(device)
@@ -1238,7 +1182,6 @@ class SUAVE:
                 y_val_tensor=y_val_tensor,
                 plot_monitor=monitor,
                 epoch_offset=epoch_cursor,
-                early_stop_patience=schedule_head_patience,
             )
             epoch_cursor += max(schedule_head, 0)
 
@@ -1282,9 +1225,6 @@ class SUAVE:
                 plot_monitor=monitor,
                 epoch_offset=epoch_cursor,
                 classification_loss_weight=float(self.classification_loss_weight),
-                class_weight_start_frac=self.class_weight_start_frac,
-                class_weight_warmup_epochs=self.class_weight_warmup_epochs,
-                class_weight_schedule=self.class_weight_schedule,
             )
             epoch_cursor += max(schedule_finetune, 0)
 
@@ -1309,7 +1249,6 @@ class SUAVE:
         self.finetune_epochs = schedule_finetune
         self.joint_decoder_lr_scale = schedule_lr_scale
         self.early_stop_patience = schedule_patience
-        self.head_early_stop_patience = schedule_head_patience
 
         self._is_fitted = True
         self._is_calibrated = False
@@ -1686,7 +1625,6 @@ class SUAVE:
         y_val_tensor: Tensor | None = None,
         plot_monitor: TrainingPlotMonitor | None = None,
         epoch_offset: int = 0,
-        early_stop_patience: int = 0,
     ) -> None:
         """Train the classification head on cached latent representations."""
 
@@ -1720,17 +1658,12 @@ class SUAVE:
         was_training = self._classifier.training
         self._classifier.train()
         progress = tqdm(range(epochs), desc="Head", leave=False)
-        best_state: OrderedDict[str, Tensor] | None = None
-        best_metric: float | None = None
-        patience_counter = 0
-        tolerance = 1e-8
         for epoch in progress:
             permutation = torch.randperm(n_samples, device=device)
             epoch_loss = 0.0
             epoch_samples = 0
             train_probabilities: list[np.ndarray] = []
             train_targets: list[np.ndarray] = []
-            val_loss_value: float | None = None
             for start in range(0, n_samples, effective_batch):
                 batch_indices = permutation[start : start + effective_batch]
                 logits = self._classifier(latent_mu[batch_indices])
@@ -1783,7 +1716,6 @@ class SUAVE:
                         "joint_objective": None,
                         "auroc": auroc,
                     }
-                    val_loss_value = float(val_loss.item())
 
                 plot_monitor.update(
                     epoch=epoch_offset + epoch,
@@ -1797,31 +1729,12 @@ class SUAVE:
                     beta=self.beta,
                 )
 
-            metric_candidate = val_loss_value
-            if metric_candidate is None or not math.isfinite(float(metric_candidate)):
-                metric_candidate = average_loss
-            metric_value = float(metric_candidate)
-            if not math.isfinite(metric_value):
-                metric_value = float("inf")
-
-            if best_metric is None or metric_value < best_metric - tolerance:
-                best_state = self._state_dict_to_cpu(self._classifier)
-                best_metric = metric_value
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if early_stop_patience >= 0 and patience_counter > early_stop_patience:
-                    break
-
         if not was_training:
             self._classifier.eval()
         for param, flag in zip(self._encoder.parameters(), encoder_requires_grad):
             param.requires_grad = flag
         for param, flag in zip(self._decoder.parameters(), decoder_requires_grad):
             param.requires_grad = flag
-
-        if best_state is not None:
-            self._classifier.load_state_dict(best_state)
 
     def _run_joint_finetune(
         self,
@@ -1841,9 +1754,6 @@ class SUAVE:
         plot_monitor: TrainingPlotMonitor | None = None,
         epoch_offset: int = 0,
         classification_loss_weight: float = 1.0,
-        class_weight_start_frac: float = 0.25,
-        class_weight_warmup_epochs: int = 0,
-        class_weight_schedule: str = "linear",
     ) -> None:
         """Fine-tune all modules jointly with early stopping."""
 
@@ -1878,31 +1788,9 @@ class SUAVE:
         n_samples = encoder_inputs.size(0)
         effective_batch = min(batch_size, n_samples) if n_samples else batch_size
 
-        weight_target = float(max(classification_loss_weight, 0.0))
-        start_fraction = float(min(max(class_weight_start_frac, 0.0), 1.0))
-        warmup_duration = max(int(class_weight_warmup_epochs), 0)
-        schedule_mode = class_weight_schedule.lower()
-        if schedule_mode not in {"linear", "cosine"}:
-            schedule_mode = "linear"
-
-        def _classification_weight_for_epoch(epoch_index: int) -> float:
-            if weight_target <= 0.0:
-                return 0.0
-            if warmup_duration <= 0:
-                return weight_target
-            effective_epoch = max(epoch_index + 1, 0)
-            ratio = min(
-                1.0, float(effective_epoch) / float(max(warmup_duration, 1))
-            )
-            if schedule_mode == "cosine":
-                anneal = 0.5 * (1.0 - math.cos(math.pi * ratio))
-            else:
-                anneal = ratio
-            fraction = start_fraction + (1.0 - start_fraction) * anneal
-            return weight_target * fraction
+        classification_weight = float(max(classification_loss_weight, 0.0))
 
         best_state: dict[str, Any] | None = self._capture_model_state()
-        baseline_weight = _classification_weight_for_epoch(-1)
         baseline_metrics = self._compute_validation_scores(
             val_inputs,
             val_data_tensors,
@@ -1912,7 +1800,7 @@ class SUAVE:
                 self._inference_tau if self.behaviour == "unsupervised" else None
             ),
             y_val_tensor=y_val_tensor,
-            classification_loss_weight=baseline_weight,
+            classification_loss_weight=classification_weight,
         )
         best_metrics: dict[str, float] | None = (
             baseline_metrics if baseline_metrics else None
@@ -1922,7 +1810,6 @@ class SUAVE:
         patience_counter = 0
         progress = tqdm(range(finetune_epochs), desc="Joint fine-tune", leave=False)
         for epoch in progress:
-            current_weight = _classification_weight_for_epoch(epoch)
             permutation = (
                 torch.randperm(n_samples, device=device)
                 if n_samples
@@ -1973,7 +1860,7 @@ class SUAVE:
                     logits = self._classifier(outputs["latent"])
                     targets = y_train_tensor[batch_indices]
                     class_loss = self._classifier.loss(logits, targets)
-                    joint_loss = joint_loss + class_loss * current_weight
+                    joint_loss = joint_loss + class_loss * classification_weight
                     epoch_class_loss += float(class_loss.item()) * batch_count
                     epoch_class_samples += batch_count
                     probabilities = torch.softmax(logits.detach(), dim=-1)
@@ -1998,7 +1885,7 @@ class SUAVE:
                     self._inference_tau if self.behaviour == "unsupervised" else None
                 ),
                 y_val_tensor=y_val_tensor,
-                classification_loss_weight=current_weight,
+                classification_loss_weight=classification_weight,
             )
             average_joint = epoch_joint_total / max(epoch_samples, 1)
             average_elbo = epoch_elbo_total / max(epoch_samples, 1)
@@ -2046,7 +1933,7 @@ class SUAVE:
                     },
                     val_metrics=val_metrics,
                     beta=self.beta,
-                    classification_loss_weight=current_weight,
+                    classification_loss_weight=classification_weight,
                 )
 
             if best_metrics is None or self._is_better_metrics(metrics, best_metrics):
@@ -3952,10 +3839,6 @@ class SUAVE:
             "joint_decoder_lr_scale": self.joint_decoder_lr_scale,
             "early_stop_patience": self.early_stop_patience,
             "classification_loss_weight": self.classification_loss_weight,
-            "class_weight_start_frac": self.class_weight_start_frac,
-            "class_weight_warmup_epochs": self.class_weight_warmup_epochs,
-            "class_weight_schedule": self.class_weight_schedule,
-            "head_early_stop_patience": self.head_early_stop_patience,
             "auto_configured": {
                 key: bool(value) for key, value in self._auto_configured.items()
             },
@@ -4145,9 +4028,6 @@ class SUAVE:
             "hidden_dims",
             "head_hidden_dims",
             "classification_loss_weight",
-            "class_weight_start_frac",
-            "class_weight_warmup_epochs",
-            "class_weight_schedule",
             "dropout",
             "learning_rate",
             "batch_size",
@@ -4164,7 +4044,6 @@ class SUAVE:
             "finetune_epochs",
             "joint_decoder_lr_scale",
             "early_stop_patience",
-            "head_early_stop_patience",
         ):
             if key in metadata and metadata[key] is not None:
                 value = metadata[key]
@@ -4180,7 +4059,6 @@ class SUAVE:
                     "tau_decay",
                     "joint_decoder_lr_scale",
                     "classification_loss_weight",
-                    "class_weight_start_frac",
                 }:
                     value = float(value)
                 elif key in {
@@ -4192,12 +4070,8 @@ class SUAVE:
                     "head_epochs",
                     "finetune_epochs",
                     "early_stop_patience",
-                    "class_weight_warmup_epochs",
-                    "head_early_stop_patience",
                 }:
                     value = int(value)
-                elif key == "class_weight_schedule":
-                    value = str(value)
                 init_kwargs[key] = value
         model = cls(schema=schema, behaviour=behaviour, **init_kwargs)
 
@@ -4211,11 +4085,6 @@ class SUAVE:
             }
             model._classification_loss_weight_user = not bool(
                 model._auto_configured.get("classification_loss_weight", False)
-            )
-            if "head_early_stop_patience" not in model._auto_configured:
-                model._auto_configured["head_early_stop_patience"] = False
-            model._head_early_stop_patience_user = not bool(
-                model._auto_configured.get("head_early_stop_patience", False)
             )
         auto_hparams = metadata.get("auto_hyperparameters")
         if isinstance(auto_hparams, dict):
