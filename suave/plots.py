@@ -184,6 +184,7 @@ class TrainingPlotMonitor:
         self._phase_alpha = 0.2
         self._active_phase: str | None = None
         self._active_phase_start: float | None = None
+        self._active_phase_last_epoch: float | None = None
         self._active_phase_patches: dict[str, object] = {}
         self._phase_legend = None
         self._tight_layout_rect: tuple[float, float, float, float] | None = None
@@ -319,31 +320,55 @@ class TrainingPlotMonitor:
 
         if not self._phase_palette:
             return
-        if phase is None or phase not in self._phase_colors:
+
+        def _clear_active_phase() -> None:
+            for patch in self._active_phase_patches.values():
+                try:
+                    patch.remove()
+                except ValueError:
+                    pass
+            self._active_phase_patches = {}
             self._active_phase = None
             self._active_phase_start = None
-            self._active_phase_patches = {}
+            self._active_phase_last_epoch = None
+
+        if phase is None or phase not in self._phase_colors:
+            _clear_active_phase()
             return
 
         if self._active_phase != phase:
+            _clear_active_phase()
             self._active_phase = phase
-            self._active_phase_start = epoch
-            self._active_phase_patches = {}
+            self._active_phase_start = float(epoch)
 
-        start = self._active_phase_start if self._active_phase_start is not None else epoch
+        start = (
+            self._active_phase_start if self._active_phase_start is not None else float(epoch)
+        )
+        last_epoch = self._active_phase_last_epoch
+
         color = self._phase_colors.get(phase)
         if color is None:
             return
 
-        end = epoch
+        if last_epoch is None:
+            span = 1.0
+        else:
+            span = float(epoch) - float(last_epoch)
+            if span <= 0:
+                span = 1.0
+
         start = float(start)
-        end = float(end)
+        end = float(epoch) + span
+        if end < start:
+            end = start
+
         for metric_name, axis in self._axes.items():
             previous = self._active_phase_patches.get(metric_name)
             if previous is not None:
                 previous.remove()
             patch = axis.axvspan(start, end, facecolor=color, alpha=self._phase_alpha, zorder=0)
             self._active_phase_patches[metric_name] = patch
+        self._active_phase_last_epoch = float(epoch)
 
     def _refresh(self) -> None:
         """Redraw the figure to reflect the latest metric values."""
