@@ -32,6 +32,7 @@
 
 4. **运行 Optuna 搜索**
    - 执行 `python research-suave_optimize.py` 生成帕累托前沿、最优 Trial JSON 与调参可视化。目录结构遵循 `analysis_config.py` 的 `ANALYSIS_SUBDIRECTORIES` 定义。
+   - 通过 `-n/--n-trials` 参数可临时覆写当次运行的 Optuna trial 数，例如 `python research-suave_optimize.py -n 40` 将仅搜索 40 个 trial；脚本会在解析参数后写入 `analysis_config["optuna_trials"]` 并沿用既有的缓存策略。
   - 交互模式下的手动调参概览会复用帕累托摘要表展示本地保存状态，并仅呈现验证集 ROAUC 与 TSTR/TRTR ΔAUC 两个核心指标，同时展开 Optuna CSV 中的全部参数列，并在表格下方按验证集 ROAUC 与 TSTR/TRTR ΔAUC 绘制参数切片、平行坐标与参数重要性图（3 行 × 2 列），辅助人工覆写。为兼容 Plotly `parcoords` trace 的子图要求，平行坐标行会自动切换至 `domain` 类型，避免旧版本后端出现“Trace type 'parcoords' is not compatible with subplot type 'xy'”错误；当存在已持久化的 Optuna Trial manifest 时，“Saved locally” 列会与帕累托摘要共享同一 manifest 信息，确保已保存的 Trial 显示为 `✅`。
 
 5. **执行主分析**
@@ -122,7 +123,7 @@
   1. 若存在历史最优 Trial，优先加载对应 JSON；否则使用默认超参重新搜索。
   2. 记录每个训练阶段（预训练、分类头、联合微调）的轮数、早停标准与耗时。
   3. 导出参数重要性、收敛曲线、帕累托前沿图，并保存到 `03_optuna_search/figures/`；交互式参数网格会按“指标 1 图 1、指标 2 图 1 … 指标 1 图 2”顺序逐张渲染，便于截图记录。从 CSV 导入的 Optuna trial 摘要会直接读取 `validation_roauc` 与 `tstr_trtr_delta_auc` 列，并忽略其余度量，确保手动调参概览的排序与显示保留真实验证指标。
-  4. 模板会在 `04_suave_training/` 下生成 `manual_param_setting.py`，用于登记交互式手动调参的覆盖项；如需生效，请将 `build_analysis_config()` 返回的 `interactive_manual_tuning` 配置指向该模块并填写 `manual_param_setting` 字典。若模块文件或该属性缺失，优化脚本会立即报错并终止运行，提醒补全手动覆写。若希望以最近一次 Optuna trial 的参数作为起点继续调整，可在 `analysis_config.INTERACTIVE_MANUAL_TUNING` 中将 `override_on_history` 设为 `True`；保持默认值 `False` 时则仅应用手动字典与 SUAVE 默认超参。
+  4. 模板会在 `04_suave_training/` 下生成 `manual_param_setting.py`，并预填包含全部 SUAVE 可调参数的 `manual_param_setting` 字典：可选超参默认写为 `None`，其余保持框架默认值，同时为每个键附带简短注释以便快速理解含义。如需生效，请将 `build_analysis_config()` 返回的 `interactive_manual_tuning` 配置指向该模块并根据需要修改该字典。若模块文件或该属性缺失，优化脚本会立即报错并终止运行，提醒补全手动覆写。若希望以最近一次 Optuna trial 的参数作为起点继续调整，可在 `analysis_config.INTERACTIVE_MANUAL_TUNING` 中将 `override_on_history` 设为 `True`；保持默认值 `False` 时则仅应用手动字典与 SUAVE 默认超参。
   5. 交互式运行可输入 `manual` 直接加载 `suave_manual_manifest_{label}.json` 中登记的模型与校准器；命令行同样支持 `--trial-id manual`。未指定 trial 时脚本会优先检查手动 manifest，再回退至最近保存的自动 trial，最后依据帕累托阈值自动挑选候选。手动 manifest 会固定写入 `"trial_number": "manual"` 字段，确保汇总表与加载逻辑能一致地标记其来源。
   6. 启用 `interactive_manual_tuning` 并以交互模式运行优化脚本时，会在启动 Optuna 之前展示手动模型与历史帕累托解的摘要表；此时可输入 `y/yes` 依据 `manual_param_setting` 直接训练并登记手动模型，输入 `manual` 复用磁盘中的手动 artefact，或输入 `n/no`/回车继续自动搜索。若在提示期间触发键盘中断，脚本会提示是否直接回退至 Optuna 搜索。
   7. 手动调参训练与 Optuna trial 的评估逻辑统一封装在 `analysis_utils.evaluate_candidate_model_performance` 中，用于输出验证集指标、TSTR/TRTR 评估与 ΔAUC；如需调整评估流程，请更新该函数以保持两条路径一致。

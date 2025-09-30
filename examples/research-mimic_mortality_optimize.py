@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -130,6 +131,21 @@ TARGET_LABEL = "in_hospital_mortality"
 analysis_config = build_analysis_config()
 
 IS_INTERACTIVE = is_interactive_session()
+
+if not IS_INTERACTIVE:
+    parser = argparse.ArgumentParser(
+        description="Run Optuna hyperparameter optimisation for SUAVE"
+    )
+    parser.add_argument(
+        "-n",
+        "--n-trials",
+        dest="n_trials",
+        type=int,
+        help="Number of Optuna trials to run for this execution",
+    )
+    script_args = parser.parse_args()
+    if script_args.n_trials is not None:
+        analysis_config["optuna_trials"] = script_args.n_trials
 
 
 # %% [markdown]

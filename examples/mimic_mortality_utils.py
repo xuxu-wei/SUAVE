@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import importlib
 import importlib.util
+import inspect
 import math
 import os
 import sys
@@ -384,15 +385,9 @@ def prepare_analysis_output_directories(
 
 
 def _initialise_manual_param_script(directory: Path) -> None:
-    """Ensure ``manual_param_setting.py`` exists with a default placeholder."""
+    """Ensure ``manual_param_setting.py`` exists with SUAVE hyper-parameters."""
 
     script_path = directory / "manual_param_setting.py"
-    default_content = (
-        '"""Manual hyper-parameter overrides for SUAVE training.\n\n'
-        "Populate ``manual_param_setting`` with overrides when interactive tuning is enabled.\n"
-        '"""\n\n'
-        "manual_param_setting: dict = {}\n"
-    )
 
     if script_path.exists():
         try:
@@ -401,6 +396,65 @@ def _initialise_manual_param_script(directory: Path) -> None:
             existing = None
         if existing and existing.strip():
             return
+
+    signature = inspect.signature(SUAVE.__init__)
+    comment_lookup = {
+        "schema": "Dataset schema override (None = infer during fit).",
+        "behaviour": "Operating mode ('supervised' or 'unsupervised').",
+        "latent_dim": "Latent dimensionality (None = auto-select).",
+        "n_components": "Mixture components for the latent prior.",
+        "beta": "KL divergence weight applied during training.",
+        "hidden_dims": "Encoder/decoder hidden layer widths (None = heuristic).",
+        "head_hidden_dims": "Classifier head hidden layer widths.",
+        "classification_loss_weight": "Extra weight for the classifier loss (None = default).",
+        "dropout": "Dropout rate for encoder/decoder layers (None = heuristic).",
+        "learning_rate": "Adam learning rate (None = heuristic).",
+        "batch_size": "Mini-batch size for training (None = heuristic).",
+        "warmup_epochs": "Encoder/decoder warm-up epochs (None = heuristic).",
+        "kl_warmup_epochs": "KL warm-up epochs before full weight (None = heuristic).",
+        "head_epochs": "Classifier head training epochs (None = heuristic).",
+        "finetune_epochs": "Joint fine-tuning epochs (None = heuristic).",
+        "decoder_refine_epochs": "Decoder refinement epochs (None = warm-up).",
+        "decoder_refine_mode": "Decoder refinement strategy.",
+        "decoder_refine_prior_lambda": "Regularisation strength during refinement.",
+        "early_stop_patience": "Early stopping patience in epochs (None = heuristic).",
+        "joint_decoder_lr_scale": "Learning-rate scale for decoder during joint phase.",
+        "val_split": "Fraction of data reserved for validation.",
+        "stratify": "Stratify validation split by target labels.",
+        "random_state": "Random seed for reproducibility.",
+        "gumbel_temperature": "Initial Gumbel-Softmax temperature.",
+        "tau_start": "Unsupervised mode starting temperature.",
+        "tau_min": "Minimum temperature for unsupervised mode.",
+        "tau_decay": "Temperature annealing rate for unsupervised mode.",
+    }
+
+    param_lines = []
+    for name, parameter in signature.parameters.items():
+        if name == "self":
+            continue
+        if parameter.default is inspect._empty:
+            continue
+
+        default_value = parameter.default
+        if default_value is None:
+            default_repr = "None"
+        else:
+            default_repr = repr(default_value)
+        comment = comment_lookup.get(
+            name, "Refer to SUAVE.__init__ documentation for details."
+        )
+        param_lines.append(
+            f"    {name!r}: {default_repr},  # {comment}"
+        )
+
+    default_content = (
+        '"""Manual hyper-parameter overrides for SUAVE training.\n\n'
+        "Populate ``manual_param_setting`` with overrides when interactive tuning is enabled.\n"
+        '"""\n\n'
+        "manual_param_setting: dict = {\n"
+        + "\n".join(param_lines)
+        + "\n}\n"
+    )
 
     script_path.write_text(default_content, encoding="utf-8")
 

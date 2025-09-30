@@ -56,7 +56,9 @@ def test_prepare_analysis_output_directories_initialises_manual_script(
     manual_script = directories["suave_model"] / "manual_param_setting.py"
     assert manual_script.exists()
     content = manual_script.read_text(encoding="utf-8")
-    assert "manual_param_setting: dict = {}" in content
+    assert "manual_param_setting: dict = {" in content
+    assert "'behaviour': 'supervised'" in content
+    assert "'latent_dim': None" in content
 
     manual_script.write_text(
         "manual_param_setting: dict = {\n    'learning_rate': 0.01\n}\n",
