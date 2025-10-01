@@ -1,3 +1,5 @@
+[![EN](https://img.shields.io/badge/README-EN-blue)](https://github.com/xuxu-wei/SUAVE#readme)![GitHub Repo stars](https://img.shields.io/github/stars/xuxu-wei/SUAVE)![Pepy Total Downloads](https://img.shields.io/pepy/dt/suave-ml)![PyPI - Version](https://img.shields.io/pypi/v/suave-ml)![PyPI - Status](https://img.shields.io/pypi/status/suave-ml)![PyPI - License](https://img.shields.io/pypi/l/suave-ml) 
+
 # SUAVE: Supervised, Unified, Augmented Variational Embedding
 
 SUAVE 是一款以 Schema 为核心的变分自编码器，面向混合类型表格数据，同时支持生成式建模与有监督预测。项目直接受到 HI-VAE 及其后续层次潜变量研究的启发，并在此基础上强化了显式 Schema、分阶段训练以及概率校准等现代化工作流。
