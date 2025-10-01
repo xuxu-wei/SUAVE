@@ -250,8 +250,3 @@ restored.predict_proba(test_X)
 ```
 
 保存的模型文件包含 schema 信息、参数权重与校准状态，可直接复现部署推理。
-
-## 文档与路线图
-
-- [SUAVE 技术说明](docs/SUAVE_Technical_Details.md)
-- [项目路线图](docs/Roadmap.md)

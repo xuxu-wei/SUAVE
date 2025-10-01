@@ -271,9 +271,6 @@ restored.predict_proba(test_X)
 
 Model artefacts include schema metadata, learned parameters, and calibration state for reproducible deployment.
 
-## Documentation and roadmap
 
-- [SUAVE technical overview](docs/SUAVE_Technical_Details.md)
-- [Project roadmap](docs/Roadmap.md)
 
-Community feedback and pull requests are welcome!
+**Community feedback and pull requests are welcome!**

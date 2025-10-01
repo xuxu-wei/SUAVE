@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import Dict, Mapping
+from typing import Dict, Mapping, Tuple
 
 import numpy as np
 import pandas as pd
@@ -20,25 +20,32 @@ def _initialise_feature_dict() -> Dict[str, Dict[str, Tensor]]:
     return {"real": {}, "pos": {}, "count": {}, "cat": {}, "ordinal": {}}
 
 
-def sample_mixture_latents(
+def prepare_mixture_prior(
     prior_logits: Tensor,
     prior_mu: Tensor,
     prior_logvar: Tensor,
-    n_samples: int,
     *,
     device: torch.device,
-) -> tuple[Tensor, Tensor]:
-    """Sample mixture assignments and component-wise latent vectors."""
-
-    if n_samples < 0:
-        raise ValueError("n_samples must be non-negative")
-    if n_samples == 0:
-        empty = torch.empty((0, prior_mu.size(-1)), device=device)
-        return empty, torch.empty((0,), dtype=torch.long, device=device)
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Move mixture prior parameters to ``device`` for repeated sampling."""
 
     logits = prior_logits.to(device)
     mu = prior_mu.to(device)
     logvar = prior_logvar.to(device)
+    return logits, mu, logvar
+
+
+def sample_prepared_mixture_latents(
+    logits: Tensor, mu: Tensor, logvar: Tensor, n_samples: int
+) -> tuple[Tensor, Tensor]:
+    """Sample latents using prior parameters already resident on-device."""
+
+    if n_samples < 0:
+        raise ValueError("n_samples must be non-negative")
+    if n_samples == 0:
+        empty = torch.empty((0, mu.size(-1)), device=mu.device)
+        return empty, torch.empty((0,), dtype=torch.long, device=mu.device)
+
     categorical = Categorical(logits=logits)
     assignments = categorical.sample((n_samples,))
     selected_mu = mu[assignments]
@@ -47,6 +54,26 @@ def sample_mixture_latents(
     eps = torch.randn_like(std)
     latents = selected_mu + eps * std
     return latents, assignments
+
+
+def sample_mixture_latents(
+    prior_logits: Tensor,
+    prior_mu: Tensor,
+    prior_logvar: Tensor,
+    n_samples: int,
+    *,
+    device: torch.device,
+    prepared: Tuple[Tensor, Tensor, Tensor] | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Sample mixture assignments and component-wise latent vectors."""
+
+    if prepared is not None:
+        logits, mu, logvar = prepared
+    else:
+        logits, mu, logvar = prepare_mixture_prior(
+            prior_logits, prior_mu, prior_logvar, device=device
+        )
+    return sample_prepared_mixture_latents(logits, mu, logvar, n_samples)
 
 
 def build_placeholder_batches(

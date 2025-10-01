@@ -2973,30 +2973,78 @@ class SUAVE:
     ) -> tuple[Tensor, Tensor]:
         """Return latent samples and mixture assignments for decoding."""
 
+        target_slice: np.ndarray | None = None
         if conditional:
-            return self._draw_conditional_latents(n_samples, targets, device)
-        latents, component_indices = sampling_utils.sample_mixture_latents(
-            self._prior_component_logits_tensor().detach(),
-            self._prior_component_means_tensor().detach(),
-            self._prior_component_logvar_tensor().detach(),
+            if targets is None:
+                raise ValueError("Targets must be provided when conditional=True")
+            target_slice = np.asarray(targets, dtype=object).reshape(-1)
+            if target_slice.shape[0] != n_samples:
+                raise ValueError(
+                    "y must have length equal to n_samples when conditional=True"
+                )
+        prepared_prior: tuple[Tensor, Tensor, Tensor] | None = None
+        if not conditional:
+            prepared_prior = sampling_utils.prepare_mixture_prior(
+                self._prior_component_logits_tensor().detach(),
+                self._prior_component_means_tensor().detach(),
+                self._prior_component_logvar_tensor().detach(),
+                device=device,
+            )
+        return self._draw_latent_batch(
             n_samples,
+            conditional=conditional,
+            target_slice=target_slice,
             device=device,
+            prior_params=prepared_prior,
+        )
+
+    def _draw_latent_batch(
+        self,
+        batch_size: int,
+        *,
+        conditional: bool,
+        target_slice: np.ndarray | None,
+        device: torch.device,
+        prior_params: tuple[Tensor, Tensor, Tensor] | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Sample a batch of latent variables and their assignments."""
+
+        if batch_size <= 0:
+            empty_latents = torch.empty((0, self.latent_dim), device=device)
+            empty_assignments = torch.empty((0, self.n_components), device=device)
+            return empty_latents, empty_assignments
+
+        if conditional:
+            if target_slice is None:
+                raise ValueError("Targets must be provided when conditional=True")
+            if target_slice.shape[0] != batch_size:
+                raise ValueError(
+                    "Target slice must have length equal to the requested batch size"
+                )
+            return self._draw_conditional_latents(target_slice, device)
+
+        prepared = prior_params
+        if prepared is None:
+            prepared = sampling_utils.prepare_mixture_prior(
+                self._prior_component_logits_tensor().detach(),
+                self._prior_component_means_tensor().detach(),
+                self._prior_component_logvar_tensor().detach(),
+                device=device,
+            )
+        latents, component_indices = sampling_utils.sample_prepared_mixture_latents(
+            prepared[0], prepared[1], prepared[2], batch_size
         )
         assignments = F.one_hot(
             component_indices.to(torch.long), num_classes=self.n_components
-        ).float()
+        ).to(dtype=torch.float32)
         return latents, assignments
 
     def _draw_conditional_latents(
         self,
-        n_samples: int,
-        targets: Optional[Iterable[object] | np.ndarray],
+        targets: np.ndarray,
         device: torch.device,
     ) -> tuple[Tensor, Tensor]:
         """Sample latent variables and assignments conditioned on class labels."""
-
-        if targets is None:
-            raise ValueError("Targets must be provided when conditional=True")
 
         if (
             self._train_component_mu is None
@@ -3011,31 +3059,39 @@ class SUAVE:
                 "Conditional sampling requires supervised targets from the training data"
             )
 
-        target_array = np.asarray(targets).reshape(-1)
-        if target_array.shape[0] != n_samples:
-            raise ValueError(
-                "y must have length equal to n_samples when conditional=True"
-            )
+        target_array = np.asarray(targets, dtype=object).reshape(-1)
+        if target_array.size == 0:
+            empty_latents = torch.empty((0, self.latent_dim), device=device)
+            empty_assignments = torch.empty((0, self.n_components), device=device)
+            return empty_latents, empty_assignments
 
-        latents = torch.zeros((n_samples, self.latent_dim), device=device)
-        assignments = torch.zeros((n_samples, self.n_components), device=device)
-        rng = np.random.default_rng()
-        for row, raw_label in enumerate(target_array):
+        latents_list: list[Tensor] = []
+        assignments_list: list[Tensor] = []
+        candidate_cache: dict[int, np.ndarray] = {}
+        for raw_label in target_array:
             label = raw_label.item() if isinstance(raw_label, np.generic) else raw_label
             if label not in self._class_to_index:
                 raise ValueError(
                     f"Unknown class '{label}' supplied for conditional sampling"
                 )
             class_index = self._class_to_index[label]
-            candidate_indices = np.where(self._train_target_indices == class_index)[0]
+            candidate_indices = candidate_cache.get(class_index)
+            if candidate_indices is None:
+                candidate_indices = np.flatnonzero(
+                    self._train_target_indices == class_index
+                )
+                candidate_cache[class_index] = candidate_indices
             if candidate_indices.size == 0:
                 raise ValueError(
                     f"No training samples available for class '{label}' to condition on"
                 )
-            selected = int(rng.choice(candidate_indices))
+            choice = torch.randint(
+                0, int(candidate_indices.size), (1,), device=device
+            ).item()
+            selected = int(candidate_indices[int(choice)])
             component_probs = self._train_component_probs[selected].to(device)
             component_dist = Categorical(probs=component_probs)
-            component_idx = int(component_dist.sample())
+            component_idx = int(component_dist.sample().item())
             mu = (
                 self._train_component_mu[selected, component_idx]
                 .unsqueeze(0)
@@ -3047,9 +3103,15 @@ class SUAVE:
                 .to(device)
             )
             latent_sample = self._reparameterize(mu, logvar)
-            latents[row] = latent_sample.squeeze(0)
-            assignments[row, component_idx] = 1.0
-        return latents, assignments
+            latents_list.append(latent_sample.squeeze(0))
+            assignment = F.one_hot(
+                torch.tensor(component_idx, device=device),
+                num_classes=self.n_components,
+            ).to(dtype=torch.float32)
+            assignments_list.append(assignment)
+        latents_batch = torch.stack(latents_list, dim=0)
+        assignments_batch = torch.stack(assignments_list, dim=0)
+        return latents_batch, assignments_batch
 
     def _apply_training_normalization(self, X: pd.DataFrame) -> pd.DataFrame:
         """Apply stored normalisation statistics to ``X``."""
@@ -4220,7 +4282,11 @@ class SUAVE:
         }
 
     def sample(
-        self, n_samples: int, conditional: bool = False, y: Optional[np.ndarray] = None
+        self,
+        n_samples: int,
+        conditional: bool = False,
+        y: Optional[np.ndarray] = None,
+        batch_size: Optional[int] = None,
     ) -> pd.DataFrame:
         """Generate samples by decoding latent variables through the learned model.
 
@@ -4235,6 +4301,10 @@ class SUAVE:
             Sequence of class labels used when :paramref:`conditional` is
             ``True``.  The array must have length ``n_samples`` and contain
             values observed during :meth:`fit`.
+        batch_size : int, optional
+            Number of samples decoded per mini-batch. ``None`` defaults to
+            :attr:`batch_size` when configured, otherwise the full
+            :paramref:`n_samples`.
 
         Returns
         -------
@@ -4251,17 +4321,29 @@ class SUAVE:
 
             model.sample(10, conditional=True, y=np.random.choice(model.classes_, size=10))
 
+        The decoder processes the request in mini-batches: each chunk draws
+        latent variables via :meth:`_draw_latent_batch`, prepares feature and
+        mask placeholders with :func:`suave.sampling.build_placeholder_batches`,
+        and finally runs the decoder heads to impute missing values and sample
+        feature-specific likelihoods. All chunks reuse the same PyTorch RNG
+        stream, so selecting a smaller :paramref:`batch_size` only changes the
+        number of decoding passes without altering the resulting sample order.
+
         Raises
         ------
         RuntimeError
             If the model has not been fitted.
         ValueError
             If conditional sampling is requested without valid labels.
+            If :paramref:`batch_size` is not a positive integer.
 
         Examples
         --------
         >>> samples = model.sample(5)
         >>> samples.shape
+        (5, len(model.schema.feature_names))
+        >>> batched = model.sample(5, batch_size=2)
+        >>> batched.shape
         (5, len(model.schema.feature_names))
         """
 
@@ -4282,30 +4364,71 @@ class SUAVE:
                 stacklevel=2,
             )
 
+        if batch_size is None:
+            batch_size = self.batch_size if self.batch_size is not None else n_samples
+        if batch_size is None or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+
         device = self._select_device()
-        latents, assignments = self._draw_latent_samples(
-            n_samples, conditional=conditional, targets=y, device=device
-        )
-        data_tensors, mask_tensors = sampling_utils.build_placeholder_batches(
-            self._feature_layout, n_samples, device=device
-        )
+        batch_size_value = int(batch_size)
+        effective_batch = min(batch_size_value, n_samples)
+        conditional_targets = None
+        if conditional:
+            if y is None:
+                raise ValueError("Targets must be provided when conditional=True")
+            conditional_targets = np.asarray(y, dtype=object).reshape(-1)
+            if conditional_targets.shape[0] != n_samples:
+                raise ValueError(
+                    "y must have length equal to n_samples when conditional=True"
+                )
+
         decoder_training_state = self._decoder.training
         self._decoder.eval()
-        with torch.no_grad():
-            decoder_out = self._decoder(
-                latents,
-                assignments,
-                data_tensors,
-                self._norm_stats_per_col,
-                mask_tensors,
+        chunk_frames: list[pd.DataFrame] = []
+        prepared_prior: tuple[Tensor, Tensor, Tensor] | None = None
+        if not conditional:
+            prepared_prior = sampling_utils.prepare_mixture_prior(
+                self._prior_component_logits_tensor().detach(),
+                self._prior_component_means_tensor().detach(),
+                self._prior_component_logvar_tensor().detach(),
+                device=device,
             )
+        with torch.no_grad():
+            for start in range(0, n_samples, effective_batch):
+                end = min(start + effective_batch, n_samples)
+                chunk_size = end - start
+                chunk_targets = (
+                    conditional_targets[start:end] if conditional_targets is not None else None
+                )
+                latents, assignments = self._draw_latent_batch(
+                    chunk_size,
+                    conditional=conditional,
+                    target_slice=chunk_targets,
+                    device=device,
+                    prior_params=prepared_prior,
+                )
+                data_tensors, mask_tensors = sampling_utils.build_placeholder_batches(
+                    self._feature_layout, chunk_size, device=device
+                )
+                decoder_out = self._decoder(
+                    latents,
+                    assignments,
+                    data_tensors,
+                    self._norm_stats_per_col,
+                    mask_tensors,
+                )
+                chunk_frame = sampling_utils.decoder_outputs_to_frame(
+                    decoder_out["per_feature"],
+                    self.schema,
+                    self._norm_stats_per_col,
+                )
+                chunk_frames.append(chunk_frame)
         if decoder_training_state:
             self._decoder.train()
 
-        samples = sampling_utils.decoder_outputs_to_frame(
-            decoder_out["per_feature"], self.schema, self._norm_stats_per_col
-        )
-        return samples
+        if not chunk_frames:
+            return pd.DataFrame(columns=list(self.schema.feature_names))
+        return pd.concat(chunk_frames, axis=0, ignore_index=True)
 
     # ------------------------------------------------------------------
     # Persistence helpers

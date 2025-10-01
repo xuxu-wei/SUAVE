@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -592,7 +593,7 @@ def simple_membership_inference(
 
 def _prepare_c2st_inputs(
     real_features: np.ndarray, synthetic_features: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray, int, int]:
+) -> Tuple[np.ndarray, np.ndarray, int, int, int, int]:
     """Validate inputs for the classifier two-sample test."""
 
     real = np.asarray(real_features, dtype=float)
@@ -601,19 +602,44 @@ def _prepare_c2st_inputs(
         raise ValueError("Inputs must be two-dimensional feature matrices")
     if real.shape[1] != synthetic.shape[1]:
         raise ValueError("Real and synthetic features must share the same columns")
+    if real.shape[0] == 0 or synthetic.shape[0] == 0:
+        raise ValueError("Both datasets must contain at least one row")
 
-    real_mask = np.all(np.isfinite(real), axis=1)
-    synth_mask = np.all(np.isfinite(synthetic), axis=1)
-    real = real[real_mask]
-    synthetic = synthetic[synth_mask]
-    if real.size == 0 or synthetic.size == 0:
-        raise ValueError("Both datasets must contain at least one finite row")
+    real = real.copy()
+    synthetic = synthetic.copy()
+
+    real_inf_mask = np.isinf(real)
+    synth_inf_mask = np.isinf(synthetic)
+    replaced_non_finite = int(real_inf_mask.sum() + synth_inf_mask.sum())
+    if replaced_non_finite:
+        real[real_inf_mask] = np.nan
+        synthetic[synth_inf_mask] = np.nan
+
+    real_finite = np.isfinite(real)
+    synth_finite = np.isfinite(synthetic)
+    usable_columns = real_finite.any(axis=0) | synth_finite.any(axis=0)
+    if not np.all(usable_columns):
+        real = real[:, usable_columns]
+        synthetic = synthetic[:, usable_columns]
+
+    if real.shape[1] == 0:
+        raise ValueError(
+            "No usable features remain after removing columns without finite values"
+        )
 
     features = np.vstack([real, synthetic])
     labels = np.concatenate(
         [np.zeros(real.shape[0], dtype=int), np.ones(synthetic.shape[0], dtype=int)]
     )
-    return features, labels, real.shape[0], synthetic.shape[0]
+    missing_entries = int(np.isnan(features).sum())
+    return (
+        features,
+        labels,
+        real.shape[0],
+        synthetic.shape[0],
+        replaced_non_finite,
+        missing_entries,
+    )
 
 
 def _cross_validated_probabilities(
@@ -701,7 +727,10 @@ def classifier_two_sample_test(
         Mapping from a model identifier to a factory function that returns an
         unfitted estimator implementing :meth:`fit`/:meth:`predict_proba` for
         binary classification. Keys are converted into snake-case metric
-        prefixes (e.g., ``"XGBoost"`` becomes ``"xgboost"``).
+        prefixes (e.g., ``"XGBoost"`` becomes ``"xgboost"``). When preprocessing
+        leaves ``numpy.nan`` entries (for example due to replacing ``±inf``),
+        ensure the estimator pipeline imputes missing values or natively
+        tolerates them.
     random_state : int
         Seed controlling the cross-validation shuffling and the bootstrap
         sampling procedure.
@@ -724,28 +753,41 @@ def classifier_two_sample_test(
     ------
     ValueError
         If the inputs are not two-dimensional, if they do not share the same
-        number of columns, or if insufficient samples remain after filtering
-        non-finite rows to form at least two cross-validation splits per class.
+        number of columns, if either input is empty, if no usable features
+        remain after removing columns without finite values, or if insufficient
+        samples remain to form at least two cross-validation splits per class.
 
     Notes
     -----
     ROC-AUC values within ``0.45``–``0.55`` typically indicate well-matched
     distributions, while scores exceeding ``0.7`` signal large shifts that
-    warrant closer inspection of the synthetic generator.
+    warrant closer inspection of the synthetic generator. Non-finite entries in
+    the input matrices are converted to ``numpy.nan`` and columns that lack
+    any finite observations are removed. When ``numpy.nan`` values remain after
+    preprocessing, a warning summarises the counts of replaced non-finite values
+    and missing entries so callers can provide imputers or models that tolerate
+    missing data.
 
     Examples
     --------
+    >>> import numpy as np
+    >>> from sklearn.impute import SimpleImputer
     >>> from sklearn.linear_model import LogisticRegression
+    >>> from sklearn.pipeline import make_pipeline
     >>> from xgboost import XGBClassifier
     >>> rng = np.random.default_rng(0)
     >>> real = rng.normal(size=(100, 3))
+    >>> real[0, 0] = np.nan
     >>> synth = rng.normal(loc=0.1, size=(100, 3))
+    >>> synth[0, 1] = np.inf
     >>> metrics = classifier_two_sample_test(
     ...     real,
     ...     synth,
     ...     model_factories={
     ...         "xgboost": lambda: XGBClassifier(random_state=0),
-    ...         "logistic": lambda: LogisticRegression(max_iter=200),
+    ...         "logistic": lambda: make_pipeline(
+    ...             SimpleImputer(), LogisticRegression(max_iter=200)
+    ...         ),
     ...     },
     ...     random_state=0,
     ...     n_bootstrap=10,
@@ -757,9 +799,27 @@ def classifier_two_sample_test(
     if not model_factories:
         raise ValueError("model_factories must contain at least one classifier")
 
-    features, labels, n_real, n_synth = _prepare_c2st_inputs(
-        real_features, synthetic_features
-    )
+    (
+        features,
+        labels,
+        n_real,
+        n_synth,
+        replaced_non_finite,
+        missing_entries,
+    ) = _prepare_c2st_inputs(real_features, synthetic_features)
+
+    if missing_entries:
+        warnings.warn(
+            (
+                "C2ST inputs contain "
+                f"{replaced_non_finite} non-finite values replaced with NaN "
+                f"and {missing_entries} missing entries after preprocessing. "
+                "Ensure model_factories include imputers or use models that "
+                "tolerate missing values."
+            ),
+            UserWarning,
+            stacklevel=2,
+        )
 
     class_counts = np.bincount(labels)
     min_class = int(class_counts.min())
