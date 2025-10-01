@@ -8,16 +8,21 @@ suggested by the SchemaInferencer.
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import time
 import webbrowser
 from collections import OrderedDict
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Dict, Iterable, List, MutableMapping, Optional
 
 import numpy as np
 import pandas as pd
+import seaborn as sns
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 
 from ..schema_inference import (
     SCHEMA_INFERENCE_MODES,
@@ -1059,7 +1064,9 @@ function openDistributionWindow(column, payload) {
 <title>Distribution for ${column}</title>
 <style>
 body { font-family: "Segoe UI", Arial, sans-serif; margin: 16px; }
-#plot { width: 100%; height: 90vh; }
+#plot { width: 100%; min-height: 200px; display: flex; align-items: center; justify-content: center; }
+#plot img { max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1); border: 1px solid rgba(0, 0, 0, 0.08); }
+#plot .message { font-size: 1rem; color: #333; text-align: center; }
 </style>
 </head>
 <body>
@@ -1075,35 +1082,22 @@ body { font-family: "Segoe UI", Arial, sans-serif; margin: 16px; }
     }
 
     if (payload.type === "empty") {
-        plotContainer.innerText = payload.message || 'No data available.';
+        const message = doc.createElement('p');
+        message.className = 'message';
+        message.textContent = payload.message || 'No data available.';
+        plotContainer.appendChild(message);
         return;
     }
 
-    const script = doc.createElement('script');
-    script.src = 'https://cdn.plot.ly/plotly-latest.min.js';
-    script.async = true;
-    script.onload = () => {
-        if (!win.Plotly || typeof win.Plotly.newPlot !== 'function') {
-            plotContainer.innerText = 'Plotly loaded but could not be initialised.';
-            return;
-        }
-        const layout = {
-            title: payload.title || `Distribution for ${column}`,
-            xaxis: { title: payload.x_label || 'Value' },
-            yaxis: { title: payload.y_label || 'Count' }
-        };
-        let trace;
-        if (payload.type === 'hist') {
-            trace = { type: 'bar', x: payload.bins, y: payload.counts, marker: { color: '#4c72b0' } };
-        } else {
-            trace = { type: 'bar', x: payload.labels, y: payload.counts, marker: { color: '#4c72b0' } };
-        }
-        win.Plotly.newPlot('plot', [trace], layout);
-    };
-    script.onerror = () => {
-        plotContainer.innerText = 'Unable to load Plotly for rendering.';
-    };
-    doc.head.appendChild(script);
+    if (payload.image_data) {
+        const image = doc.createElement('img');
+        image.src = payload.image_data;
+        image.alt = payload.alt_text || `Distribution for ${column}`;
+        plotContainer.appendChild(image);
+        return;
+    }
+
+    plotContainer.innerText = 'Distribution image could not be rendered.';
 }
 
 async function finalizeSchema() {
@@ -1489,6 +1483,11 @@ def _distribution_payload(series: pd.Series, column: str) -> Dict[str, object]:
         bins = int(max(5, min(30, np.sqrt(values.size))))
         counts, edges = np.histogram(values, bins=bins)
         centers = (edges[:-1] + edges[1:]) / 2.0
+        image_data, alt_text = _render_distribution_image(
+            column,
+            kind="hist",
+            values=values,
+        )
         return {
             "type": "hist",
             "column": column,
@@ -1497,20 +1496,73 @@ def _distribution_payload(series: pd.Series, column: str) -> Dict[str, object]:
             "counts": [int(x) for x in counts.tolist()],
             "x_label": "Value",
             "y_label": "Count",
+            "image_data": image_data,
+            "alt_text": alt_text,
         }
 
     value_counts = non_null.astype(str).value_counts().sort_index()
     labels = [str(label) for label in value_counts.index.tolist()]
+    counts = [int(x) for x in value_counts.tolist()]
+    image_data, alt_text = _render_distribution_image(
+        column,
+        kind="bar",
+        labels=labels,
+        counts=counts,
+    )
     return {
         "type": "bar",
         "column": column,
         "title": f"Distribution for {column}",
         "labels": labels,
-        "counts": [int(x) for x in value_counts.tolist()],
+        "counts": counts,
         "x_label": "Category",
         "y_label": "Count",
+        "image_data": image_data,
+        "alt_text": alt_text,
     }
 
+
+def _render_distribution_image(
+    column: str,
+    *,
+    kind: str,
+    values: Optional[np.ndarray] = None,
+    labels: Optional[List[str]] = None,
+    counts: Optional[List[int]] = None,
+) -> tuple[str, str]:
+    """Render a distribution plot and return its base64 representation and alt text."""
+
+    figure = Figure(figsize=(6, 4), dpi=110)
+    _ = FigureCanvasAgg(figure)
+    ax = figure.subplots()
+
+    if kind == "hist" and values is not None:
+        sns.histplot(values, kde=True, stat="count", ax=ax, color="#4c72b0")
+        ax.set_xlabel("Value")
+        ax.set_ylabel("Count")
+        alt_text = f"Histogram with KDE for column {column}"
+    elif kind == "bar" and labels is not None and counts is not None:
+        repeated = np.repeat(labels, counts)
+        sns.countplot(x=repeated, order=labels, ax=ax, color="#4c72b0")
+        ax.set_xlabel("Category")
+        ax.set_ylabel("Count")
+        ax.tick_params(axis="x", rotation=45)
+        alt_text = f"Category count plot for column {column}"
+    else:
+        raise ValueError("Invalid arguments for distribution rendering.")
+
+    ax.set_title(f"Distribution for {column}")
+    figure.tight_layout()
+
+    buffer = BytesIO()
+    try:
+        figure.savefig(buffer, format="png", bbox_inches="tight")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    finally:
+        buffer.close()
+        figure.clear()
+
+    return f"data:image/png;base64,{encoded}", alt_text
 
 def _normalise_schema_spec(
     spec: Optional[MutableMapping[str, object]] | Dict[str, object] | None,
