@@ -10,6 +10,8 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+Testpypi*
+*/_version.py
 .vscode/
 .Python
 build/
