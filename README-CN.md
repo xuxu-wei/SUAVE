@@ -10,7 +10,16 @@ SUAVE 是一款以 Schema 为核心的变分自编码器，面向混合类型表
 - **缺失值感知的生成解码。** 标准化工具与解码器头会在实数、分类、正数、计数与序数特征上持续传递掩码，从而一致地处理缺失数据。
 - **内置校准与评估。** 模型提供温度缩放、Brier 得分、ECE 等评估指标，帮助在下游场景中生成可靠概率。
 
-## API 全景
+## 安装
+
+SUAVE 依赖 Python 3.10+ 与 PyTorch。**推荐**在安装此包前，先安装适合您系统环境的 PyTorch。请参考 [PyTorch官方指南](https://pytorch.org/get-started/locally/) 进行安装。
+例如，windows 平台下使用 pip 命令安装Cuda 12.1版本对应的 PyTorch:
+
+```bash
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install suave-ml
+```
+## API 概览
 
 | 方法 | 作用 |
 | ---- | ---- |
@@ -24,13 +33,7 @@ SUAVE 是一款以 Schema 为核心的变分自编码器，面向混合类型表
 | `impute(X, only_missing=True)` | 重建缺失或被掩码的单元格并与原始数据合并。 |
 | `save(path)` / `SUAVE.load(path)` | 保存与恢复模型权重、Schema 元数据和校准状态，以便部署。 |
 
-## 安装
 
-```bash
-pip install -r requirements.txt
-```
-
-SUAVE 依赖 Python 3.9+ 与 PyTorch。
 
 ## 快速上手
 
@@ -57,7 +60,7 @@ labels = model.predict(train_X.tail(5))
 
 完整示例可参考 [`examples/demo-mimic_mortality_supervised.ipynb`](examples/demo-mimic_mortality_supervised.ipynb)。
 
-## API 概览
+## API 参考
 
 以下示例覆盖最常用的工作流程。除特别说明外，接口均可接受 pandas DataFrame 或 NumPy 数组。
 

@@ -10,6 +10,14 @@ SUAVE is a schema-first variational autoencoder for mixed tabular data that unif
 - **Mask-aware generative decoding.** Normalisation utilities and decoder heads propagate feature-wise masks so missing values remain consistent across real, categorical, positive, count, and ordinal variables.
 - **Built-in calibration and evaluation.** Temperature scaling, Brier score, expected calibration error, and additional metrics are available for trustworthy downstream decisions.
 
+## Installation
+
+The package targets Python 3.9+ with PyTorch as its primary dependency. **It is recommended** to install the suitable PyTorch version for your system environment before installing this package. Please refer to the [official PyTorch guide](https://pytorch.org/get-started/locally/) for installation instructions. For example, on Windows, you can use the following pip command to install the version of PyTorch corresponding to CUDA 12.1:
+
+```bash
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install suave-ml
+```
 ## Core API surface
 
 | Method | Purpose |
@@ -24,13 +32,7 @@ SUAVE is a schema-first variational autoencoder for mixed tabular data that unif
 | `impute(X, only_missing=True)` | Reconstruct missing or masked cells and merge them back into the original frame. |
 | `save(path)` / `SUAVE.load(path)` | Persist and restore model weights, schema metadata, and calibration state for deployment. |
 
-## Installation
 
-```bash
-pip install -r requirements.txt
-```
-
-The package targets Python 3.9+ with PyTorch as its primary dependency.
 
 ## Quick start
 
