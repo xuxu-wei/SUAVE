@@ -1,5 +1,4 @@
-[![中文](https://img.shields.io/badge/README-中文-blue)](https://github.com/xuxu-wei/SUAVE/blob/main/README-CN.md)![GitHub Repo stars](https://img.shields.io/github/stars/xuxu-wei/SUAVE)![Pepy Total Downloads](https://img.shields.io/pepy/dt/suave-ml)![PyPI - Version](https://img.shields.io/pypi/v/suave-ml)![PyPI - Status](https://img.shields.io/pypi/status/suave-ml)![PyPI - License](https://img.shields.io/pypi/l/suave-ml) 
-
+[![GitHub Repo stars](https://img.shields.io/github/stars/xuxu-wei/SUAVE)](https://github.com/xuxu-wei/SUAVE/tree/main) [![中文](https://img.shields.io/badge/README-中文-blue)](https://github.com/xuxu-wei/SUAVE/blob/main/README-CN.md) [![Pepy Total Downloads](https://img.shields.io/pepy/dt/suave-ml)](https://pypi.org/project/suave-ml/) [![PyPI - Version](https://img.shields.io/pypi/v/suave-ml )](https://pypi.org/project/suave-ml/) [![PyPI - Status](https://img.shields.io/pypi/status/suave-ml)](https://pypi.org/project/suave-ml/) [![PyPI - License](https://img.shields.io/pypi/l/suave-ml)](https://github.com/xuxu-wei/SUAVE/tree/main?tab=License-1-ov-file)
 
 # SUAVE: Supervised, Unified, Augmented Variational Embedding
 

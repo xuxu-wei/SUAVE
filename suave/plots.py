@@ -6,10 +6,10 @@ import itertools
 import math
 import warnings
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence, Literal, Any
 
 import matplotlib.pyplot as plt
-from matplotlib import cm
+from matplotlib import cm, ticker
 from matplotlib.axes import Axes
 from matplotlib.colors import (
     Colormap,
@@ -19,9 +19,15 @@ from matplotlib.colors import (
     TwoSlopeNorm,
     is_color_like,
 )
+from matplotlib.colorbar import Colorbar
+from matplotlib.ticker import (
+    FuncFormatter, StrMethodFormatter, LogFormatter, LogLocator, FixedLocator
+)
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch, Rectangle
 from matplotlib.path import Path as BezierPath
+
+import seaborn as sns
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -38,6 +44,21 @@ DEFAULT_PHASE_PALETTE: tuple[tuple[str, str], ...] = (
     ("Decoder refining", "#8D6E63"),
 )
 
+
+
+def _in_notebook() -> bool:
+    """Return ``True`` when running inside a Jupyter notebook shell."""
+
+    try:  # pragma: no cover - IPython may be unavailable during tests
+        from IPython import get_ipython  # type: ignore
+    except Exception:  # pragma: no cover - best-effort detection
+        return False
+
+    shell = get_ipython()
+    if shell is None:
+        return False
+    shell_name = shell.__class__.__name__
+    return shell_name == "ZMQInteractiveShell"
 
 def _is_fdr_adjustment(method: str | None) -> bool:
     """Return ``True`` when ``method`` corresponds to an FDR correction."""
@@ -109,19 +130,48 @@ def _resolve_variable_label(
     return str(label)
 
 
-def _in_notebook() -> bool:
-    """Return ``True`` when running inside a Jupyter notebook shell."""
+def _format_latent_label_for_display(label: object) -> str:
+    """Render latent dimension names such as ``z0`` as LaTeX math text."""
 
-    try:  # pragma: no cover - IPython may be unavailable during tests
-        from IPython import get_ipython  # type: ignore
-    except Exception:  # pragma: no cover - best-effort detection
-        return False
+    text = str(label)
+    if text.startswith("$"):
+        return text
+    if text.startswith("z") and text[1:].isdigit():
+        index = int(text[1:])
+        return fr"$z_{{{index + 1}}}$"
+    return text
 
-    shell = get_ipython()
-    if shell is None:
-        return False
-    shell_name = shell.__class__.__name__
-    return shell_name == "ZMQInteractiveShell"
+
+def _apply_axis_font(source_ax: Axes, target_ax: Axes) -> None:
+    """Align font properties on ``target_ax`` with those from ``source_ax``."""
+
+    font_props = source_ax.xaxis.label.get_fontproperties()
+    if font_props is None:
+        font_props = source_ax.yaxis.label.get_fontproperties()
+    if font_props is None:
+        for tick in itertools.chain(source_ax.get_xticklabels(), source_ax.get_yticklabels()):
+            props = tick.get_fontproperties()
+            if props is not None:
+                font_props = props
+                break
+    if font_props is None:
+        return
+
+    math_fontfamily = plt.rcParams.get("mathtext.fontset")
+
+    def _apply(text) -> None:
+        if text is None:
+            return
+        text.set_fontproperties(font_props)
+        setter = getattr(text, "set_math_fontfamily", None)
+        if setter is not None and math_fontfamily is not None:
+            setter(math_fontfamily)
+
+    _apply(target_ax.xaxis.label)
+    _apply(target_ax.yaxis.label)
+    _apply(target_ax.title)
+    for tick in itertools.chain(target_ax.get_xticklabels(), target_ax.get_yticklabels()):
+        _apply(tick)
 
 
 def _coerce_float(value: float | int | None) -> float:
@@ -133,6 +183,102 @@ def _coerce_float(value: float | int | None) -> float:
         return float(value)
     except (TypeError, ValueError):  # pragma: no cover - defensive branch
         return float("nan")
+
+
+def _format_p_value(value: float, *, style: str = "medical") -> str:
+    """Format *value* according to the requested p-value display *style*."""
+
+    if not np.isfinite(value):
+        return ""
+
+    style_lower = style.lower()
+    if style_lower == "scientific":
+        return f"{value:.1e}"
+    if style_lower != "medical":
+        raise ValueError("style must be either 'medical' or 'scientific'")
+
+    if value < 0.001:
+        return "<0.001"
+    if value > 0.99:
+        return ">0.99"
+    if 0.001 <= value < 0.01 or 0.045 <= value <= 0.054:
+        return f"{value:.3f}"
+    return f"{value:.2f}"
+
+def apply_cbar_bound_labels(
+    cbar,
+    *,
+    bound_ticks: Literal["both", "lower", "upper", None] | None = None,
+    ):
+    axis = cbar.ax.xaxis if cbar.orientation == "horizontal" else cbar.ax.yaxis
+    cbar_ticks = np.asarray(cbar.get_ticks())
+    if bound_ticks in {"both", "lower", "upper"} and cbar_ticks.size:
+        formatter = axis.get_major_formatter()
+        try:
+            base_labels = formatter.format_ticks(cbar_ticks)
+        except AttributeError:  # pragma: no cover - fallback for custom formatters
+            base_labels = [formatter(tick, index) for index, tick in enumerate(cbar_ticks)]
+
+        def _format_bound_label(label: str, inequality: str) -> str:
+            text = label.strip()
+            if text.startswith("$") and text.endswith("$"):
+                inner = text[1:-1].strip()
+                return f"$\\{inequality} {inner}$"
+            return f"$\\{inequality} {text}$"
+
+        formatted_labels = list(base_labels)
+        if bound_ticks in {"both", "lower"}:
+            formatted_labels[0] = _format_bound_label(formatted_labels[0], "leq")
+        if bound_ticks in {"both", "upper"} and cbar_ticks.size > 1:
+            formatted_labels[-1] = _format_bound_label(formatted_labels[-1], "geq")
+        elif bound_ticks == "upper":
+            formatted_labels[0] = _format_bound_label(formatted_labels[0], "geq")
+
+        axis.set_major_locator(ticker.FixedLocator(cbar_ticks))
+        axis.set_ticklabels(formatted_labels)
+
+def _prepare_targets_frame(
+    targets_input: pd.Series
+    | pd.DataFrame
+    | np.ndarray
+    | Mapping[str, Sequence[object]]
+    | Sequence[object]
+    | None,
+    target_name: str,
+    *,
+    expected_length: int,
+    index: pd.Index | None,
+    align_label: str,
+) -> tuple[pd.DataFrame | None, list[str]]:
+    """Normalise *targets_input* into a DataFrame aligned with ``index``."""
+
+    if targets_input is None:
+        return None, []
+    if isinstance(targets_input, pd.Series):
+        name = targets_input.name or target_name
+        frame = targets_input.to_frame(name=name)
+    elif isinstance(targets_input, pd.DataFrame):
+        frame = targets_input.copy()
+    elif isinstance(targets_input, np.ndarray):
+        if targets_input.ndim == 1:
+            frame = pd.DataFrame({target_name: targets_input})
+        elif targets_input.ndim == 2:
+            columns = [f"{target_name}_{idx}" for idx in range(targets_input.shape[1])]
+            frame = pd.DataFrame(targets_input, columns=columns)
+        else:
+            raise ValueError(f"{align_label} array must be one- or two-dimensional")
+    elif isinstance(targets_input, Mapping):
+        frame = pd.DataFrame(targets_input)
+    else:
+        frame = pd.DataFrame({target_name: list(targets_input)})
+
+    frame = frame.copy()
+    if len(frame) != expected_length:
+        raise ValueError(f"{align_label} must align with X by row")
+    frame = frame.reset_index(drop=True)
+    if index is not None:
+        frame.index = index
+    return frame, list(frame.columns)
 
 
 def _display_figure(figure: plt.Figure) -> object | None:
@@ -606,349 +752,492 @@ class TrainingPlotMonitor:
             return float("nan")
         return -numeric
 
-      
-def plot_reliability_curve(
-    probabilities: Iterable[float],
-    targets: Iterable[int],
-    output_path: str | Path | None = None,
-) -> Path | None:
-    """Create an empty reliability curve as a placeholder."""
-
-    fig, ax = plt.subplots()
-    ax.set_title("Reliability Curve (placeholder)")
-    ax.set_xlabel("Predicted probability")
-    ax.set_ylabel("Observed frequency")
-    ax.plot([0, 1], [0, 1], linestyle="--", color="tab:blue")
-
-    if output_path is None:
-        plt.close(fig)
-        return None
-
-    output_path = Path(output_path)
-    fig.savefig(output_path)
-    plt.close(fig)
-    return output_path
-
 
 def plot_matrix_heatmap(
-    matrix: pd.DataFrame | np.ndarray,
+    data: pd.DataFrame | np.ndarray,
     *,
-    ax: Axes | None = None,
-    cmap: str = "RdBu_r",
-    annotate: bool = False,
-    value_format: str = ".2f",
-    colorbar: bool = True,
-    colorbar_label: str | None = None,
+    cmap: str | Colormap = "viridis",
+    cbar_label: str = "",
+    annot: bool | np.ndarray | pd.DataFrame = True,
+    fmt: str = ".2f",
     vmin: float | None = None,
     vmax: float | None = None,
-    log_scale: bool = False,
-) -> Axes:
-    """Draw a heatmap for ``matrix`` with optional annotations.
+    norm: Normalize | None = None,
+    bound_ticks: str | None = "both",
+    log_scale_cbar: bool = False,
+    row_height: float | None = None,
+    output_path: str | Path | None = None,
+    output_formats: Sequence[str] | str = ("png",),
+    annot_font: Mapping[str, object] | None = None,
+    label_font: Mapping[str, object] | None = None,
+    cbar_kws: Mapping[str, object] | None = None,
+) -> tuple[plt.Figure, Axes]:
+    """Plot a rectangular matrix as a heatmap.
+
+    The helper adds a configurable colour bar and forwards annotation styling to
+    :func:`seaborn.heatmap`. A logarithmic colour scale is supported when
+    :paramref:`log_scale_cbar` is enabled.
 
     Parameters
     ----------
-    matrix : pandas.DataFrame or numpy.ndarray
-        Two-dimensional matrix whose values are rendered as colours.
-        ``pandas.DataFrame`` inputs expose their index and columns as axis
-        labels. ``numpy.ndarray`` inputs default to integer labels.
-    ax : matplotlib.axes.Axes, optional
-        Axis on which to render the heatmap. When omitted a new axis is
-        created via :func:`matplotlib.pyplot.subplots`.
-    cmap : str, default "RdBu_r"
-        Name of the Matplotlib colormap used to convert values into colours.
-    annotate : bool, default False
-        When ``True`` the numeric value of each cell is written at the centre
-        of the corresponding square.
-    value_format : str, default ".2f"
-        Format string applied when :paramref:`annotate` is ``True``.
-    colorbar : bool, default True
-        Whether to attach a colorbar to the provided axis.
-    colorbar_label : str, optional
-        Text displayed beneath the colorbar when :paramref:`colorbar` is
-        enabled.
+    data : pandas.DataFrame or numpy.ndarray
+        Tabular matrix whose index/columns will be used for axis labels.
+    cmap : str or matplotlib.colors.Colormap, default "viridis"
+        Colormap used to render the heatmap cells.
+    cbar_label : str, default "set label"
+        Title applied to the colour bar.
+    annot : bool or array-like of bool/str, default True
+        Overlays textual annotations on each heatmap cell. ``True`` renders the
+        numeric values from :paramref:`data`, ``False`` omits text entirely, and
+        supplying a DataFrame/ndarray provides custom labels that must match the
+        shape of :paramref:`data`.
+    fmt : str, default ".2f"
+        String formatter applied to numeric annotations.
     vmin, vmax : float, optional
-        Explicit colour scale bounds. When omitted the limits are inferred
-        from the observed data.
-    log_scale : bool, default False
-        If ``True`` the colour scale is logarithmic using
-        :class:`matplotlib.colors.LogNorm`.
+        Lower and upper bounds supplied to :func:`seaborn.heatmap`.
+    norm : matplotlib.colors.Normalize, optional
+        Custom colour normalisation overriding :paramref:`vmin` and
+        :paramref:`vmax` when provided.
+    bound_ticks : {"both", "lower", "upper", None}, default "both"
+        Controls whether the minimum/maximum colour bar ticks are relabelled
+        with inequality symbols. ``"both"`` displays ``"≤"`` at the lower
+        bound and ``"≥"`` at the upper bound, ``"lower"``/``"upper"`` affect a
+        single extreme, and ``None`` keeps the original numeric tick labels.
+    log_scale_cbar : bool, default False
+        When ``True`` the colour bar is drawn on a log scale.
+    row_height : float, optional
+        Height of each row in inches when automatic sizing is insufficient.
+    output_path : str or pathlib.Path, optional
+        File path (with or without an extension) used to persist the figure. The
+        parent directory is created automatically when necessary.
+    output_formats : sequence of str or str, default ("png",)
+        File extensions saved when :paramref:`output_path` is supplied. Provide
+        a string for a single format or a sequence for multiple formats.
+    annot_font, label_font : mapping, optional
+        Font dictionaries applied to annotations and axis labels respectively.
+    cbar_kws : mapping, optional
+        Additional keyword arguments forwarded to :func:`seaborn.heatmap`'s
+        colour bar creation.
 
     Returns
     -------
-    matplotlib.axes.Axes
-        Axis containing the rendered heatmap. The returned axis is always
-        valid regardless of whether :paramref:`ax` was provided.
+    fig, ax : matplotlib.figure.Figure and matplotlib.axes.Axes
+        Matplotlib handles for the rendered heatmap.
+
+    See Also
+    --------
+    plot_feature_latent_correlation_heatmap : High-level latent correlation
+        visualisation building on this helper.
+    plot_bubble_matrix : Bubble-chart alternative for matrix-style data.
 
     Examples
     --------
     >>> import matplotlib.pyplot as plt
-    >>> import numpy as np
-    >>> from suave.plots import plot_matrix_heatmap
-    >>> values = np.array([[1.0, -0.5], [0.25, 0.75]])
-    >>> ax = plot_matrix_heatmap(values)
-    >>> ax.figure is not None
-    True
+    >>> rng = np.random.default_rng(0)
+    >>> frame = pd.DataFrame(rng.normal(size=(3, 3)), columns=list("ABC"))
+    >>> fig, ax = plot_matrix_heatmap(frame, cmap="magma")
+    >>> plt.close(fig)
     """
+    from matplotlib.colors import LogNorm
 
-    if not isinstance(matrix, pd.DataFrame):
-        matrix = pd.DataFrame(matrix)
+    annot_font_defaults = {"fontsize": 10}
+    label_font_defaults = {"fontsize": 12}
+    annot_font_config = dict(annot_font_defaults)
+    if annot_font is not None:
+        annot_font_config.update(dict(annot_font))
+    label_font_config = dict(label_font_defaults)
+    if label_font is not None:
+        label_font_config.update(dict(label_font))
+    annot_fontsize = annot_font_config.get("fontsize", 10)
+    label_fontsize = label_font_config.get("fontsize", 12)
 
-    if matrix.ndim != 2:
-        raise ValueError("matrix must be two-dimensional")
+    if not isinstance(data, pd.DataFrame):
+        data = pd.DataFrame(data)
 
-    if ax is None:
-        _, ax = plt.subplots(
-            figsize=(max(4.0, matrix.shape[1] * 0.6), max(3.0, matrix.shape[0] * 0.6))
-        )
+    # 计算图形大小
+    if row_height is not None:
+        num_rows = data.shape[1]
+        figsize = (10, row_height * num_rows)
+    else:
+        figsize = (8, 14)
 
-    norm = LogNorm(vmin=vmin, vmax=vmax) if log_scale else None
-    image = ax.imshow(
-        matrix.to_numpy(dtype=float),
-        aspect="auto",
+    # 创建图形和轴对象
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # 确定是否使用对数映射，检查 vmin 是否大于 0
+    if norm is not None:
+        heatmap_norm = norm
+    elif log_scale_cbar:
+        if vmin is None or vmin <= 0:
+            heatmap_norm = LogNorm(vmin=1, vmax=vmax)
+        else:
+            heatmap_norm = LogNorm(vmin=vmin, vmax=vmax)
+    else:
+        heatmap_norm = None
+
+    cbar_kwargs = {
+        "shrink": 0.95,
+        "orientation": "horizontal",
+        "label": cbar_label,
+        "pad": 0.02,
+    }
+
+    if cbar_kws is not None:
+        cbar_kwargs.update(dict(cbar_kws))
+
+    # 使用 heatmap 绘制热图
+    sns.heatmap(
+        data,
+        ax=ax,
+        annot=annot,
+        fmt=fmt,
         cmap=cmap,
+        linewidths=0.,
+        linecolor='gray',
+        cbar_kws=cbar_kwargs,
         vmin=vmin,
         vmax=vmax,
-        norm=norm,
+        norm=heatmap_norm,  # 应用对数或线性映射
+        annot_kws=dict(annot_font_config),
     )
 
-    ax.set_xticks(np.arange(matrix.shape[1]))
-    ax.set_xticklabels(matrix.columns.astype(str), rotation=45, ha="right")
-    ax.tick_params(bottom=False, top=True, labelbottom=False, labeltop=True)
-    ax.set_yticks(np.arange(matrix.shape[0]))
-    ax.set_yticklabels(matrix.index.astype(str))
+    # 设置列标签
+    ax.set_xticklabels(list(data.columns), rotation=45, ha='left')
+    plt.setp(ax.get_xticklabels(), **label_font_config)
+    ax.set_xlabel('')
+    # 将列标签放在上端
+    ax.xaxis.set_label_position("top")
+    ax.xaxis.tick_top()
 
-    if annotate:
-        array = matrix.to_numpy(dtype=float)
-        for row_index, col_index in itertools.product(
-            range(array.shape[0]), range(array.shape[1])
-        ):
-            value = array[row_index, col_index]
-            if not np.isfinite(value):
-                continue
-            ax.text(
-                col_index,
-                row_index,
-                format(value, value_format),
-                ha="center",
-                va="center",
-                fontsize=9,
+    # 设置行标签
+    ax.set_yticklabels([f'{col}' for col in data.index], rotation=0)
+    plt.setp(ax.get_yticklabels(), **label_font_config)
+    # ax.set_yticklabels([f'{col} (N={len(gene_set_dict[col])})' for col in data.columns], rotation=0)
+    ax.set_ylabel('')
+
+    # 移除刻度线
+    ax.tick_params(axis='both', which='both', length=0, labelsize=label_fontsize)
+    
+    # 获取 color bar 对象
+    cbar = ax.collections[0].colorbar
+    
+    # 最后一步：套上端点标签的 Formatter
+    apply_cbar_bound_labels(cbar, bound_ticks=bound_ticks)
+    _apply_axis_font(ax, cbar.ax)
+    # 保存图像文件，如果指定了输出路径
+    if output_path is not None:
+        formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)
+        if not formats:
+            formats = ["png"]
+        base_path = Path(output_path)
+        if base_path.suffix:
+            base_stem = base_path.with_suffix("")
+        else:
+            base_stem = base_path
+        base_stem.parent.mkdir(parents=True, exist_ok=True)
+        for fmt in formats:
+            suffix = f".{str(fmt).lstrip('.')}"
+            fig.savefig(
+                base_stem.with_suffix(suffix),
+                dpi=360,
+                pad_inches=0.1,
+                bbox_inches="tight",
             )
 
-    if colorbar:
-        cbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-        if colorbar_label:
-            cbar.set_label(colorbar_label)
+    if ax.texts:
+        plt.setp(ax.texts, **annot_font_config)
 
-    return ax
+    return fig, ax
 
 
 def plot_bubble_matrix(
     size_matrix: pd.DataFrame | np.ndarray,
     *,
     color_matrix: pd.DataFrame | np.ndarray | None = None,
-    text_matrix: pd.DataFrame | np.ndarray | None = None,
-    ax: Axes | None = None,
-    cmap: str = "viridis",
-    colorbar_label: str | None = None,
-    size_scale: tuple[float, float] = (30.0, 600.0),
-    text_format: str = ".2f",
-    size_label: str = "|value|",
-) -> Axes:
-    """Render a bubble chart representing two matrices simultaneously.
+    label_matrix: pd.DataFrame | np.ndarray | None = None,
+    cmap: str | Colormap = "viridis",
+    cbar_label: str = "set label",
+    vmin: float | None = None,
+    vmax: float | None = None,
+    bound_ticks: str | None = None,
+    size_label: str = "size legend",
+    marker_shape: str = "o",
+    show_grid: bool = True,
+    output_path: str | Path | None = None,
+    output_formats: Sequence[str] | str = ("png",),
+    cbar_kws: Mapping[str, object] | None = None,
+    annot_font: Mapping[str, object] | None = None,
+    label_font: Mapping[str, object] | None = None,
+) -> tuple[plt.Figure, Axes]:
+    """Render a bubble chart for matrix-like data.
+
+    Bubble radii encode :paramref:`size_matrix` while colours stem from
+    :paramref:`color_matrix`. Labels inside each bubble default to
+    :paramref:`size_matrix` and can be customised via :paramref:`label_matrix`.
 
     Parameters
     ----------
     size_matrix : pandas.DataFrame or numpy.ndarray
-        Matrix whose absolute values determine each bubble's diameter.
-        ``pandas.DataFrame`` inputs expose their index and columns as axis
-        labels. ``numpy.ndarray`` inputs default to integer labels.
+        Numeric matrix controlling bubble radii.
     color_matrix : pandas.DataFrame or numpy.ndarray, optional
-        Matrix used to colour the bubbles. When omitted ``size_matrix`` is
-        reused. Shapes must match ``size_matrix``.
-    text_matrix : pandas.DataFrame or numpy.ndarray, optional
-        Matrix whose values are written at the centre of each bubble. When
-        omitted no text annotations are drawn.
-    ax : matplotlib.axes.Axes, optional
-        Axis on which to draw the chart. When ``None`` a new axis is created.
-    cmap : str, default "viridis"
-        Name of the Matplotlib colormap used to colour the bubbles.
-    colorbar_label : str, optional
-        Text displayed next to the colour legend.
-    size_scale : tuple of float, default (30.0, 600.0)
-        Minimum and maximum area allocated to the bubbles. Values are passed
-        directly to the ``s`` argument of :meth:`matplotlib.axes.Axes.scatter`.
-    text_format : str, default ".2f"
-        Format string applied to :paramref:`text_matrix` values.
-    size_label : str, default "|value|"
-        Legend title describing the meaning of the bubble sizes.
+        Values mapped to colours. Defaults to :paramref:`size_matrix`.
+    label_matrix : pandas.DataFrame or numpy.ndarray, optional
+        Text drawn inside each bubble. Defaults to :paramref:`size_matrix`.
+    cmap : str or matplotlib.colors.Colormap, default "viridis"
+        Palette used for the colour mapping.
+    cbar_label : str, default "set label"
+        Caption shown above the colour bar.
+    vmin, vmax : float, optional
+        Colour scale bounds; computed from the data when omitted.
+    bound_ticks : {"both", "lower", "upper", None}, optional
+        Controls whether colour bar end points are replaced with inequality
+        markers. ``"both"`` labels the minimum as ``"≤"`` and the maximum as
+        ``"≥"``. ``"lower"``/``"upper"`` affect a single extreme, while ``None``
+        keeps the raw numeric ticks.
+    size_label : str, default "size legend"
+        Title of the manually drawn bubble size legend.
+    marker_shape : str, default "o"
+        Matplotlib marker symbol used to render the bubbles.
+    show_grid : bool, default True
+        Whether to display a background grid behind the bubbles.
+    output_path : str or pathlib.Path, optional
+        Base path used to persist the figure in :paramref:`output_formats`.
+    output_formats : sequence of str or str, default ("png",)
+        File extensions written when :paramref:`output_path` is provided.
+    cbar_kws : mapping, optional
+        Extra keyword arguments forwarded to :func:`matplotlib.pyplot.colorbar`.
+    annot_font, label_font : mapping, optional
+        Font dictionaries for annotations and tick/axis labels respectively.
 
     Returns
     -------
-    matplotlib.axes.Axes
-        Axis containing the rendered bubble chart.
+    fig, ax : matplotlib.figure.Figure and matplotlib.axes.Axes
+        Handles to the created figure and axes.
+
+    See Also
+    --------
+    plot_feature_latent_correlation_bubble : Applies the bubble chart to
+        feature/latent correlations.
+    plot_matrix_heatmap : Heatmap counterpart for dense matrices.
 
     Examples
     --------
-    >>> import numpy as np
-    >>> from suave.plots import plot_bubble_matrix
-    >>> values = np.array([[0.1, 0.8], [0.4, 0.6]])
-    >>> ax = plot_bubble_matrix(values, text_matrix=values)
-    >>> len(ax.collections) > 0
-    True
+    >>> import matplotlib.pyplot as plt
+    >>> frame = pd.DataFrame([[1.0, 0.5], [0.2, 0.8]], columns=["z0", "z1"], index=["a", "b"])
+    >>> fig, ax = plot_bubble_matrix(frame, label_matrix=frame.round(2))
+    >>> plt.close(fig)
     """
+    from matplotlib.lines import Line2D
+    from matplotlib.colors import Normalize
+    
+    annot_font_defaults = {"fontsize": 10}
+    label_font_defaults = {"fontsize": 12}
+    annot_font_config = dict(annot_font_defaults)
+    if annot_font is not None:
+        annot_font_config.update(dict(annot_font))
+    label_font_config = dict(label_font_defaults)
+    if label_font is not None:
+        label_font_config.update(dict(label_font))
+    annot_fontsize = annot_font_config.get("fontsize", 10)
+    label_fontsize = label_font_config.get("fontsize", 12)
+    # 检查输入是否为DataFrame，并提取行和列标签
+    if isinstance(size_matrix, pd.DataFrame):
+        row_labels = size_matrix.index.astype(str)
+        col_labels = size_matrix.columns.astype(str)
+    else:
+        n, m = size_matrix.shape
+        row_labels = np.arange(n).astype(str)
+        col_labels = np.arange(m).astype(str)
+        size_matrix = pd.DataFrame(size_matrix, index=row_labels, columns=col_labels)
 
-    if not isinstance(size_matrix, pd.DataFrame):
-        size_matrix = pd.DataFrame(size_matrix)
-
-    if size_matrix.ndim != 2:
-        raise ValueError("size_matrix must be two-dimensional")
+    if label_matrix is None:
+        label_matrix = size_matrix.copy()
+    elif not isinstance(label_matrix, pd.DataFrame):
+        label_matrix = pd.DataFrame(label_matrix, index=size_matrix.index, columns=size_matrix.columns)
+    else:
+        # 确保索引和列标签匹配
+        label_matrix = label_matrix.reindex(index=size_matrix.index, columns=size_matrix.columns)
 
     if color_matrix is None:
-        color_matrix = size_matrix
+        color_matrix = size_matrix.copy()
     elif not isinstance(color_matrix, pd.DataFrame):
-        color_matrix = pd.DataFrame(
-            color_matrix, index=size_matrix.index, columns=size_matrix.columns
-        )
+        color_matrix = pd.DataFrame(color_matrix, index=size_matrix.index, columns=size_matrix.columns)
     else:
-        color_matrix = color_matrix.reindex(
-            index=size_matrix.index, columns=size_matrix.columns
-        )
+        # 确保索引和列标签匹配
+        color_matrix = color_matrix.reindex(index=size_matrix.index, columns=size_matrix.columns)
 
-    if text_matrix is not None:
-        if not isinstance(text_matrix, pd.DataFrame):
-            text_matrix = pd.DataFrame(
-                text_matrix, index=size_matrix.index, columns=size_matrix.columns
-            )
-        else:
-            text_matrix = text_matrix.reindex(
-                index=size_matrix.index, columns=size_matrix.columns
-            )
+    n, m = size_matrix.shape
 
-    if ax is None:
-        _, ax = plt.subplots(
-            figsize=(max(4.0, size_matrix.shape[1] * 0.8), max(3.0, size_matrix.shape[0] * 0.8))
-        )
+    # 准备x和y的位置
+    x = np.arange(m)
+    y = np.arange(n)
+    X, Y = np.meshgrid(x, y)
 
-    columns = size_matrix.columns.astype(str)
-    rows = size_matrix.index.astype(str)
-    x_positions = np.arange(len(columns))
-    y_positions = np.arange(len(rows))
-    grid_x, grid_y = np.meshgrid(x_positions, y_positions)
+    sizes = size_matrix.values.flatten()
+    labels = label_matrix.values.flatten()
+    colors = color_matrix.values.flatten()
+    X = X.flatten()
+    Y = Y.flatten()
 
-    raw_sizes = np.abs(size_matrix.to_numpy(dtype=float)).flatten()
-    scaled_sizes = np.zeros_like(raw_sizes)
-    finite_mask = np.isfinite(raw_sizes)
-    size_min = float(np.nanmin(raw_sizes)) if finite_mask.any() else 0.0
-    size_max = float(np.nanmax(raw_sizes)) if finite_mask.any() else 0.0
+    # 创建掩码，过滤掉sizes或colors中的NaN值
+    mask = (~np.isnan(sizes)) & (~np.isnan(colors))
+    sizes = sizes[mask]
+    labels = labels[mask]
+    colors = colors[mask]
+    X = X[mask]
+    Y = Y[mask]
 
-    def _scale(values: np.ndarray) -> np.ndarray:
-        minimum, maximum = size_scale
-        if size_max <= size_min:
-            return np.full_like(values, maximum)
-        normalised = (values - size_min) / (size_max - size_min)
-        return normalised * (maximum - minimum) + minimum
+    # 定义圆圈大小，根据标签长度自动调整最小大小
+    # 计算标签所需的最小气泡大小
+    label_lengths = np.array([len(str(label)) for label in labels])
+    # 假设每个字符宽度为字体大小的一半，可以调整该估计
+    min_bubble_size = np.max(label_lengths) * annot_fontsize * 5
 
-    if finite_mask.any():
-        scaled_sizes[finite_mask] = _scale(raw_sizes[finite_mask])
+    min_size = min_bubble_size  # 最小圆圈大小
+    max_size = 2000  # 最大圆圈大小
 
-    color_values = color_matrix.to_numpy(dtype=float)
-    flat_colors = color_values.flatten()
-    color_mask = np.isfinite(flat_colors)
-    if color_mask.any():
-        vmin = float(np.nanmin(flat_colors))
-        vmax = float(np.nanmax(flat_colors))
-        if np.isclose(vmin, vmax):
-            norm = None
-        else:
-            norm = Normalize(vmin=vmin, vmax=vmax)
+    # 使用np.nanmin和np.nanmax计算最小值和最大值
+    size_min = np.nanmin(sizes)
+    size_max = np.nanmax(sizes)
+
+    if size_max == size_min:
+        sizes_norm = np.ones_like(sizes)
     else:
-        norm = None
+        sizes_norm = (sizes - size_min) / (size_max - size_min)
+    sizes_plot = sizes_norm * (max_size - min_size) + min_size
 
-    scatter = ax.scatter(
-        grid_x.flatten(),
-        grid_y.flatten(),
-        s=scaled_sizes,
-        c=flat_colors,
-        cmap=cmap,
-        norm=norm,
-    )
+    # 设置颜色映射的最小值和最大值
+    if vmin is None:
+        vmin = np.nanmin(colors)
+    if vmax is None:
+        vmax = np.nanmax(colors)
 
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(columns, rotation=45, ha="right")
-    ax.tick_params(bottom=False, top=True, labelbottom=False, labeltop=True)
-    ax.set_yticks(y_positions)
-    ax.set_yticklabels(rows)
-    ax.set_xlim(-0.5, len(columns) - 0.5)
-    ax.set_ylim(len(rows) - 0.5, -0.5)
-    ax.set_aspect("equal")
+    norm = Normalize(vmin=vmin, vmax=vmax)
 
-    if text_matrix is not None:
-        values = text_matrix.to_numpy(dtype=float)
-        colormap = plt.get_cmap(cmap)
-        if norm is None:
-            rgba = colormap(0.5)
-            luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
-            colour = "white" if luminance < 0.5 else "black"
-            for row_index, col_index in itertools.product(
-                range(values.shape[0]), range(values.shape[1])
-            ):
-                value = values[row_index, col_index]
-                if not np.isfinite(value):
-                    continue
-                ax.text(
-                    col_index,
-                    row_index,
-                    format(value, text_format),
-                    ha="center",
-                    va="center",
-                    fontsize=8,
-                    color=colour,
-                )
+    # 自动设置figsize
+    figsize = (m * 0.8 + 2, n * 0.8 + 1)
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # 主绘图区域
+    scatter = ax.scatter(X, Y, s=sizes_plot, c=colors, cmap=cmap, norm=norm, marker=marker_shape)
+
+    # 自动设置字体颜色
+    cmap_instance = plt.get_cmap(cmap)
+    color_values = cmap_instance(norm(colors))
+    # 计算感知亮度
+    luminance = (0.299 * color_values[:, 0] + 0.587 * color_values[:, 1] + 0.114 * color_values[:, 2])
+    text_colors = ['white' if l < 0.5 else 'black' for l in luminance]
+
+    # 添加文本标签
+    for i in range(len(X)): # X, Y, labels 已经 flatten, 直接循环
+        text_kwargs = dict(annot_font_config)
+        text_kwargs.setdefault('ha', 'center')
+        text_kwargs.setdefault('va', 'center')
+        text_kwargs.setdefault('color', text_colors[i])
+        ax.text(X[i], Y[i], f'{labels[i]}', **text_kwargs)
+
+    # 设置坐标轴
+    ax.set_xlim(-0.5, m - 0.5)
+    ax.set_ylim(-0.5, n - 0.5)
+    ax.set_xticks(np.arange(m))
+    ax.set_yticks(np.arange(n))
+    
+    ax.xaxis.set_ticks_position('top') # 列标签置于上方
+    ax.xaxis.set_label_position('top') 
+    ax.set_xticklabels(col_labels, rotation=45, ha='left')  # 将对齐方式设置为左对齐
+    plt.setp(ax.get_xticklabels(), **label_font_config)
+
+    ax.set_yticklabels(row_labels, rotation=0)
+    plt.setp(ax.get_yticklabels(), **label_font_config)
+    ax.invert_yaxis()  # 反转y轴，使得第一个矩阵索引在顶部
+    ax.set_aspect('equal')
+    ax.tick_params(axis='both', which='both', labelsize=label_fontsize)
+
+    # 控制背景网格显示
+    ax.grid(show_grid)
+    # ax.set_facecolor('none')
+    
+    # ==== 添加颜色条 ====
+    # 自定义颜色条的位置和宽度
+    # 调整 [left, bottom, width, height]，值的范围是 0 到 1，表示相对于fig的比例
+    cbar_left = 0.88  # 颜色条的左边界
+    cbar_width = 0.04  # 颜色条的宽度
+    cbar_bottom = 0.11  # 颜色条的下边界
+    cbar_height = 0.45  # 颜色条的高度
+
+    cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
+
+    cbar = plt.colorbar(scatter, cax=cbar_ax, **(cbar_kws or {}))
+   
+    # 可以根据需要调整标签与颜色条之间的间距
+    # cbar.ax.xaxis.labelpad = 10  # 设置标签与颜色条之间的间距，默认值为10，增大值可以增大间距
+    apply_cbar_bound_labels(cbar, bound_ticks=bound_ticks)
+    _apply_axis_font(ax, cbar.ax)
+    # ==== 构造大小图例 ====
+    # 自定义大小图例的位置和尺寸
+    # 调整 [left, bottom, width, height]
+    legend_left = 0.875  # 大小图例的左边界
+    legend_width = 0.11  # 大小图例的宽度
+    legend_bottom = 0.61  # 大小图例的下边界
+    legend_height = 0.25  # 大小图例的高度
+
+    size_legend_ax = fig.add_axes([legend_left, legend_bottom, legend_width, legend_height])
+
+    # 选择4个大小值进行图例展示
+    # TODO 实现传入一个列表，指定图例中显示的大小值及其标签
+    size_values = np.linspace(size_min, size_max, num=3)
+    size_labels = [f'{val:.1f}' for val in size_values]
+    if size_max == size_min:
+        size_values_norm = np.ones_like(size_values)
+    else:
+        size_values_norm = (size_values - size_min) / (size_max - size_min)
+    size_values_plot = size_values_norm * (max_size - min_size) + min_size
+
+    size_legend_ax.axis('off')
+
+    # 计算图例中每个标记的位置
+    legend_y = np.linspace(0.2, 0.8, len(size_values))
+
+    # ==== 调整标记和标签之间的间距 ====
+    # 可以修改 scatter 和 text 的 x 坐标，例如，将 0.35 和 0.6 改为其他值
+
+    for y_pos, s, label in zip(legend_y, size_values_plot, size_labels):
+        size_legend_ax.scatter([0.35], [y_pos], s=s, color='gray', marker=marker_shape)
+        legend_text_kwargs = dict(annot_font_config)
+        legend_text_kwargs.setdefault('va', 'center')
+        legend_text_kwargs.setdefault('ha', 'left')
+        size_legend_ax.text(0.92, y_pos, label, **legend_text_kwargs)
+        # 在这里调整图例标记和标签之间的间距
+        # 例如，修改上面 scatter 的 x 坐标 0.3 和 text 的 x 坐标 0.6
+
+    size_legend_ax.set_xlim(0, 1)
+    size_legend_ax.set_ylim(0, 1)
+    size_legend_ax.set_title(size_label, fontdict=annot_font_config, loc='right')
+    _apply_axis_font(ax, size_legend_ax)
+    # size_legend_ax.title.set_position([0.5, 0.875])  # 进一步微调标题位置
+    
+    # 保存图像文件，如果指定了输出路径
+    if output_path is not None:
+        formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)
+        if not formats:
+            formats = ["png"]
+        base_path = Path(output_path)
+        if base_path.suffix:
+            base_stem = base_path.with_suffix("")
         else:
-            face_colours = colormap(norm(color_values))
-            luminance = (
-                0.299 * face_colours[..., 0]
-                + 0.587 * face_colours[..., 1]
-                + 0.114 * face_colours[..., 2]
+            base_stem = base_path
+        base_stem.parent.mkdir(parents=True, exist_ok=True)
+        for fmt in formats:
+            suffix = f".{str(fmt).lstrip('.')}"
+            fig.savefig(
+                base_stem.with_suffix(suffix),
+                dpi=360,
+                pad_inches=0.1,
+                bbox_inches="tight",
             )
-            text_colours = np.where(luminance < 0.5, "white", "black")
-            for row_index, col_index in itertools.product(
-                range(values.shape[0]), range(values.shape[1])
-            ):
-                value = values[row_index, col_index]
-                if not np.isfinite(value):
-                    continue
-                ax.text(
-                    col_index,
-                    row_index,
-                    format(value, text_format),
-                    ha="center",
-                    va="center",
-                    fontsize=8,
-                    color=text_colours[row_index, col_index],
-                )
-
-    cbar = ax.figure.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
-    if colorbar_label:
-        cbar.set_label(colorbar_label)
-
-    legend_values = np.linspace(size_min, size_max, num=3)
-    legend_sizes = _scale(legend_values)
-    handles = [
-        plt.Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="none",
-            markerfacecolor="gray",
-            markersize=math.sqrt(size / math.pi) if size > 0 else 0.0,
-        )
-        for size in legend_sizes
-    ]
-    labels = [f"{value:.2f}" for value in legend_values]
-    ax.legend(handles, labels, title=size_label, loc="upper right", frameon=False)
-
-    return ax
+    
+    # 返回 Figure 对象
+    return fig, ax
 
 
 def create_centered_colormap(
@@ -1027,7 +1316,9 @@ def compute_feature_latent_correlation(
     targets : pandas.Series, pandas.DataFrame, numpy.ndarray or mapping, optional
         Targets or predictions added as extra rows in the correlation matrix.
         When a one-dimensional structure is supplied its column label defaults
-        to ``target_name``.
+        to ``target_name``. The values are concatenated with ``X`` before
+        computing correlations and therefore do not depend on model outputs;
+        any structure matching the row count of ``X`` is supported.
     target_name : str, default "target"
         Name assigned to :paramref:`targets` when it is a one-dimensional
         sequence without an explicit label.
@@ -1120,32 +1411,16 @@ def compute_feature_latent_correlation(
         latent_labels = [f"z{i}" for i in latent_indices]
 
     feature_frame = X.copy()
+    target_columns: list[str] = []
 
-    if targets is not None:
-        target_frame: pd.DataFrame
-        if isinstance(targets, pd.Series):
-            name = targets.name or target_name
-            target_frame = targets.to_frame(name=name)
-        elif isinstance(targets, pd.DataFrame):
-            target_frame = targets.copy()
-        elif isinstance(targets, np.ndarray):
-            if targets.ndim == 1:
-                target_frame = pd.DataFrame({target_name: targets})
-            elif targets.ndim == 2:
-                columns = [f"{target_name}_{idx}" for idx in range(targets.shape[1])]
-                target_frame = pd.DataFrame(targets, columns=columns)
-            else:
-                raise ValueError("targets array must be one- or two-dimensional")
-        elif isinstance(targets, Mapping):
-            target_frame = pd.DataFrame(targets)
-        else:
-            target_frame = pd.DataFrame({target_name: list(targets)})
-
-        target_frame = target_frame.copy()
-        if len(target_frame) != len(feature_frame):
-            raise ValueError("targets must align with X by row")
-        target_frame = target_frame.reset_index(drop=True)
-        target_frame.index = feature_frame.index
+    target_frame, target_columns = _prepare_targets_frame(
+        targets,
+        target_name,
+        expected_length=len(feature_frame),
+        index=feature_frame.index,
+        align_label="targets",
+    )
+    if target_frame is not None:
         feature_frame = pd.concat([feature_frame, target_frame], axis=1)
 
     if variables is None:
@@ -1163,6 +1438,9 @@ def compute_feature_latent_correlation(
         for column in variables:
             if column not in feature_frame.columns:
                 raise KeyError(f"Column '{column}' is not present in the supplied data")
+            if column not in selected_columns:
+                selected_columns.append(column)
+        for column in target_columns:
             if column not in selected_columns:
                 selected_columns.append(column)
     feature_frame = feature_frame.loc[:, selected_columns]
@@ -1222,6 +1500,8 @@ def compute_feature_latent_correlation(
 
     corr_df = pd.DataFrame(corr_matrix, index=selected_columns, columns=latent_labels)
     pval_df = pd.DataFrame(p_matrix, index=selected_columns, columns=latent_labels)
+    corr_df.attrs["target_columns"] = list(target_columns)
+    pval_df.attrs["target_columns"] = list(target_columns)
 
     if p_adjust is not None:
         method_lower = p_adjust.lower()
@@ -1245,38 +1525,41 @@ def plot_feature_latent_correlation_bubble(
     variable_name: Mapping[str, object] | Callable[[str], object] | None = None,
     method: str = "spearman",
     p_adjust: str | None = "fdr_bh",
+    p_significance_level: float | None = 0.05,
     title: str | None = None,
     output_path: str | Path | None = None,
     output_formats: Sequence[str] | str = ("png",),
     max_dimension: int = 50,
-    latents: np.ndarray | None = None,
     correlations: pd.DataFrame | None = None,
     p_values: pd.DataFrame | None = None,
-) -> tuple[plt.Figure, Axes]:
+    annot_font: Mapping[str, object] | None = None,
+    label_font: Mapping[str, object] | None = None,
+    bubble_kwargs: Mapping[str, object] | None = None,
+):
     """Draw a bubble chart summarising feature/latent correlations.
 
     Each bubble encodes statistical significance through its radius while
-    colours reflect the signed correlation coefficients. The underlying
-    correlations are derived from :func:`compute_feature_latent_correlation`,
-    which uses
-    :meth:`suave.model.SUAVE.encode` to obtain posterior means unless custom
-    latent samples are supplied.
+    colours reflect signed correlation coefficients. Correlations are produced
+    by :func:`compute_feature_latent_correlation` unless precomputed matrices
+    are supplied.
 
     Parameters
     ----------
     model : suave.model.SUAVE or compatible object
-        Fitted estimator providing an :meth:`encode` method returning latent
-        representations of ``X``.
+        Fitted estimator exposing an :meth:`encode` method that maps ``X`` to
+        latent representations.
     X : pandas.DataFrame
         Feature matrix aligned with the schema used during training.
     targets : pandas.Series, pandas.DataFrame, numpy.ndarray or mapping, optional
-        Targets or predictions appended as extra rows in the correlation matrix.
+        Auxiliary outcomes to correlate with the latent space. They are joined
+        with ``X`` before computing correlations, so any structure whose length
+        matches ``X`` is supported.
     target_name : str, default "target"
-        Name assigned to :paramref:`targets` when it is a one-dimensional
-        sequence without an explicit label.
+        Name assigned to :paramref:`targets` when a one-dimensional sequence is
+        provided without an explicit label.
     variables : sequence of str, optional
-        Subset of feature/target columns to include. ``None`` keeps every
-        column from ``X`` and :paramref:`targets`.
+        Subset of feature or target columns to include. ``None`` keeps all
+        available variables.
     latent_indices : sequence of int, optional
         Indices of the latent dimensions to analyse. ``None`` uses every
         dimension returned by :meth:`encode`.
@@ -1284,60 +1567,73 @@ def plot_feature_latent_correlation_bubble(
         Correlation coefficient applied pairwise between features and latent
         variables.
     p_adjust : {"fdr_bh", "bonferroni", "holm", None}, default "fdr_bh"
-        Multiplicity correction applied to the correlation p-values. ``None``
-        disables any adjustment.
+        Multiplicity correction applied to the correlation p-values.
+    p_significance_level : float, optional
+        Significance threshold used to mask non-significant bubbles. When
+        ``None`` the plot displays every coefficient regardless of the
+        p-values.
     variable_name : mapping or callable, optional
         Custom mapping from feature identifiers to human-readable labels. When
-        omitted the DataFrame index is rendered verbatim.
+        omitted the DataFrame index is used verbatim.
     title : str, optional
-        Axis title displayed above the bubble chart. Defaults to a descriptive
-        label derived from :paramref:`method` and :paramref:`p_adjust`.
+        Custom title applied to the main axes. Defaults to an empty string.
     output_path : str or pathlib.Path, optional
-        File path used to persist the resulting figure. When supplied the
-        directory is created automatically.
+        Base file name used to persist the figure when provided.
     output_formats : sequence of str or str, default ("png",)
-        File formats written when :paramref:`output_path` is provided. A single
-        string is treated as a singleton list. Extensions must be supported by
-        :meth:`matplotlib.figure.Figure.savefig`.
+        File formats saved alongside :paramref:`output_path`.
     max_dimension : int, default 50
         Guard rail applied when :paramref:`variables` and
         :paramref:`latent_indices` are left unspecified. Larger matrices are
         truncated to ``max_dimension`` in both directions with a warning.
-    latents : numpy.ndarray, optional
-        Pre-computed latent representations. When omitted ``model.encode`` is
-        invoked which returns the posterior means of the latent distribution.
+    correlations : pandas.DataFrame, optional
+        Pre-computed correlation coefficients aligned with :paramref:`p_values`.
+        When provided alongside :paramref:`p_values` the function skips calling
+        :func:`compute_feature_latent_correlation`.
+    p_values : pandas.DataFrame, optional
+        Pre-computed p-values aligned with :paramref:`correlations`.
+    annot_font : mapping, optional
+        Font dictionary controlling text annotations. Defaults to
+        ``{"fontsize": 10}``.
+    label_font : mapping, optional
+        Font dictionary for axis labels, ticks and titles. Defaults to
+        ``{"fontsize": 12}``.
+    bubble_kwargs : mapping, optional
+        Extra keyword arguments forwarded to :func:`plot_bubble_matrix`.
 
     Returns
     -------
-    tuple
-        Pair ``(figure, axis)`` exposing the Matplotlib handles for further
-        customisation.
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> import pandas as pd
-    >>> class DummyModel:
-    ...     def encode(self, frame):
-    ...         return np.column_stack([frame["x"], frame["y"]])
-    >>> frame = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
-    >>> fig, ax = plot_feature_latent_correlation_bubble(DummyModel(), frame)
-    >>> ax.get_title()
-    'Spearman correlation vs. adjusted p-values'
+    fig, ax : matplotlib.figure.Figure and matplotlib.axes.Axes
+        Matplotlib handles for further customisation.
 
     See Also
     --------
-    compute_feature_latent_correlation : Return the correlation and p-value
-        matrices without rendering a figure.
-    plot_feature_latent_correlation_heatmap : Render either the correlation or
-        p-value heatmap.
-    plot_feature_latent_outcome_path_graph : Construct a layered path diagram
-        from correlations computed on the same data.
-    plot_bubble_matrix : Low-level bubble chart helper used for rendering.
-    plot_multilayer_path_graph : Visualise layered connections between features,
-        latent representations and outcomes.
-    """
+    plot_bubble_matrix : Low-level bubble chart renderer used internally.
+    plot_feature_latent_correlation_heatmap : Heatmap alternative for the same
+        correlation matrices.
+    plot_matrix_heatmap : Base heatmap routine that powers the heatmap view.
 
+    Examples
+    --------
+    >>> import matplotlib.pyplot as plt
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> class _ToyModel:
+    ...     def encode(self, frame):
+    ...         return np.column_stack([frame["x"], frame["y"]])
+    >>> X = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [2.0, 1.0, 0.0]})
+    >>> fig, ax = plot_feature_latent_correlation_bubble(_ToyModel(), X, latent_indices=[0, 1])
+    >>> plt.close(fig)
+    """
+    annot_font_defaults = {"fontsize": 10}
+    label_font_defaults = {"fontsize": 12}
+    annot_font_config = dict(annot_font_defaults)
+    if annot_font is not None:
+        annot_font_config.update(dict(annot_font))
+    label_font_config = dict(label_font_defaults)
+    if label_font is not None:
+        label_font_config.update(dict(label_font))
+    annot_fontsize = annot_font_config.get("fontsize", 10)
+    label_fontsize = label_font_config.get("fontsize", 12)
     if correlations is None and p_values is None:
         corr_df, pval_df = compute_feature_latent_correlation(
             model,
@@ -1349,7 +1645,6 @@ def plot_feature_latent_correlation_bubble(
             method=method,
             p_adjust=p_adjust,
             max_dimension=max_dimension,
-            latents=latents,
         )
     elif correlations is not None and p_values is not None:
         corr_df = correlations.copy()
@@ -1359,173 +1654,73 @@ def plot_feature_latent_correlation_bubble(
             "correlations and p_values must either both be provided or both be omitted"
         )
 
-    corr_matrix = corr_df.to_numpy(dtype=float)
-    pval_matrix = pval_df.to_numpy(dtype=float)
-    use_fdr_label = _is_fdr_adjustment(p_adjust)
+    target_columns = list(corr_df.attrs.get("target_columns", []))
+    if not target_columns:
+        target_columns = [name for name in corr_df.index if name not in X.columns]
 
-    n_features, n_latents = corr_df.shape
-    feature_labels = [
-        _resolve_variable_label(name, variable_name) for name in corr_df.index
-    ]
-    latent_labels = [fr"$z_{{{idx + 1}}}$" for idx in range(n_latents)]
+    if variables is not None:
+        selected = list(dict.fromkeys(list(variables) + target_columns))
+        corr_df = corr_df.loc[selected]
+        pval_df = pval_df.loc[selected]
+    if variable_name is not None:
+        corr_df = corr_df.rename(index=variable_name)
+        pval_df = pval_df.rename(index=variable_name)
 
-    clipped_pvals = np.clip(pval_matrix, np.finfo(float).tiny, 1.0)
+    latent_labels = [_format_latent_label_for_display(name) for name in corr_df.columns]
+    corr_df.columns = latent_labels
+    pval_df.columns = latent_labels
+        
+    clipped_pvals = np.clip(pval_df, np.finfo(float).tiny, 1.0)
     with np.errstate(divide="ignore"):
         neg_log_p = -np.log10(clipped_pvals)
     neg_log_p = np.where(np.isfinite(neg_log_p), neg_log_p, np.nan)
-    significance_mask = neg_log_p >= 1.0
-    valid_values = neg_log_p[significance_mask]
 
-    if valid_values.size:
-        min_value = float(np.nanmin(valid_values))
-        max_value = float(np.nanmax(valid_values))
+    if p_significance_level is not None:
+        if not (0.0 <= p_significance_level <= 1.0):
+            raise ValueError("p_significance_level must be within [0, 1]")
+        significance_mask = pval_df.to_numpy(dtype=float) <= p_significance_level
     else:
-        min_value = 1.0
-        max_value = 1.0
+        significance_mask = np.isfinite(neg_log_p)
 
-    formatted_corr = np.where(significance_mask, corr_matrix, np.nan)
-    finite_corr = formatted_corr[np.isfinite(formatted_corr)]
-    max_text_len = max((len(f"{value:.2f}") for value in finite_corr), default=4)
-    min_area = max(900.0, 600.0 + 160.0 * max(0, max_text_len - 4))
-    max_area = min_area * 4.0
+    valid_neg_log_p = np.where(significance_mask, neg_log_p, np.nan)
+    formatted_corr = np.where(significance_mask, corr_df, np.nan)
+    formatted_corr = pd.DataFrame(formatted_corr, columns=corr_df.columns, index=corr_df.index)
+    formatted_corr = formatted_corr.map(lambda x: f'{x:.2f}' if not np.isnan(x) else np.nan)
 
-    def _scale_significance(values: np.ndarray) -> np.ndarray:
-        if not values.size:
-            return np.array([], dtype=float)
-        if not valid_values.size or math.isclose(max_value, min_value):
-            return np.full(values.shape, max_area, dtype=float)
-        normalised = (values - min_value) / (max_value - min_value)
-        return normalised * (max_area - min_area) + min_area
+    bubble_options = {
+        "label_matrix": formatted_corr,
+        "color_matrix": corr_df,
+        "cmap": "RdYlBu_r",
+        "size_label": r"$-\log_{10}(FDR)$" if _is_fdr_adjustment(p_adjust) else r"$-\log_{10}(p)$",
+        "cbar_label": rf"{method.capitalize()} correlation",
+        "bound_ticks": "both",
+        "vmin": -0.6,
+        "vmax": 0.6,
+        "output_path": output_path,
+        "output_formats": output_formats,
+        "annot_font": annot_font_config,
+        "label_font": label_font_config,
+    }
+    if bubble_kwargs is not None:
+        bubble_options.update(dict(bubble_kwargs))
 
-    bubble_sizes = np.zeros_like(neg_log_p, dtype=float)
-    if valid_values.size:
-        bubble_sizes[significance_mask] = _scale_significance(valid_values)
-
-    x_positions = np.arange(n_latents)
-    y_positions = np.arange(n_features)
-    grid_x, grid_y = np.meshgrid(x_positions, y_positions)
-    flat_mask = significance_mask.flatten()
-
-    fig_width = max(7.0, 1.4 * n_latents)
-    longest_label = max((len(label) for label in feature_labels), default=1)
-    fig_height = max(5.5, 0.45 * n_features, 0.28 * longest_label)
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    fig.subplots_adjust(bottom=0.28, right=0.78)
-
-    cmap = plt.cm.RdBu_r
-    norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
-
-    scatter = ax.scatter(
-        grid_x.flatten()[flat_mask],
-        grid_y.flatten()[flat_mask],
-        s=bubble_sizes.flatten()[flat_mask],
-        c=corr_matrix.flatten()[flat_mask],
-        cmap=cmap,
-        norm=norm,
-        edgecolors="black",
-        linewidths=0.6,
-        alpha=0.85,
+    fig, ax = plot_bubble_matrix(
+        size_matrix=pd.DataFrame(
+            valid_neg_log_p, columns=corr_df.columns, index=corr_df.index
+        ),
+        **bubble_options,
     )
-
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(latent_labels)
-    ax.tick_params(axis="x", bottom=True, top=False, labelbottom=True, labeltop=False)
-    for label in ax.get_xticklabels():
-        label.set_rotation(0)
-        label.set_ha("center")
-
-    ax.set_yticks(y_positions)
-    ax.set_yticklabels(feature_labels)
-    for label in ax.get_yticklabels():
-        label.set_rotation(0)
-        label.set_va("center")
-
-    ax.set_xlim(-0.5, n_latents - 0.5)
-    ax.set_ylim(n_features - 0.5, -0.5)
-    ax.set_aspect("equal")
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-    for row_index in range(n_features):
-        for col_index in range(n_latents):
-            if not significance_mask[row_index, col_index]:
-                continue
-            corr_value = corr_matrix[row_index, col_index]
-            if not np.isfinite(corr_value):
-                continue
-            rgba = cmap(norm(corr_value))
-            luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
-            text_colour = "white" if luminance < 0.5 else "black"
-            ax.text(
-                col_index,
-                row_index,
-                f"{corr_value:.2f}",
-                ha="center",
-                va="center",
-                fontsize=9,
-                color=text_colour,
-                fontweight="semibold",
-            )
-
-    colorbar_mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
-    cbar = fig.colorbar(
-        colorbar_mappable,
-        ax=ax,
-        orientation="horizontal",
-        fraction=0.08,
-        pad=0.12,
-    )
-    cbar.set_label(f"{method.title()} correlation", labelpad=10)
-    cbar.ax.xaxis.set_label_position("bottom")
-
-    if valid_values.size:
-        unique_count = max(1, int(np.unique(valid_values).size))
-        level_count = min(3, unique_count)
-        legend_values = np.linspace(min_value, max_value, num=level_count)
-        if np.isclose(max_value, min_value):
-            legend_values = np.array([min_value])
-        legend_sizes = _scale_significance(legend_values)
-        handles = [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="none",
-                markerfacecolor="#6c6c6c",
-                markeredgecolor="#6c6c6c",
-                alpha=0.8,
-                markersize=math.sqrt(size / math.pi) if size > 0 else 0.0,
-            )
-            for size in legend_sizes
-        ]
-        legend_labels = [f"{value:.2f}" for value in legend_values]
-        legend_title = (
-            "$-\\log_{10}(FDR)$" if use_fdr_label else "$-\\log_{10}(p)$"
-        )
-        ax.legend(
-            handles,
-            legend_labels,
-            title=legend_title,
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
-            frameon=False,
-        )
-
-    ax.set_title(title or "")
-
-    if output_path is not None:
-        formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)
-        if not formats:
-            formats = ["png"]
-        base_path = Path(output_path)
-        if base_path.suffix:
-            base_stem = base_path.with_suffix("")
-        else:
-            base_stem = base_path
-        base_stem.parent.mkdir(parents=True, exist_ok=True)
-        for fmt in formats:
-            fig.savefig(base_stem.with_suffix(f".{fmt}"), dpi=300, bbox_inches="tight")
-
+    ax.tick_params(axis='both', which='both', labelsize=label_fontsize)
+    ax.set_xticklabels(latent_labels, rotation=0, ha='center')
+    plt.setp(ax.get_xticklabels(), **label_font_config)
+    plt.setp(ax.get_yticklabels(), **label_font_config)
+    ax.set_title(title or "", fontdict=label_font_config)
+    if ax.texts:
+        plt.setp(ax.texts, **annot_font_config)
+    for extra_ax in fig.axes:
+        if extra_ax is ax:
+            continue
+        _apply_axis_font(ax, extra_ax)
     return fig, ax
 
 
@@ -1539,8 +1734,12 @@ def plot_feature_latent_correlation_heatmap(
     latent_indices: Sequence[int] | None = None,
     variable_name: Mapping[str, object] | Callable[[str], object] | None = None,
     method: str = "spearman",
-    p_adjust: str | None = "fdr_bh",
     value: str = "correlation",
+    p_adjust: str | None = "fdr_bh",
+    p_significance_level: float | None = None,
+    pvalue_notation: str = "medical",
+    vmin: float | None = None,
+    vmax: float | None = None,
     title: str | None = None,
     output_path: str | Path | None = None,
     output_formats: Sequence[str] | str = ("png",),
@@ -1548,25 +1747,112 @@ def plot_feature_latent_correlation_heatmap(
     latents: np.ndarray | None = None,
     correlations: pd.DataFrame | None = None,
     p_values: pd.DataFrame | None = None,
+    annot_font: Mapping[str, object] | None = None,
+    label_font: Mapping[str, object] | None = None,
+    heatmap_kwargs: Mapping[str, object] | None = None,
 ) -> tuple[plt.Figure, Axes]:
-    """Plot correlation heatmaps with optional p-value annotations.
+    """Render feature/latent correlation or p-value heatmaps.
 
-    Parameters mirror :func:`compute_feature_latent_correlation`. Set
-    :paramref:`value` to ``"correlation"`` (default) to annotate each cell with
-    the coefficient, or ``"pvalue"`` to print formatted p-values while colours
-    continue to reflect the signed correlations. Providing both
-    :paramref:`correlations` and :paramref:`p_values` allows reusing
-    pre-computed matrices without calling
-    :func:`compute_feature_latent_correlation` again.
+    The helper wraps :func:`compute_feature_latent_correlation` and offers a
+    heatmap view of the resulting matrices. Setting :paramref:`value` to
+    ``"correlation"`` (default) shows the coefficients on a diverging
+    ``RdBu_r`` palette centred at zero, while ``"pvalue"`` colours
+    ``-log10``-transformed p-values using ``Blues``. Existing correlation and
+    p-value matrices can be reused through :paramref:`correlations` and
+    :paramref:`p_values` to avoid recomputation.
+
+    Parameters
+    ----------
+    model : suave.model.SUAVE or compatible object
+        Fitted estimator providing an :meth:`encode` method returning latent
+        representations of ``X``.
+    X : pandas.DataFrame
+        Feature matrix aligned with the schema used during training.
+    targets : pandas.Series, pandas.DataFrame, numpy.ndarray or mapping, optional
+        Targets or predictions appended as extra rows in the correlation matrix.
+        They are concatenated with ``X`` prior to the correlation computation so
+        any structure sharing ``len(X)`` is valid.
+    target_name : str, default "target"
+        Name assigned to :paramref:`targets` when it is a one-dimensional
+        sequence without an explicit label.
+    variables : sequence of str, optional
+        Subset of feature/target columns to include. ``None`` keeps every
+        column from ``X`` and :paramref:`targets`.
+    latent_indices : sequence of int, optional
+        Indices of the latent dimensions to analyse. ``None`` uses every
+        dimension returned by :meth:`encode`.
+    variable_name : mapping or callable, optional
+        Custom mapping from feature identifiers to human-readable labels. When
+        omitted the DataFrame index is rendered verbatim.
+    method : {"spearman", "pearson", "kendall"}, default "spearman"
+        Correlation coefficient applied pairwise between features and latent
+        variables.
+    value : {"correlation", "pvalue"}, default "correlation"
+        Controls whether heatmap colours represent correlation coefficients or
+        ``-log10`` transformed p-values.
+    p_adjust : {"fdr_bh", "bonferroni", "holm", None}, default "fdr_bh"
+        Multiplicity correction applied to the correlation p-values. ``None``
+        disables any adjustment.
+    p_significance_level : float, optional
+        Maximum allowable p-value (after adjustment when enabled). Entries
+        exceeding the threshold are hidden by replacing them with ``NaN``.
+        ``None`` keeps every value.
+    pvalue_notation : {"medical", "scientific"}, default "medical"
+        Annotation style applied when :paramref:`value` is ``"pvalue"``.
+        ``"medical"`` follows biomedical reporting conventions with up to two
+        decimal places, whereas ``"scientific"`` prints values using scientific
+        notation.
+    vmin, vmax : float, optional
+        Lower and upper bounds supplied to :func:`seaborn.heatmap`.
+    title : str, optional
+        Custom title. Defaults to
+        ``"{method.title()} correlation coefficients"`` or ``"Correlation
+        p-values"`` depending on :paramref:`value`.
+    output_path : str or pathlib.Path, optional
+        File path used to persist the resulting figure. When supplied the
+        directory is created automatically.
+    output_formats : sequence of str or str, default ("png",)
+        File formats written when :paramref:`output_path` is provided. A single
+        string is treated as a singleton list. Extensions must be supported by
+        :meth:`matplotlib.figure.Figure.savefig`.
+    max_dimension : int, default 50
+        Guard rail applied when :paramref:`variables` and
+        :paramref:`latent_indices` are left unspecified. Larger matrices are
+        truncated to ``max_dimension`` in both directions with a warning.
+    latents : numpy.ndarray, optional
+        Custom latent representations overriding :meth:`encode`.
+    correlations : pandas.DataFrame, optional
+        Pre-computed correlation coefficients aligned with
+        :paramref:`p_values`.
+    p_values : pandas.DataFrame, optional
+        Pre-computed p-values aligned with :paramref:`correlations`.
+    annot_font : mapping, optional
+        Font configuration applied to the cell annotations. Defaults to
+        ``{"fontsize": 10}``.
+    label_font : mapping, optional
+        Font configuration applied to labels, ticks and the title. Defaults to
+        ``{"fontsize": 12}``.
+    heatmap_kwargs : mapping, optional
+        Additional keyword arguments forwarded to :func:`plot_matrix_heatmap`
+        for fine-grained styling control.
 
     Returns
     -------
-    tuple
-        Pair ``(figure, axis)`` exposing the Matplotlib handles for further
-        customisation.
+    fig, ax : matplotlib.figure.Figure and matplotlib.axes.Axes
+        Matplotlib handles containing the rendered heatmap.
+
+    See Also
+    --------
+    compute_feature_latent_correlation : Return the correlation and p-value
+        matrices for custom processing.
+    plot_feature_latent_correlation_bubble : Bubble-chart overview of the same
+        relationships.
+    plot_matrix_heatmap : Base heatmap utility receiving ``heatmap_kwargs``.
+    plot_bubble_matrix : Bubble-chart renderer used by the companion function.
 
     Examples
     --------
+    >>> import matplotlib.pyplot as plt
     >>> import numpy as np
     >>> import pandas as pd
     >>> class DummyModel:
@@ -1574,21 +1860,18 @@ def plot_feature_latent_correlation_heatmap(
     ...         return np.column_stack([frame["x"], frame["y"]])
     >>> frame = pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]})
     >>> fig, ax = plot_feature_latent_correlation_heatmap(DummyModel(), frame)
-    >>> ax.get_title()
-    'Spearman correlation coefficients'
-
-    See Also
-    --------
-    compute_feature_latent_correlation : Return the correlation and p-value
-        matrices for custom processing.
-    plot_feature_latent_correlation_bubble : Bubble-chart overview of correlation
-        magnitude and statistical significance.
-    plot_feature_latent_outcome_path_graph : Construct a layered path graph from
-        the same correlation inputs.
-    plot_matrix_heatmap : Low-level heatmap rendering utility.
-    plot_multilayer_path_graph : Layered path diagram connecting features,
-        latent variables and outcomes.
+    >>> plt.close(fig)
     """
+    annot_font_defaults = {"fontsize": 10}
+    label_font_defaults = {"fontsize": 12}
+    annot_font_config = dict(annot_font_defaults)
+    if annot_font is not None:
+        annot_font_config.update(dict(annot_font))
+    label_font_config = dict(label_font_defaults)
+    if label_font is not None:
+        label_font_config.update(dict(label_font))
+    annot_fontsize = annot_font_config.get("fontsize", 10)
+    label_fontsize = label_font_config.get("fontsize", 12)
 
     if correlations is None and p_values is None:
         corr_df, pval_df = compute_feature_latent_correlation(
@@ -1615,39 +1898,67 @@ def plot_feature_latent_correlation_heatmap(
     if value_lower not in {"correlation", "pvalue"}:
         raise ValueError("value must be either 'correlation' or 'pvalue'")
 
-    corr_matrix = corr_df.to_numpy(dtype=float)
-    pval_matrix = pval_df.to_numpy(dtype=float)
+    if p_significance_level is not None:
+        if not (0.0 <= p_significance_level <= 1.0):
+            raise ValueError("p_significance_level must be within [0, 1]")
+
     use_fdr_label = _is_fdr_adjustment(p_adjust)
+    corr_df = corr_df.copy()
+    pval_df = pval_df.copy()
+
+    if p_significance_level is not None:
+        significance_mask = pval_df > p_significance_level
+        corr_df = corr_df.mask(significance_mask)
+        pval_df = pval_df.mask(significance_mask)
+
     n_features, n_latents = corr_df.shape
     feature_labels = [
         _resolve_variable_label(name, variable_name) for name in corr_df.index
     ]
-    latent_labels = [fr"$z_{{{idx + 1}}}$" for idx in range(n_latents)]
+    latent_labels = [_format_latent_label_for_display(name) for name in corr_df.columns]
+
+    corr_display = corr_df.copy()
+    corr_display.index = feature_labels
+    corr_display.columns = latent_labels
+    pval_display = pval_df.copy()
+    pval_display.index = feature_labels
+    pval_display.columns = latent_labels
 
     fig_width = max(7.0, 1.2 * n_latents)
     longest_label = max((len(label) for label in feature_labels), default=1)
     fig_height = max(5.0, 0.38 * n_features, 0.26 * longest_label)
     left_margin = min(0.4, 0.18 + 0.012 * longest_label)
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    fig.subplots_adjust(left=left_margin, bottom=0.28, right=0.98)
 
     cmap = plt.cm.RdBu_r
+    heatmap_vmin: float | None = vmin
+    heatmap_vmax: float | None = vmax
+    norm: Normalize | TwoSlopeNorm | None
+
     if value_lower == "correlation":
-        color_matrix = corr_matrix
-        norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
+        cmap = plt.cm.RdBu_r
+        norm = TwoSlopeNorm(vmin=heatmap_vmin, vcenter=0.0, vmax=heatmap_vmax)
+        heatmap_data = corr_display
+        annot_matrix = corr_display.applymap(
+            lambda val: "" if not np.isfinite(val) else f"{val:.2f}"
+        )
         colorbar_label = f"{method.title()} correlation"
     else:
-        clipped = np.clip(pval_matrix, np.finfo(float).tiny, 1.0)
+        cmap = plt.cm.Blues
+        notation = pvalue_notation.lower()
+        if notation not in {"medical", "scientific"}:
+            raise ValueError("pvalue_notation must be either 'medical' or 'scientific'")
+        clipped = pval_display.clip(lower=np.finfo(float).tiny, upper=1.0)
         with np.errstate(divide="ignore"):
             neg_log = -np.log10(clipped)
-        color_matrix = np.where(np.isfinite(neg_log), neg_log, np.nan)
-        finite_values = color_matrix[np.isfinite(color_matrix)]
+        neg_log = neg_log.where(np.isfinite(neg_log))
+        heatmap_data = neg_log
+        finite_values = neg_log.to_numpy(dtype=float)
+        finite_values = finite_values[np.isfinite(finite_values)]
         if finite_values.size:
             vmin = float(np.nanmin(finite_values))
             vmax = float(np.nanmax(finite_values))
         else:
-            vmin = 0.0
-            vmax = 0.0
+            vmin = vmax = 0.0
         if not math.isfinite(vmin):
             vmin = 0.0
         if not math.isfinite(vmax):
@@ -1659,75 +1970,60 @@ def plot_feature_latent_correlation_heatmap(
                 vmin = max(0.0, vmin - 0.5)
                 vmax = vmin + 1.0
         norm = Normalize(vmin=vmin, vmax=vmax)
+        heatmap_vmin, heatmap_vmax = norm.vmin, norm.vmax
+        annot_matrix = pval_display.applymap(lambda val: _format_p_value(val, style=notation))
         colorbar_label = "$-\\log_{10}(FDR)$" if use_fdr_label else "$-\\log_{10}(p)$"
-    ax.imshow(color_matrix, cmap=cmap, norm=norm, aspect="equal")
 
-    ax.set_xticks(np.arange(n_latents))
-    ax.set_xticklabels(latent_labels)
-    ax.tick_params(axis="x", bottom=True, top=False, labelbottom=True, labeltop=False)
-    for tick in ax.get_xticklabels():
-        tick.set_rotation(0)
-        tick.set_ha("center")
+    heatmap_options = {
+        "row_height": None,
+        "cmap": cmap,
+        "cbar_label": colorbar_label,
+        "vmin": heatmap_vmin,
+        "vmax": heatmap_vmax,
+        "annot_font": annot_font_config,
+        "label_font": label_font_config,
+        "annot": annot_matrix,
+        "fmt": "",
+        "norm": norm,
+    }
+    if heatmap_kwargs is not None:
+        # heatmap_options.update(dict(heatmap_kwargs))
+        extra_options = dict(heatmap_kwargs)
+        if ("vmin" in extra_options or "vmax" in extra_options) and "norm" not in extra_options:
+            heatmap_options.pop("norm", None)
+        heatmap_options.update(extra_options)
+        
+    fig, ax = plot_matrix_heatmap(heatmap_data, **heatmap_options)
+    fig.set_size_inches(fig_width, fig_height)
+    fig.subplots_adjust(left=left_margin, bottom=0.28, right=0.98)
 
-    ax.set_yticks(np.arange(n_features))
-    ax.set_yticklabels(feature_labels)
-    for tick in ax.get_yticklabels():
-        tick.set_rotation(0)
-        tick.set_va("center")
+    ax.set_xticklabels(latent_labels, rotation=0, ha="center")
+    ax.set_yticklabels(feature_labels, rotation=0, va="center")
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.xaxis.set_label_position("top")
+    ax.xaxis.tick_top()
+    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True)
+    ax.tick_params(axis="both", which="both", labelsize=label_fontsize)
+    plt.setp(ax.get_xticklabels(), **label_font_config)
+    plt.setp(ax.get_yticklabels(), **label_font_config)
+    if ax.texts:
+        plt.setp(ax.texts, **annot_font_config)
 
-    ax.set_xlim(-0.5, n_latents - 0.5)
-    ax.set_ylim(n_features - 0.5, -0.5)
     for spine in ax.spines.values():
         spine.set_visible(False)
 
-    def _format_p_value(value: float) -> str:
-        if not np.isfinite(value):
-            return ""
-        if value < 0.001:
-            return "<0.001"
-        if value > 0.99:
-            return ">0.99"
-        if 0.001 <= value < 0.01 or 0.049 <= value <= 0.051:
-            return f"{value:.3f}"
-        return f"{value:.2f}"
+    for extra_ax in fig.axes:
+        if extra_ax is ax:
+            continue
+        _apply_axis_font(ax, extra_ax)
 
-    for row_index in range(n_features):
-        for col_index in range(n_latents):
-            color_value = color_matrix[row_index, col_index]
-            if not np.isfinite(color_value):
-                continue
-            if value_lower == "correlation":
-                text = f"{corr_matrix[row_index, col_index]:.2f}"
-            else:
-                text = _format_p_value(pval_matrix[row_index, col_index])
-                if not text:
-                    continue
-            rgba = cmap(norm(color_value))
-            luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
-            text_colour = "white" if luminance < 0.5 else "black"
-            ax.text(
-                col_index,
-                row_index,
-                text,
-                ha="center",
-                va="center",
-                fontsize=9,
-                color=text_colour,
-                fontweight="semibold",
-            )
-
-    colorbar_mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
-    cbar = fig.colorbar(
-        colorbar_mappable,
-        ax=ax,
-        orientation="horizontal",
-        fraction=0.08,
-        pad=0.12,
+    default_title = (
+        f"{method.title()} correlation coefficients"
+        if value_lower == "correlation"
+        else "Correlation p-values"
     )
-    cbar.set_label(colorbar_label, labelpad=10)
-    cbar.ax.xaxis.set_label_position("bottom")
-
-    ax.set_title(title or "")
+    ax.set_title(title or default_title, fontdict=label_font_config)
 
     if output_path is not None:
         formats = [output_formats] if isinstance(output_formats, str) else list(output_formats)
@@ -2300,7 +2596,7 @@ def plot_multilayer_path_graph(
     if colorbar_kwargs:
         cb_kwargs.update(colorbar_kwargs)
     colorbar = fig.colorbar(sm, ax=ax, **cb_kwargs)
-    colorbar.set_label(colorbar_title, fontsize=11)
+    colorbar.set_label(colorbar_title, fontsize=12)
     if colorbar.outline is not None:
         colorbar.outline.set_linewidth(0)
     for spine in colorbar.ax.spines.values():
@@ -2443,7 +2739,9 @@ def plot_feature_latent_outcome_path_graph(
         training features are missing.
     y : pandas.Series, pandas.DataFrame, numpy.ndarray or mapping, optional
         Outcome(s) correlated against the latent dimensions. Accepts the same
-        structures as :func:`compute_feature_latent_correlation`.
+        structures as :func:`compute_feature_latent_correlation` and the values
+        are appended to ``X`` prior to computing correlations, independent of
+        model predictions.
     target_name : str, default "target"
         Label applied to one-dimensional :paramref:`y` inputs lacking a name.
     latents : numpy.ndarray, optional
@@ -2573,41 +2871,13 @@ def plot_feature_latent_outcome_path_graph(
     if not feature_ids:
         raise ValueError("X must contain at least one feature column")
 
-    def _normalise_targets(
-        targets_input: pd.Series
-        | pd.DataFrame
-        | np.ndarray
-        | Mapping[str, Sequence[object]]
-        | None,
-    ) -> tuple[pd.DataFrame | None, list[str]]:
-        if targets_input is None:
-            return None, []
-        if isinstance(targets_input, pd.Series):
-            name = targets_input.name or target_name
-            frame = targets_input.to_frame(name=name)
-        elif isinstance(targets_input, pd.DataFrame):
-            frame = targets_input.copy()
-        elif isinstance(targets_input, np.ndarray):
-            if targets_input.ndim == 1:
-                frame = pd.DataFrame({target_name: targets_input})
-            elif targets_input.ndim == 2:
-                columns = [f"{target_name}_{idx}" for idx in range(targets_input.shape[1])]
-                frame = pd.DataFrame(targets_input, columns=columns)
-            else:
-                raise ValueError("y array must be one- or two-dimensional")
-        elif isinstance(targets_input, Mapping):
-            frame = pd.DataFrame(targets_input)
-        else:
-            frame = pd.DataFrame({target_name: list(targets_input)})
-
-        frame = frame.copy()
-        if len(frame) != len(X_aligned):
-            raise ValueError("y must align with X by row")
-        frame = frame.reset_index(drop=True)
-        frame.index = X_aligned.index
-        return frame, list(frame.columns)
-
-    targets_frame, target_ids = _normalise_targets(y)
+    targets_frame, target_ids = _prepare_targets_frame(
+        y,
+        target_name,
+        expected_length=len(X_aligned),
+        index=X_aligned.index,
+        align_label="y",
+    )
 
     if latents is None:
         if model is None or not hasattr(model, "encode"):
